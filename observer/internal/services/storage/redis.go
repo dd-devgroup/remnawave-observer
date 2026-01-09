@@ -309,3 +309,83 @@ func (s *RedisStore) Ping(ctx context.Context) error {
 func (s *RedisStore) Close() error {
 	return s.client.Close()
 }
+
+// --- МЕТОДЫ ДЛЯ РАБОТЫ С ASN ---
+
+// AddIPToASNMapping добавляет связь ASN -> IP для пользователя
+// Это позволяет отслеживать какие IP принадлежат каждому ASN пользователя
+func (s *RedisStore) AddIPToASNMapping(ctx context.Context, email, asn, ip string, ttl time.Duration) error {
+	key := fmt.Sprintf("user_asn_ips:%s:%s", email, asn)
+	pipe := s.client.Pipeline()
+	pipe.SAdd(ctx, key, ip)
+	pipe.Expire(ctx, key, ttl)
+	_, err := pipe.Exec(ctx)
+	return err
+}
+
+// GetIPsForUserASN возвращает все IP пользователя для данного ASN
+func (s *RedisStore) GetIPsForUserASN(ctx context.Context, email, asn string) ([]string, error) {
+	key := fmt.Sprintf("user_asn_ips:%s:%s", email, asn)
+	return s.client.SMembers(ctx, key).Result()
+}
+
+// GetAllIPsForUser возвращает все IP пользователя из всех ASN
+func (s *RedisStore) GetAllIPsForUser(ctx context.Context, email string) ([]string, error) {
+	pattern := fmt.Sprintf("user_asn_ips:%s:*", email)
+	var allIPs []string
+	var uniqueIPs = make(map[string]struct{})
+
+	iter := s.client.Scan(ctx, 0, pattern, 0).Iterator()
+	for iter.Next(ctx) {
+		key := iter.Val()
+		ips, err := s.client.SMembers(ctx, key).Result()
+		if err != nil {
+			continue
+		}
+		for _, ip := range ips {
+			uniqueIPs[ip] = struct{}{}
+		}
+	}
+
+	if err := iter.Err(); err != nil {
+		return nil, err
+	}
+
+	for ip := range uniqueIPs {
+		allIPs = append(allIPs, ip)
+	}
+
+	return allIPs, nil
+}
+
+// ClearUserASNData очищает все данные ASN и связанные IP для пользователя
+func (s *RedisStore) ClearUserASNData(ctx context.Context, email string) (int, error) {
+	// Сначала очищаем подсети (ASN используют ту же структуру)
+	deleted, err := s.ClearUserSubnets(ctx, email)
+	if err != nil {
+		return 0, err
+	}
+
+	// Затем очищаем mapping ASN -> IPs
+	pattern := fmt.Sprintf("user_asn_ips:%s:*", email)
+	iter := s.client.Scan(ctx, 0, pattern, 0).Iterator()
+	var keysToDelete []string
+
+	for iter.Next(ctx) {
+		keysToDelete = append(keysToDelete, iter.Val())
+	}
+
+	if err := iter.Err(); err != nil {
+		return deleted, err
+	}
+
+	if len(keysToDelete) > 0 {
+		delCount, err := s.client.Del(ctx, keysToDelete...).Result()
+		if err != nil {
+			return deleted, err
+		}
+		deleted += int(delCount)
+	}
+
+	return deleted, nil
+}

@@ -36,6 +36,13 @@ type Config struct {
 	UserSubnetTTL     time.Duration 
 	SubnetMaskIPv4    int           
 	ExcludedSubnets   map[string]bool 
+
+	// --- ПАРАМЕТРЫ ДЛЯ РЕЖИМА ASN ---
+	DetectByASN        bool            // Включить режим детекции по ASN
+	ASNDatabasePath    string          // Путь к файлу GeoLite2-ASN.mmdb
+	MaxASNsPerUser     int             // Лимит уникальных ASN на пользователя
+	ASNFallbackMask    int             // Маска для fallback если ASN не найден (по умолчанию 16)
+	ExcludedASNs       map[string]bool // ASN которые не считаются (например Cloudflare, Google)
 }
 
 // New загружает конфигурацию из переменных окружения.
@@ -66,11 +73,24 @@ func New() *Config {
 		MaxSubnetsPerUser: getEnvInt("MAX_SUBNETS_PER_USER", 3),
 		UserSubnetTTL:     time.Duration(getEnvInt("USER_SUBNET_TTL_SECONDS", 86400)) * time.Second,
 		SubnetMaskIPv4:    getEnvInt("SUBNET_MASK_IPV4", 24),
-		ExcludedSubnets:   parseSet(getEnv("EXCLUDED_SUBNETS", "")), // <-- НОВОЕ
+		ExcludedSubnets:   parseSet(getEnv("EXCLUDED_SUBNETS", "")),
+
+		// --- Загрузка параметров ASN ---
+		DetectByASN:     getEnvBool("DETECT_BY_ASN", false),
+		ASNDatabasePath: getEnv("ASN_DATABASE_PATH", "/app/data/GeoLite2-ASN.mmdb"),
+		MaxASNsPerUser:  getEnvInt("MAX_ASNS_PER_USER", 4),
+		ASNFallbackMask: getEnvInt("ASN_FALLBACK_MASK", 16),
+		ExcludedASNs:    parseSet(getEnv("EXCLUDED_ASNS", "")),
 	}
 
 	log.Printf("Конфигурация загружена. Порт: %s", cfg.Port)
-	if cfg.DetectBySubnet {
+	if cfg.DetectByASN {
+		log.Printf("!!! РЕЖИМ ОБНАРУЖЕНИЯ: по ASN (провайдерам). Лимит: %d провайдеров на пользователя.", cfg.MaxASNsPerUser)
+		log.Printf("    База ASN: %s, Fallback маска: /%d", cfg.ASNDatabasePath, cfg.ASNFallbackMask)
+		if len(cfg.ExcludedASNs) > 0 {
+			log.Printf("    Исключенные ASN: %d", len(cfg.ExcludedASNs))
+		}
+	} else if cfg.DetectBySubnet {
 		log.Printf("!!! РЕЖИМ ОБНАРУЖЕНИЯ: по ПОДСЕТЯМ (/%d). Лимит: %d подсетей на пользователя.", cfg.SubnetMaskIPv4, cfg.MaxSubnetsPerUser)
 	} else {
 		log.Printf("!!! РЕЖИМ ОБНАРУЖЕНИЯ: по IP-адресам. Лимит: %d IP на пользователя.", cfg.MaxIPsPerUser)
