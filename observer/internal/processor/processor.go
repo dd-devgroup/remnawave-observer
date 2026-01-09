@@ -186,10 +186,10 @@ func (p *LogProcessor) processSingleEntry(ctx context.Context, entry models.LogE
 	if p.cfg.ExcludedUsers[entry.UserEmail] {
 		return // Пользователь в списке исключений
 	}
-ASN {
+
+	if p.cfg.DetectByASN {
 		p.processEntryByASN(ctx, entry)
-	} else if p.cfg.DetectBy
-	if p.cfg.DetectBySubnet {
+	} else if p.cfg.DetectBySubnet {
 		p.processEntryBySubnet(ctx, entry)
 	} else {
 		p.processEntryByIP(ctx, entry)
