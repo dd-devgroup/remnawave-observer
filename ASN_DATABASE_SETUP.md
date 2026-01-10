@@ -57,7 +57,7 @@ ls -lh GeoLite2-ASN.mmdb
 
 ```bash
 # Создайте скрипт обновления
-cat > /opt/remnawave-observer/update_asn_db_p3terx_v2.sh <<'EOF'
+cat > /opt/remnawave-observer/update_asn_db_p3terx.sh <<'EOF'
 #!/bin/bash
 DATA_DIR="/opt/remnawave-observer/observer_conf/data"
 LOG_FILE="$DATA_DIR/asn_update.log"
@@ -80,12 +80,12 @@ fi
 echo "$(date): Update process finished" >> "$LOG_FILE"
 EOF
 
-chmod +x /opt/remnawave-observer/update_asn_db_p3terx_v2.sh
+chmod +x /opt/remnawave-observer/update_asn_db_p3terx.sh
 
 # Добавьте в crontab (каждую среду в 3:00)
 crontab -e
 # Добавьте строку:
-0 3 * * 3 /root/update_asn_db.sh
+0 3 * * 3 /root/update_asn_db_p3terx.sh
 ```
 
 ## Вариант 2: P3TERX GeoLite.mmdb (рекомендуется для быстрого старта) 🚀
