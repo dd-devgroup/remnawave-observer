@@ -1,12 +1,12 @@
 services:
   observer:
     container_name: observer
-    image: quay.io/fxfuren/remnawave-observer:0.0.2-dev
+    image: quay.io/fxfuren/remnawave-observer:0.0.3-dev
     restart: unless-stopped
     expose:
       - '9000'
     volumes:
-      - ./data:/app/data:ro # Монтируем директорию с ASN базой
+      - ./data:/app/data:ro
     env_file:
       - .env
     depends_on:
