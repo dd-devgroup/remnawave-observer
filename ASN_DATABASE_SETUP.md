@@ -136,7 +136,7 @@ fi
 echo "$(date): Update process finished" >> "$LOG_FILE"
 EOF
 
-chmod +x /root/update_asn_db_p3terx.sh
+chmod +x /opt/remnawave-observer/update_asn_db_p3terx.sh
 
 # Добавьте в crontab (каждую среду в 3:00)
 crontab -e
