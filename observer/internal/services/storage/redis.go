@@ -52,7 +52,7 @@ type IPStorage interface {
 	CheckAndAddSubnet(ctx context.Context, email, subnet string, limit int, ttl, cooldown time.Duration) (*models.CheckResult, error)
 	ClearUserSubnets(ctx context.Context, email string) (int, error)
 	GetUserActiveSubnets(ctx context.Context, userEmail string) (map[string]int, error)
-	GetUserActiveASNs(ctx context.Context, userEmail string) (map[string]int, error)
+	GetUserActiveASNs(ctx context.Context, userEmail string) (map[string]*models.ASNInfo, error)
 }
 
 // RedisStore реализует IPStorage с использованием Redis.
@@ -402,8 +402,8 @@ func (s *RedisStore) ClearUserASNData(ctx context.Context, email string) (int, e
 	return deleted, nil
 }
 
-// GetUserActiveASNs возвращает все активные ASN пользователя с их TTL
-func (s *RedisStore) GetUserActiveASNs(ctx context.Context, userEmail string) (map[string]int, error) {
+// GetUserActiveASNs возвращает все активные ASN пользователя с их TTL и IP-адресами
+func (s *RedisStore) GetUserActiveASNs(ctx context.Context, userEmail string) (map[string]*models.ASNInfo, error) {
 	// ASN хранятся в том же формате что и подсети: user_subnets:{email}
 	key := fmt.Sprintf("user_subnets:%s", userEmail)
 	asns, err := s.client.SMembers(ctx, key).Result()
@@ -411,13 +411,26 @@ func (s *RedisStore) GetUserActiveASNs(ctx context.Context, userEmail string) (m
 		return nil, err
 	}
 
-	result := make(map[string]int)
+	result := make(map[string]*models.ASNInfo)
 	for _, asn := range asns {
 		// Получаем TTL для каждого ASN
 		asnKey := fmt.Sprintf("user_subnet:%s:%s", userEmail, asn)
 		ttl, err := s.client.TTL(ctx, asnKey).Result()
-		if err == nil && ttl > 0 {
-			result[asn] = int(ttl.Seconds())
+		if err != nil || ttl <= 0 {
+			continue
+		}
+
+		// Получаем IP-адреса для этого ASN
+		ipsKey := fmt.Sprintf("user_asn_ips:%s:%s", userEmail, asn)
+		ips, err := s.client.SMembers(ctx, ipsKey).Result()
+		if err != nil {
+			ips = []string{}
+		}
+
+		result[asn] = &models.ASNInfo{
+			ASN:        asn,
+			TTLSeconds: int(ttl.Seconds()),
+			IPs:        ips,
 		}
 	}
 

@@ -29,6 +29,14 @@ type UserIPStats struct {
 	HasAlertCooldown bool     `json:"has_alert_cooldown"`
 	IsExcluded       bool     `json:"excluded"`
 	IsDebug          bool     `json:"is_debug"`
+	ASNDetails       map[string]*ASNInfo `json:"asn_details,omitempty"` // Детали по каждому ASN (для ASN режима)
+}
+
+// ASNInfo содержит информацию об ASN и связанных IP-адресах
+type ASNInfo struct {
+	ASN        string   `json:"asn"`
+	TTLSeconds int      `json:"ttl_seconds"`
+	IPs        []string `json:"ips"`
 }
 
 // BlockMessage представляет сообщение для отправки в очередь на блокировку.
