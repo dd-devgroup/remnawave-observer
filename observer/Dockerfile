@@ -11,10 +11,16 @@ RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-w -s" -o observer_service ./cmd
 
 FROM alpine:3.22
 
+RUN apk --no-cache add ca-certificates tzdata
+
 WORKDIR /app
+
+# Создаем директорию для данных (ASN база будет монтироваться через volume)
+RUN mkdir -p /app/data
 
 COPY --from=builder /app/observer_service .
 
 COPY --from=builder /app/internal/scripts/add_and_check_ip.lua ./internal/scripts/add_and_check_ip.lua
+COPY --from=builder /app/internal/scripts/add_and_check_subnet.lua ./internal/scripts/add_and_check_subnet.lua
 
 CMD ["/app/observer_service"]
