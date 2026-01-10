@@ -80,6 +80,9 @@ func (m *PoolMonitor) performMonitoring(ctx context.Context) {
 }
 
 func (m *PoolMonitor) getMonitoringModeName() string {
+	if m.cfg.DetectByASN {
+		return "ASN POOLS"
+	}
 	if m.cfg.DetectBySubnet {
 		return "SUBNET POOLS"
 	}
@@ -87,6 +90,9 @@ func (m *PoolMonitor) getMonitoringModeName() string {
 }
 
 func (m *PoolMonitor) buildUserStats(ctx context.Context, email string) (*models.UserIPStats, error) {
+	if m.cfg.DetectByASN {
+		return m.buildUserStatsByASN(ctx, email)
+	}
 	if m.cfg.DetectBySubnet {
 		return m.buildUserStatsBySubnet(ctx, email)
 	}
@@ -189,6 +195,57 @@ func (m *PoolMonitor) buildUserStatsBySubnet(ctx context.Context, email string) 
 	}, nil
 }
 
+func (m *PoolMonitor) buildUserStatsByASN(ctx context.Context, email string) (*models.UserIPStats, error) {
+	activeASNs, err := m.storage.GetUserActiveASNs(ctx, email)
+	if err != nil {
+		return nil, err
+	}
+	if len(activeASNs) == 0 {
+		return nil, nil
+	}
+	userLimit := m.getUserLimit(email)
+	itemCount := len(activeASNs)
+	status := "NORMAL"
+	if float64(itemCount) >= float64(userLimit)*0.8 {
+		status = "NEAR_LIMIT"
+	}
+	if itemCount > userLimit {
+		status = "OVER_LIMIT"
+	}
+	hasCooldown, _ := m.storage.HasAlertCooldown(ctx, email)
+	var items, itemsWithTTL []string
+	var ttlValues []int
+
+	// Собираем ASN и их TTL
+	for asn, info := range activeASNs {
+		items = append(items, asn)
+		itemsWithTTL = append(itemsWithTTL, fmt.Sprintf("%s(%.1fh)[%d IPs]", asn, float64(info.TTLSeconds)/3600.0, len(info.IPs)))
+		ttlValues = append(ttlValues, info.TTLSeconds)
+	}
+	sort.Strings(items)
+	sort.Strings(itemsWithTTL)
+	minTTL, maxTTL := 0.0, 0.0
+	if len(ttlValues) > 0 {
+		sort.Ints(ttlValues)
+		minTTL = float64(ttlValues[0]) / 3600.0
+		maxTTL = float64(ttlValues[len(ttlValues)-1]) / 3600.0
+	}
+	return &models.UserIPStats{
+		Email:            email,
+		IPCount:          itemCount,
+		Limit:            userLimit,
+		IPs:              items,
+		IPsWithTTL:       itemsWithTTL,
+		MinTTLHours:      math.Round(minTTL*10) / 10,
+		MaxTTLHours:      math.Round(maxTTL*10) / 10,
+		Status:           status,
+		HasAlertCooldown: hasCooldown,
+		IsExcluded:       m.cfg.ExcludedUsers[email],
+		IsDebug:          m.cfg.DebugEmail != "" && email == m.cfg.DebugEmail,
+		ASNDetails:       activeASNs,
+	}, nil
+}
+
 func (m *PoolMonitor) printSummary(stats []models.UserIPStats) {
 	var total, nearLimit, overLimit, excluded, debug int
 	total = len(stats)
@@ -218,7 +275,11 @@ func (m *PoolMonitor) printSummary(stats []models.UserIPStats) {
 
 func (m *PoolMonitor) printTopUsers(stats []models.UserIPStats) {
 	var title, itemLabel, itemsLabel string
-	if m.cfg.DetectBySubnet {
+	if m.cfg.DetectByASN {
+		title = "📈 ТОП ПОЛЬЗОВАТЕЛИ ПО КОЛИЧЕСТВУ ПРОВАЙДЕРОВ (ASN):"
+		itemLabel = "Провайдеры"
+		itemsLabel = "ASNs"
+	} else if m.cfg.DetectBySubnet {
 		title = "📈 ТОП ПОЛЬЗОВАТЕЛИ ПО КОЛИЧЕСТВУ ПОДСЕТЕЙ:"
 		itemLabel = "Подсети"
 		itemsLabel = "Подсети"
@@ -237,6 +298,20 @@ func (m *PoolMonitor) printTopUsers(stats []models.UserIPStats) {
 		fmt.Printf("   %2d. %s %s%s\n", i+1, getStatusEmoji(user.Status), user.Email, getMarkers(user))
 		fmt.Printf("       %s: %d/%d | TTL: %.1f-%.1fh\n", itemLabel, user.IPCount, user.Limit, user.MinTTLHours, user.MaxTTLHours)
 		fmt.Printf("       %s: %s\n", itemsLabel, strings.Join(user.IPsWithTTL, ", "))
+
+		// Для ASN режима показываем детали IP под каждым провайдером
+		if m.cfg.DetectByASN && user.ASNDetails != nil && len(user.ASNDetails) > 0 {
+			fmt.Println("       └─ Детали IP по провайдерам:")
+			asnKeys := make([]string, 0, len(user.ASNDetails))
+			for asn := range user.ASNDetails {
+				asnKeys = append(asnKeys, asn)
+			}
+			sort.Strings(asnKeys)
+			for _, asn := range asnKeys {
+				info := user.ASNDetails[asn]
+				fmt.Printf("          • %s: %d IP -> %s\n", asn, len(info.IPs), strings.Join(info.IPs, ", "))
+			}
+		}
 	}
 }
 
@@ -249,7 +324,10 @@ func (m *PoolMonitor) printOverLimitUsers(stats []models.UserIPStats) {
 	}
 	if len(overLimitUsers) > 0 {
 		var itemLabel, itemsLabel string
-		if m.cfg.DetectBySubnet {
+		if m.cfg.DetectByASN {
+			itemLabel = "Провайдеры"
+			itemsLabel = "ASNs"
+		} else if m.cfg.DetectBySubnet {
 			itemLabel = "Подсети"
 			itemsLabel = "Подсети"
 		} else {
@@ -261,6 +339,20 @@ func (m *PoolMonitor) printOverLimitUsers(stats []models.UserIPStats) {
 			fmt.Printf("   • %s%s\n", user.Email, getMarkers(user))
 			fmt.Printf("     %s: %d/%d | TTL: %.1f-%.1fh\n", itemLabel, user.IPCount, user.Limit, user.MinTTLHours, user.MaxTTLHours)
 			fmt.Printf("     %s: %s\n", itemsLabel, strings.Join(user.IPsWithTTL, ", "))
+
+			// Для ASN режима показываем детали IP
+			if m.cfg.DetectByASN && user.ASNDetails != nil && len(user.ASNDetails) > 0 {
+				fmt.Println("     └─ Детали IP по провайдерам:")
+				asnKeys := make([]string, 0, len(user.ASNDetails))
+				for asn := range user.ASNDetails {
+					asnKeys = append(asnKeys, asn)
+				}
+				sort.Strings(asnKeys)
+				for _, asn := range asnKeys {
+					info := user.ASNDetails[asn]
+					fmt.Printf("        • %s: %d IP -> %s\n", asn, len(info.IPs), strings.Join(info.IPs, ", "))
+				}
+			}
 		}
 	}
 }
@@ -268,6 +360,9 @@ func (m *PoolMonitor) printOverLimitUsers(stats []models.UserIPStats) {
 func (m *PoolMonitor) getUserLimit(userEmail string) int {
 	if m.cfg.DebugEmail != "" && userEmail == m.cfg.DebugEmail {
 		return m.cfg.DebugIPLimit
+	}
+	if m.cfg.DetectByASN {
+		return m.cfg.MaxASNsPerUser
 	}
 	if m.cfg.DetectBySubnet {
 		return m.cfg.MaxSubnetsPerUser

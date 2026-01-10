@@ -15,6 +15,7 @@ import (
 	"observer_service/internal/monitor"
 	"observer_service/internal/processor"
 	"observer_service/internal/services/alerter"
+	"observer_service/internal/services/asn"
 	"observer_service/internal/services/publisher"
 	"observer_service/internal/services/storage"
 )
@@ -43,7 +44,18 @@ func main() {
 
 	webhookAlerter := alerter.NewWebhookAlerter(cfg.AlertWebhookURL)
 
-	logProcessor := processor.NewLogProcessor(redisStore, rabbitPublisher, webhookAlerter, cfg)
+	// Инициализация ASN lookup сервиса (опционально)
+	var asnLookup *asn.ASNLookup
+	if cfg.DetectByASN {
+		asnLookup, err = asn.NewASNLookup(cfg.ASNDatabasePath)
+		if err != nil {
+			log.Fatalf("Критическая ошибка: не удалось загрузить ASN базу: %v", err)
+		}
+		defer asnLookup.Close()
+		log.Println("✅ ASN режим активирован и готов к работе")
+	}
+
+	logProcessor := processor.NewLogProcessor(redisStore, rabbitPublisher, webhookAlerter, cfg, asnLookup)
 	poolMonitor := monitor.NewPoolMonitor(redisStore, cfg)
 	apiServer := api.NewServer(cfg.Port, logProcessor, redisStore, rabbitPublisher)
 

@@ -2,14 +2,14 @@ services:
   blocker-xray:
     container_name: blocker-xray
     hostname: blocker-xray
-    image: quay.io/0fl01/blocker-xray-go:0.0.6
+    image: quay.io/fxfuren/remnawave-blocker:0.0.1-dev
     restart: unless-stopped
     network_mode: host
     logging:
-      driver: "json-file"
+      driver: 'json-file'
       options:
-        max-size: "8m"
-        max-file: "5"
+        max-size: '8m'
+        max-file: '5'
     env_file:
       - .env
     cap_add:
@@ -26,8 +26,7 @@ services:
           memory: 32M
           cpus: '0.10'
 
-
-# Ниже "пример" настройки ноды под self steal, но вам главное требуется настроить логирование и vector согласно примеру ниже:
+  # Ниже "пример" настройки ноды под self steal, но вам главное требуется настроить логирование и vector согласно примеру ниже:
   remnanode:
     container_name: remnanode
     hostname: remnanode
@@ -35,15 +34,15 @@ services:
     restart: unless-stopped
     network_mode: host
     logging:
-      driver: "json-file"
+      driver: 'json-file'
       options:
-        max-size: "8m"
-        max-file: "5"
+        max-size: '8m'
+        max-file: '5'
     env_file:
       - .env
     volumes:
-      - /dev/shm:/dev/shm:rw    
-      - /var/log/remnanode:/var/log/remnanode      # <------- Важный параметр, отсюда обсервер берёт метрики по клиентам
+      - /dev/shm:/dev/shm:rw
+      - /var/log/remnanode:/var/log/remnanode # <------- Важный параметр, отсюда обсервер берёт метрики по клиентам
 
   vector:
     image: timberio/vector:0.48.0-alpine
@@ -51,17 +50,17 @@ services:
     hostname: vector
     restart: unless-stopped
     network_mode: host
-    command: ["--config", "/etc/vector/vector.toml"]
+    command: ['--config', '/etc/vector/vector.toml']
     depends_on:
       - remnanode
     volumes:
       - ./vector/vector.toml:/etc/vector/vector.toml:ro
       - /var/log/remnanode:/var/log/remnanode:ro
     logging:
-      driver: "json-file"
+      driver: 'json-file'
       options:
-        max-size: "8m"
-        max-file: "3"
+        max-size: '8m'
+        max-file: '3'
     deploy:
       resources:
         limits:

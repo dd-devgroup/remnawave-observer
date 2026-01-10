@@ -52,6 +52,7 @@ type IPStorage interface {
 	CheckAndAddSubnet(ctx context.Context, email, subnet string, limit int, ttl, cooldown time.Duration) (*models.CheckResult, error)
 	ClearUserSubnets(ctx context.Context, email string) (int, error)
 	GetUserActiveSubnets(ctx context.Context, userEmail string) (map[string]int, error)
+	GetUserActiveASNs(ctx context.Context, userEmail string) (map[string]*models.ASNInfo, error)
 }
 
 // RedisStore реализует IPStorage с использованием Redis.
@@ -265,24 +266,35 @@ func (s *RedisStore) GetUserActiveSubnets(ctx context.Context, userEmail string)
 func (s *RedisStore) GetAllUserEmails(ctx context.Context) ([]string, error) {
 	var cursor uint64
 	emailSet := make(map[string]struct{})
-	for {
-		var keys []string
-		var err error
-		// Сканируем по общему паттерну, чтобы захватить и IP, и подсети
-		keys, cursor, err = s.client.Scan(ctx, cursor, "user_*s:*", 50).Result()
-		if err != nil {
-			return nil, fmt.Errorf("ошибка при сканировании ключей (SCAN): %w", err)
-		}
-		for _, key := range keys {
-			parts := strings.SplitN(key, ":", 2)
-			if len(parts) == 2 {
-				emailSet[parts[1]] = struct{}{}
+
+	// Сканируем по нескольким паттернам для поддержки всех режимов
+	patterns := []string{
+		"user_ips:*",     // Режим по IP
+		"user_subnets:*", // Режим по подсетям и ASN
+	}
+
+	for _, pattern := range patterns {
+		cursor = 0
+		for {
+			var keys []string
+			var err error
+			keys, cursor, err = s.client.Scan(ctx, cursor, pattern, 100).Result()
+			if err != nil {
+				return nil, fmt.Errorf("ошибка при сканировании ключей по паттерну %s: %w", pattern, err)
+			}
+			for _, key := range keys {
+				// Извлекаем email из ключа вида "user_ips:email" или "user_subnets:email"
+				parts := strings.SplitN(key, ":", 2)
+				if len(parts) == 2 {
+					emailSet[parts[1]] = struct{}{}
+				}
+			}
+			if cursor == 0 {
+				break
 			}
 		}
-		if cursor == 0 {
-			break
-		}
 	}
+
 	emails := make([]string, 0, len(emailSet))
 	for email := range emailSet {
 		emails = append(emails, email)
@@ -308,4 +320,119 @@ func (s *RedisStore) Ping(ctx context.Context) error {
 // Close закрывает соединение с Redis.
 func (s *RedisStore) Close() error {
 	return s.client.Close()
+}
+
+// --- МЕТОДЫ ДЛЯ РАБОТЫ С ASN ---
+
+// AddIPToASNMapping добавляет связь ASN -> IP для пользователя
+// Это позволяет отслеживать какие IP принадлежат каждому ASN пользователя
+func (s *RedisStore) AddIPToASNMapping(ctx context.Context, email, asn, ip string, ttl time.Duration) error {
+	key := fmt.Sprintf("user_asn_ips:%s:%s", email, asn)
+	pipe := s.client.Pipeline()
+	pipe.SAdd(ctx, key, ip)
+	pipe.Expire(ctx, key, ttl)
+	_, err := pipe.Exec(ctx)
+	return err
+}
+
+// GetIPsForUserASN возвращает все IP пользователя для данного ASN
+func (s *RedisStore) GetIPsForUserASN(ctx context.Context, email, asn string) ([]string, error) {
+	key := fmt.Sprintf("user_asn_ips:%s:%s", email, asn)
+	return s.client.SMembers(ctx, key).Result()
+}
+
+// GetAllIPsForUser возвращает все IP пользователя из всех ASN
+func (s *RedisStore) GetAllIPsForUser(ctx context.Context, email string) ([]string, error) {
+	pattern := fmt.Sprintf("user_asn_ips:%s:*", email)
+	var allIPs []string
+	var uniqueIPs = make(map[string]struct{})
+
+	iter := s.client.Scan(ctx, 0, pattern, 0).Iterator()
+	for iter.Next(ctx) {
+		key := iter.Val()
+		ips, err := s.client.SMembers(ctx, key).Result()
+		if err != nil {
+			continue
+		}
+		for _, ip := range ips {
+			uniqueIPs[ip] = struct{}{}
+		}
+	}
+
+	if err := iter.Err(); err != nil {
+		return nil, err
+	}
+
+	for ip := range uniqueIPs {
+		allIPs = append(allIPs, ip)
+	}
+
+	return allIPs, nil
+}
+
+// ClearUserASNData очищает все данные ASN и связанные IP для пользователя
+func (s *RedisStore) ClearUserASNData(ctx context.Context, email string) (int, error) {
+	// Сначала очищаем подсети (ASN используют ту же структуру)
+	deleted, err := s.ClearUserSubnets(ctx, email)
+	if err != nil {
+		return 0, err
+	}
+
+	// Затем очищаем mapping ASN -> IPs
+	pattern := fmt.Sprintf("user_asn_ips:%s:*", email)
+	iter := s.client.Scan(ctx, 0, pattern, 0).Iterator()
+	var keysToDelete []string
+
+	for iter.Next(ctx) {
+		keysToDelete = append(keysToDelete, iter.Val())
+	}
+
+	if err := iter.Err(); err != nil {
+		return deleted, err
+	}
+
+	if len(keysToDelete) > 0 {
+		delCount, err := s.client.Del(ctx, keysToDelete...).Result()
+		if err != nil {
+			return deleted, err
+		}
+		deleted += int(delCount)
+	}
+
+	return deleted, nil
+}
+
+// GetUserActiveASNs возвращает все активные ASN пользователя с их TTL и IP-адресами
+func (s *RedisStore) GetUserActiveASNs(ctx context.Context, userEmail string) (map[string]*models.ASNInfo, error) {
+	// ASN хранятся в том же формате что и подсети: user_subnets:{email}
+	key := fmt.Sprintf("user_subnets:%s", userEmail)
+	asns, err := s.client.SMembers(ctx, key).Result()
+	if err != nil {
+		return nil, err
+	}
+
+	result := make(map[string]*models.ASNInfo)
+	for _, asn := range asns {
+		// Получаем TTL для каждого ASN
+		asnKey := fmt.Sprintf("subnet_ttl:%s:%s", userEmail, asn)
+		ttl, err := s.client.TTL(ctx, asnKey).Result()
+		if err != nil || ttl <= 0 {
+			continue
+		}
+
+		// Получаем IP-адреса для этого ASN
+		ipsKey := fmt.Sprintf("user_asn_ips:%s:%s", userEmail, asn)
+		ips, err := s.client.SMembers(ctx, ipsKey).Result()
+		if err != nil {
+			ips = []string{}
+		}
+
+		result[asn] = &models.ASNInfo{
+			ASN:        asn,
+			TTLSeconds: int(ttl.Seconds()),
+			IPs:        ips,
+		}
+	}
+
+	return result, nil
 }

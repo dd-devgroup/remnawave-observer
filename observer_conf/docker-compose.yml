@@ -1,10 +1,12 @@
 services:
   observer:
     container_name: observer
-    image: quay.io/0fl01/observer-xray-go:0.0.19
+    image: quay.io/fxfuren/remnawave-observer:0.0.3-dev
     restart: unless-stopped
     expose:
-      - "9000"
+      - '9000'
+    volumes:
+      - ./data:/app/data:ro
     env_file:
       - .env
     depends_on:
@@ -19,16 +21,16 @@ services:
     logging:
       driver: json-file
       options:
-        max-size: "8m"
-        max-file: "3"
+        max-size: '8m'
+        max-file: '3'
 
   rabbitmq:
     image: rabbitmq:4.1.2-management-alpine
     container_name: rabbimq-xray
     restart: unless-stopped
     ports:
-      - "5672:5672"
-      - "15672:15672"
+      - '5672:5672'
+      - '15672:15672'
     volumes:
       - rabbitmq-data:/var/lib/rabbitmq
     environment:
@@ -37,7 +39,7 @@ services:
     networks:
       - observer-net
     healthcheck:
-      test: ["CMD", "rabbitmq-diagnostics", "ping"]
+      test: ['CMD', 'rabbitmq-diagnostics', 'ping']
       interval: 10s
       timeout: 5s
       retries: 5
@@ -50,22 +52,22 @@ services:
     volumes:
       - ./vector.toml:/etc/vector/vector.toml:ro
     expose:
-      - "8686"
-    command: ["--config", "/etc/vector/vector.toml"]
+      - '8686'
+    command: ['--config', '/etc/vector/vector.toml']
     networks:
       - observer-net
     logging:
       driver: json-file
       options:
-        max-size: "8m"
-        max-file: "3"
+        max-size: '8m'
+        max-file: '3'
 
   nginx:
     image: nginx:mainline-alpine
     container_name: nginx-proxy
     restart: unless-stopped
     ports:
-      - "38213:443"
+      - '38213:443'
     volumes:
       - ./nginx.conf:/etc/nginx/conf.d/default.conf:ro
       - /etc/letsencrypt:/etc/letsencrypt:ro
@@ -76,15 +78,15 @@ services:
     logging:
       driver: json-file
       options:
-        max-size: "8m"
-        max-file: "3"
+        max-size: '8m'
+        max-file: '3'
 
   redis:
     image: redis:8.2-m01-alpine3.22
     container_name: redis
     restart: unless-stopped
     expose:
-      - "6379"
+      - '6379'
     volumes:
       - redis-data:/data
     networks:
@@ -92,8 +94,8 @@ services:
     logging:
       driver: json-file
       options:
-        max-size: "8m"
-        max-file: "3"
+        max-size: '8m'
+        max-file: '3'
 
 networks:
   observer-net:
