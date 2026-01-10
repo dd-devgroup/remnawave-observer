@@ -57,35 +57,29 @@ ls -lh GeoLite2-ASN.mmdb
 
 ```bash
 # Создайте скрипт обновления
-cat > /opt/remnawave-observer/update_asn_db_p3terx.sh <<'EOF'
+cat > /root/update_asn_db.sh << 'EOF'
 #!/bin/bash
-DATA_DIR="/opt/remnawave-observer/observer_conf/data"
-LOG_FILE="$DATA_DIR/asn_update.log"
+LICENSE_KEY="YOUR_LICENSE_KEY"
+DATA_DIR="/path/to/observer_conf/data"
 
-cd "$DATA_DIR" || exit 1
+cd "$DATA_DIR"
+wget "https://download.maxmind.com/app/geoip_download?edition_id=GeoLite2-ASN&license_key=$LICENSE_KEY&suffix=tar.gz" -O GeoLite2-ASN.tar.gz
+tar -xzf GeoLite2-ASN.tar.gz
+mv GeoLite2-ASN_*/GeoLite2-ASN.mmdb .
+rm -rf GeoLite2-ASN_* GeoLite2-ASN.tar.gz
 
-echo "$(date): Starting ASN update" >> "$LOG_FILE"
+# Перезапустите observer для применения обновления
+docker restart observer
 
-wget -O GeoLite2-ASN.mmdb.new "https://github.com/P3TERX/GeoLite.mmdb/raw/download/GeoLite2-ASN.mmdb"
-
-if [ -s GeoLite2-ASN.mmdb.new ]; then
-    mv GeoLite2-ASN.mmdb.new GeoLite2-ASN.mmdb
-    docker restart observer-remna
-    echo "$(date): ASN database updated from P3TERX successfully" >> "$LOG_FILE"
-else
-    echo "$(date): Failed to download ASN database (file empty or missing)" >> "$LOG_FILE"
-    rm -f GeoLite2-ASN.mmdb.new
-fi
-
-echo "$(date): Update process finished" >> "$LOG_FILE"
+echo "ASN database updated: $(date)" >> /var/log/asn_update.log
 EOF
 
-chmod +x /opt/remnawave-observer/update_asn_db_p3terx.sh
+chmod +x /root/update_asn_db.sh
 
 # Добавьте в crontab (каждую среду в 3:00)
 crontab -e
 # Добавьте строку:
-0 3 * * 3 /root/update_asn_db_p3terx.sh
+0 3 * * 3 /root/update_asn_db.sh
 ```
 
 ## Вариант 2: P3TERX GeoLite.mmdb (рекомендуется для быстрого старта) 🚀
@@ -119,24 +113,27 @@ ls -lh GeoLite2-ASN.mmdb
 
 ```bash
 # Создайте скрипт обновления
-cat > /root/update_asn_db_p3terx.sh << 'EOF'
+cat > /opt/remnawave-observer/update_asn_db_p3terx.sh <<'EOF'
 #!/bin/bash
-DATA_DIR="/path/to/observer_conf/data"
+DATA_DIR="/opt/remnawave-observer/observer_conf/data"
+LOG_FILE="$DATA_DIR/asn_update.log"
 
-cd "$DATA_DIR"
+cd "$DATA_DIR" || exit 1
 
-# Скачиваем новую версию
-wget -O GeoLite2-ASN.mmdb.new https://github.com/P3TERX/GeoLite.mmdb/raw/download/GeoLite2-ASN.mmdb
+echo "$(date): Starting ASN update" >> "$LOG_FILE"
 
-# Проверяем что файл скачан и не пустой
+wget -O GeoLite2-ASN.mmdb.new "https://github.com/P3TERX/GeoLite.mmdb/raw/download/GeoLite2-ASN.mmdb"
+
 if [ -s GeoLite2-ASN.mmdb.new ]; then
     mv GeoLite2-ASN.mmdb.new GeoLite2-ASN.mmdb
-    docker restart observer
-    echo "ASN database updated from P3TERX: $(date)" >> /var/log/asn_update.log
+    docker restart observer-remna
+    echo "$(date): ASN database updated from P3TERX successfully" >> "$LOG_FILE"
 else
-    echo "Failed to download ASN database: $(date)" >> /var/log/asn_update.log
+    echo "$(date): Failed to download ASN database (file empty or missing)" >> "$LOG_FILE"
     rm -f GeoLite2-ASN.mmdb.new
 fi
+
+echo "$(date): Update process finished" >> "$LOG_FILE"
 EOF
 
 chmod +x /root/update_asn_db_p3terx.sh
@@ -144,7 +141,7 @@ chmod +x /root/update_asn_db_p3terx.sh
 # Добавьте в crontab (каждую среду в 3:00)
 crontab -e
 # Добавьте строку:
-0 3 * * 3 /root/update_asn_db_p3terx.sh
+0 3 * * 3 /opt/remnawave-observer/update_asn_db_p3terx.sh
 ```
 
 ### Примечание о частоте обновлений
