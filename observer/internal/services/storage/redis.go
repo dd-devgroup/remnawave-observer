@@ -266,24 +266,35 @@ func (s *RedisStore) GetUserActiveSubnets(ctx context.Context, userEmail string)
 func (s *RedisStore) GetAllUserEmails(ctx context.Context) ([]string, error) {
 	var cursor uint64
 	emailSet := make(map[string]struct{})
-	for {
-		var keys []string
-		var err error
-		// Сканируем по общему паттерну, чтобы захватить и IP, и подсети
-		keys, cursor, err = s.client.Scan(ctx, cursor, "user_*s:*", 50).Result()
-		if err != nil {
-			return nil, fmt.Errorf("ошибка при сканировании ключей (SCAN): %w", err)
-		}
-		for _, key := range keys {
-			parts := strings.SplitN(key, ":", 2)
-			if len(parts) == 2 {
-				emailSet[parts[1]] = struct{}{}
+
+	// Сканируем по нескольким паттернам для поддержки всех режимов
+	patterns := []string{
+		"user_ips:*",     // Режим по IP
+		"user_subnets:*", // Режим по подсетям и ASN
+	}
+
+	for _, pattern := range patterns {
+		cursor = 0
+		for {
+			var keys []string
+			var err error
+			keys, cursor, err = s.client.Scan(ctx, cursor, pattern, 100).Result()
+			if err != nil {
+				return nil, fmt.Errorf("ошибка при сканировании ключей по паттерну %s: %w", pattern, err)
+			}
+			for _, key := range keys {
+				// Извлекаем email из ключа вида "user_ips:email" или "user_subnets:email"
+				parts := strings.SplitN(key, ":", 2)
+				if len(parts) == 2 {
+					emailSet[parts[1]] = struct{}{}
+				}
+			}
+			if cursor == 0 {
+				break
 			}
 		}
-		if cursor == 0 {
-			break
-		}
 	}
+
 	emails := make([]string, 0, len(emailSet))
 	for email := range emailSet {
 		emails = append(emails, email)
