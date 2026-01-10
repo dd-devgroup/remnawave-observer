@@ -414,7 +414,7 @@ func (s *RedisStore) GetUserActiveASNs(ctx context.Context, userEmail string) (m
 	result := make(map[string]*models.ASNInfo)
 	for _, asn := range asns {
 		// Получаем TTL для каждого ASN
-		asnKey := fmt.Sprintf("user_subnet:%s:%s", userEmail, asn)
+		asnKey := fmt.Sprintf("subnet_ttl:%s:%s", userEmail, asn)
 		ttl, err := s.client.TTL(ctx, asnKey).Result()
 		if err != nil || ttl <= 0 {
 			continue
