@@ -232,9 +232,10 @@ func (p *LogProcessor) processEntryByIP(ctx context.Context, entry models.LogEnt
 			}
 		}
 
+		ipCount := int(res.CurrentCount)
 		alertPayload := models.AlertPayload{
 			UserIdentifier:   entry.UserEmail,
-			DetectedIPsCount: int(res.CurrentCount),
+			DetectedIPsCount: &ipCount,
 			Limit:            userIPLimit,
 			AllUserIPs:       res.AllUserItems,
 			BlockDuration:    p.cfg.BlockDuration,
@@ -294,9 +295,10 @@ func (p *LogProcessor) processEntryBySubnet(ctx context.Context, entry models.Lo
 			}
 		}
 
+		subnetCount := int(res.CurrentCount)
 		alertPayload := models.AlertPayload{
 			UserIdentifier:   entry.UserEmail,
-			DetectedIPsCount: int(res.CurrentCount),
+			DetectedIPsCount: &subnetCount,
 			Limit:            userSubnetLimit,
 			AllUserIPs:       res.AllUserItems, // В алерт отправляем все подсети, даже исключенные
 			BlockDuration:    p.cfg.BlockDuration,
@@ -498,19 +500,76 @@ func (p *LogProcessor) processEntryByASN(ctx context.Context, entry models.LogEn
 		}
 
 		alertPayload := models.AlertPayload{
-			UserIdentifier:   entry.UserEmail,
-			DetectedIPsCount: int(res.CurrentCount),
-			Limit:            userASNLimit,
-			AllUserIPs:       res.AllUserItems, // Здесь будут ASN или подсети
-			BlockDuration:    p.cfg.BlockDuration,
-			ViolationType:    violationType,
+			UserIdentifier: entry.UserEmail,
+			Limit:          userASNLimit,
+			BlockDuration:  p.cfg.BlockDuration,
+			ViolationType:  violationType,
 		}
+
+		// Заполняем специфичные поля в зависимости от типа идентификатора
+		if identifierType == "ASN" {
+			// Для ASN режима: только ASN-специфичные поля
+			asnCount := int(res.CurrentCount)
+			alertPayload.DetectedASNCount = &asnCount
+			alertPayload.AllUserASNs = res.AllUserItems
+			alertPayload.ASNDetails = p.collectASNDetails(ctx, entry.UserEmail, res.AllUserItems)
+		} else {
+			// Для Subnet fallback: используем IP-поля
+			subnetCount := int(res.CurrentCount)
+			alertPayload.DetectedIPsCount = &subnetCount
+			alertPayload.AllUserIPs = res.AllUserItems
+		}
+
 		p.enqueueSideEffectTask(func() {
 			if err := p.alerter.SendAlert(alertPayload); err != nil {
 				log.Printf("Ошибка отправки вебхук-уведомления: %v", err)
 			}
 		})
 	}
+}
+
+// collectASNDetails собирает детали по каждому ASN (организация, IP, количество)
+func (p *LogProcessor) collectASNDetails(ctx context.Context, email string, asns []string) map[string]*models.ASNInfo {
+	result := make(map[string]*models.ASNInfo)
+
+	for _, asn := range asns {
+		// Пропускаем не-ASN идентификаторы (подсети)
+		if len(asn) < 2 || asn[:2] != "AS" {
+			continue
+		}
+
+		// Получаем IP-адреса для этого ASN
+		ips, err := p.storage.(*storage.RedisStore).GetIPsForUserASN(ctx, email, asn)
+		if err != nil {
+			log.Printf("Ошибка получения IP для ASN %s пользователя %s: %v", asn, email, err)
+			continue
+		}
+
+		// Получаем название организации для ASN
+		org := ""
+		if p.asnLookup != nil {
+			// Извлекаем номер ASN (убираем префикс "AS")
+			asnNumber := asn[2:]
+			// Проверяем организацию через lookup (используем первый IP из списка)
+			if len(ips) > 0 {
+				_, orgName, err := p.asnLookup.LookupWithOrg(ips[0])
+				if err == nil {
+					org = orgName
+				}
+			}
+			// Альтернативно: можно было бы хранить org_name в Redis при первом lookup
+			_ = asnNumber // На случай если понадобится другой способ получения org
+		}
+
+		result[asn] = &models.ASNInfo{
+			ASN:          asn,
+			Organization: org,
+			IPs:          ips,
+			IPCount:      len(ips),
+		}
+	}
+
+	return result
 }
 
 // collectIPsForASNBlock собирает все IP-адреса для блокировки на основе ASN/подсетей

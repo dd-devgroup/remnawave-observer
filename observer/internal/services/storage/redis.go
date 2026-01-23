@@ -431,6 +431,7 @@ func (s *RedisStore) GetUserActiveASNs(ctx context.Context, userEmail string) (m
 			ASN:        asn,
 			TTLSeconds: int(ttl.Seconds()),
 			IPs:        ips,
+			IPCount:    len(ips),
 		}
 	}
 

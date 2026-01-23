@@ -8,12 +8,19 @@ type LogEntry struct {
 
 // AlertPayload представляет данные для отправки в вебхук.
 type AlertPayload struct {
-	UserIdentifier   string   `json:"user_identifier"`
-	DetectedIPsCount int      `json:"detected_ips_count"` // Может содержать кол-во IP или подсетей
-	Limit            int      `json:"limit"`
-	AllUserIPs       []string `json:"all_user_ips"` // Может содержать IP или подсети
-	BlockDuration    string   `json:"block_duration"`
-	ViolationType    string `json:"violation_type"`
+	UserIdentifier   string                `json:"user_identifier"`
+	Limit            int                   `json:"limit"`
+	BlockDuration    string                `json:"block_duration"`
+	ViolationType    string                `json:"violation_type"`
+
+	// Поля для режима по IP и подсетям (violation_type: ip_limit_exceeded, subnet_limit_exceeded)
+	DetectedIPsCount *int                  `json:"detected_ips_count,omitempty"` // Кол-во IP/подсетей
+	AllUserIPs       []string              `json:"all_user_ips,omitempty"`       // Список IP/подсетей
+
+	// Поля для режима по ASN (violation_type: asn_limit_exceeded)
+	DetectedASNCount *int                  `json:"detected_asn_count,omitempty"` // Количество уникальных провайдеров (ASN)
+	AllUserASNs      []string              `json:"all_user_asns,omitempty"`      // Список ASN (например: ["AS31133", "AS3267"])
+	ASNDetails       map[string]*ASNInfo   `json:"asn_details,omitempty"`        // Детальная информация по каждому ASN
 }
 
 // UserIPStats содержит статистику по IP-адресам пользователя для мониторинга.
@@ -34,9 +41,11 @@ type UserIPStats struct {
 
 // ASNInfo содержит информацию об ASN и связанных IP-адресах
 type ASNInfo struct {
-	ASN        string   `json:"asn"`
-	TTLSeconds int      `json:"ttl_seconds"`
-	IPs        []string `json:"ips"`
+	ASN          string   `json:"asn"`
+	Organization string   `json:"organization,omitempty"` // Название провайдера
+	TTLSeconds   int      `json:"ttl_seconds"`
+	IPs          []string `json:"ips"`
+	IPCount      int      `json:"ip_count"` // Количество IP в этом ASN
 }
 
 // BlockMessage представляет сообщение для отправки в очередь на блокировку.

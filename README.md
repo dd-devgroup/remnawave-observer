@@ -465,14 +465,80 @@ _Пример для режима по подсетям:_
 }
 ```
 
+_Пример для режима по ASN (провайдерам):_
+
+```json
+{
+	"user_identifier": "54_217217281",
+	"limit": 5,
+	"block_duration": "10m",
+	"violation_type": "asn_limit_exceeded",
+	"detected_asn_count": 6,
+	"all_user_asns": ["AS31133", "AS3267", "AS16345", "AS204587", "AS39264", "AS202527"],
+	"asn_details": {
+		"AS31133": {
+			"asn": "AS31133",
+			"organization": "MTS PJSC",
+			"ips": ["185.22.64.15", "91.108.4.22"],
+			"ip_count": 2
+		},
+		"AS3267": {
+			"asn": "AS3267",
+			"organization": "RTK-NET",
+			"ips": ["178.154.0.10"],
+			"ip_count": 1
+		},
+		"AS16345": {
+			"asn": "AS16345",
+			"organization": "SKNT Ltd",
+			"ips": ["5.45.192.5", "5.45.192.8"],
+			"ip_count": 2
+		},
+		"AS204587": {
+			"asn": "AS204587",
+			"organization": "Kherson Online LLC",
+			"ips": ["194.67.113.20"],
+			"ip_count": 1
+		},
+		"AS39264": {
+			"asn": "AS39264",
+			"organization": "NovaTelecom",
+			"ips": ["93.88.10.15"],
+			"ip_count": 1
+		},
+		"AS202527": {
+			"asn": "AS202527",
+			"organization": "INET-TELECOM",
+			"ips": ["46.0.192.30"],
+			"ip_count": 1
+		}
+	}
+}
+```
+
+**Описание полей:**
+
+**Общие поля (для всех режимов):**
 - `user_identifier`: Идентификатор пользователя (его username).
-- `detected_ips_count`: Общее количество уникальных IP или подсетей, обнаруженных у пользователя.
-- `limit`: Установленный лимит IP/подсетей для этого пользователя.
-- `all_user_ips`: Список всех IP-адресов или подсетей (в формате CIDR, например `185.22.64.0/24`), которые были заблокированы.
+- `limit`: Установленный лимит IP/подсетей/провайдеров для этого пользователя.
 - `block_duration`: На какой срок была применена блокировка.
 - `violation_type`: Тип нарушения:
   - `ip_limit_exceeded` — превышен лимит IP-адресов (режим по IP)
   - `subnet_limit_exceeded` — превышен лимит подсетей (режим по подсетям)
+  - `asn_limit_exceeded` — превышен лимит провайдеров (режим по ASN)
+
+**Для режима по IP и подсетям:**
+- `detected_ips_count`: Количество уникальных IP-адресов или подсетей.
+- `all_user_ips`: Список всех IP-адресов или подсетей в формате CIDR (например `185.22.64.0/24`).
+
+**Для режима по ASN (провайдерам):**
+- `detected_asn_count`: Количество уникальных провайдеров (ASN).
+- `all_user_asns`: Список всех ASN (например `["AS31133", "AS3267"]`).
+- `asn_details`: Детальная информация по каждому провайдеру:
+  - `asn`: Номер автономной системы (например, `AS31133`)
+  - `organization`: Название провайдера/организации (например, `MTS PJSC`)
+  - `ips`: Список конкретных IP-адресов пользователя в этом ASN
+  - `ip_count`: Количество IP-адресов в этом ASN
 
 #### Как подключить к вашему Telegram-боту?
 
@@ -500,7 +566,9 @@ ALERT_WEBHOOK_URL=https://bot.yourdomain.com/webhook/alert
 Когда бот получает вебхук, его код должен:
 
 1.  Прочитать и распарсить JSON-тело запроса.
-2.  Извлечь из него нужные данные (`user_identifier`, `detected_ips_count` и т.д.).
+2.  Извлечь из него нужные данные в зависимости от `violation_type`:
+    - Для IP/подсетей: `user_identifier`, `detected_ips_count`, `all_user_ips`
+    - Для ASN: `user_identifier`, `detected_asn_count`, `all_user_asns`, `asn_details`
 3.  Сформировать сообщение для администратора и отправить его в нужный чат.
 
 **Примеры сообщений, которые может сформировать ваш бот:**
@@ -520,6 +588,44 @@ _Режим по подсетям (`violation_type: subnet_limit_exceeded`):_
 > **Пользователь:** `15_327832732` > **Превышен лимит подсетей:** **4 / 3**
 >
 > Все подсети пользователя заблокированы на **5m**.
+
+_Режим по ASN - провайдерам (`violation_type: asn_limit_exceeded`):_
+
+> 🚨 **#alert**
+> ➖➖➖➖➖➖➖➖➖
+> 👤 **Пользователь:** `8`
+> 🆔 **Telegram ID:** `6291657833`
+> 📡 **Превышен лимит провайдеров:** **6 / 5**
+> ⏱️ **Заблокировано на:** `10m`
+>
+> 🖧 **Детали по провайдерам:**
+> • **AS31133** (MTS PJSC) - 2 IP: 185.22.64.15, 91.108.4.22
+> • **AS3267** (RTK-NET) - 1 IP: 178.154.0.10
+> • **AS16345** (SKNT Ltd) - 2 IP: 5.45.192.5, 5.45.192.8
+> • **AS204587** (Kherson Online LLC) - 1 IP: 194.67.113.20
+> • **AS39264** (NovaTelecom) - 1 IP: 93.88.10.15
+> • **AS202527** (INET-TELECOM) - 1 IP: 46.0.192.30
+>
+> ⚠️ **Тип нарушения:** `asn_limit_exceeded`
+
+**Пример кода для формирования сообщения ASN режима (Python):**
+```python
+if payload['violation_type'] == 'asn_limit_exceeded':
+    asn_count = payload['detected_asn_count']
+    limit = payload['limit']
+    message = f"🚨 #alert\n"
+    message += f"➖➖➖➖➖➖➖➖➖\n"
+    message += f"👤 Пользователь: {payload['user_identifier']}\n"
+    message += f"📡 Превышен лимит провайдеров: {asn_count} / {limit}\n"
+    message += f"⏱️ Заблокировано на: {payload['block_duration']}\n\n"
+    message += f"🖧 Детали по провайдерам:\n"
+
+    for asn, details in payload['asn_details'].items():
+        org = details.get('organization', 'Unknown')
+        ip_count = details['ip_count']
+        ips = ', '.join(details['ips'])
+        message += f"• {asn} ({org}) - {ip_count} IP: {ips}\n"
+```
 
 **Шаг 4: (Опционально) Интеграция с логикой бота**
 
