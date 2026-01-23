@@ -21,7 +21,7 @@ type LogProcessor struct {
 	publisher         publisher.EventPublisher
 	alerter           alerter.Notifier
 	cfg               *config.Config
-	asnLookup         *asn.ASNLookup // Сервис для lookup ASN
+	asnLookup         *asn.ASNLookup         // Сервис для lookup ASN
 	logChannel        chan []models.LogEntry // Канал для получения пачек логов
 	sideEffectChannel chan func()            // Канал для побочных задач (алерты, очистка)
 
@@ -415,7 +415,7 @@ func (p *LogProcessor) processEntryByASN(ctx context.Context, entry models.LogEn
 		} else {
 			// Логируем для дебага, но продолжаем с fallback
 			if err != nil {
-				log.Printf("Не удалось определить ASN для IP %s (пользователь %s): %v. Используем fallback.", 
+				log.Printf("Не удалось определить ASN для IP %s (пользователь %s): %v. Используем fallback.",
 					entry.SourceIP, entry.UserEmail, err)
 			}
 		}
@@ -483,7 +483,7 @@ func (p *LogProcessor) processEntryByASN(ctx context.Context, entry models.LogEn
 			if err := p.publisher.PublishBlockMessage(ipsToBlock, p.cfg.BlockDuration); err != nil {
 				log.Printf("Ошибка отправки сообщения о блокировке: %v", err)
 			} else {
-				log.Printf("✅ Сообщение о блокировке %d элементов для %s%s отправлено (тип: %s)", 
+				log.Printf("✅ Сообщение о блокировке %d элементов для %s%s отправлено (тип: %s)",
 					len(ipsToBlock), entry.UserEmail, debugMarker, identifierType)
 				p.enqueueSideEffectTask(func() {
 					p.scheduleASNClear(ctx, entry.UserEmail)
