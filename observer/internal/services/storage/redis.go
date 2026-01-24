@@ -402,6 +402,25 @@ func (s *RedisStore) ClearUserASNData(ctx context.Context, email string) (int, e
 	return deleted, nil
 }
 
+// SetASNOrgName кеширует название организации для ASN
+func (s *RedisStore) SetASNOrgName(ctx context.Context, asn, orgName string, ttl time.Duration) error {
+	if orgName == "" {
+		return nil // Не кешируем пустые названия
+	}
+	key := fmt.Sprintf("asn_org:%s", asn)
+	return s.client.Set(ctx, key, orgName, ttl).Err()
+}
+
+// GetASNOrgName получает закешированное название организации для ASN
+func (s *RedisStore) GetASNOrgName(ctx context.Context, asn string) (string, error) {
+	key := fmt.Sprintf("asn_org:%s", asn)
+	result, err := s.client.Get(ctx, key).Result()
+	if err == redis.Nil {
+		return "", nil // Нет в кеше - не ошибка
+	}
+	return result, err
+}
+
 // GetUserActiveASNs возвращает все активные ASN пользователя с их TTL и IP-адресами
 func (s *RedisStore) GetUserActiveASNs(ctx context.Context, userEmail string) (map[string]*models.ASNInfo, error) {
 	// ASN хранятся в том же формате что и подсети: user_subnets:{email}
@@ -427,11 +446,18 @@ func (s *RedisStore) GetUserActiveASNs(ctx context.Context, userEmail string) (m
 			ips = []string{}
 		}
 
+		// Получаем название организации из кеша
+		org, _ := s.GetASNOrgName(ctx, asn)
+		if org == "" {
+			org = "Unknown"
+		}
+
 		result[asn] = &models.ASNInfo{
-			ASN:        asn,
-			TTLSeconds: int(ttl.Seconds()),
-			IPs:        ips,
-			IPCount:    len(ips),
+			ASN:          asn,
+			Organization: org,
+			TTLSeconds:   int(ttl.Seconds()),
+			IPs:          ips,
+			IPCount:      len(ips),
 		}
 	}
 

@@ -400,6 +400,8 @@ func (p *LogProcessor) processEntryByASN(ctx context.Context, entry models.LogEn
 	var identifierType string
 	var orgName string
 
+	redisStore := p.storage.(*storage.RedisStore)
+
 	// Пытаемся получить ASN для IP
 	if p.asnLookup != nil {
 		asnStr, org, err := p.asnLookup.LookupWithOrg(entry.SourceIP)
@@ -412,6 +414,13 @@ func (p *LogProcessor) processEntryByASN(ctx context.Context, entry models.LogEn
 			identifier = asnStr
 			identifierType = "ASN"
 			orgName = org
+
+			// Кешируем название организации для последующего использования
+			if org != "" {
+				if err := redisStore.SetASNOrgName(ctx, asnStr, org, p.cfg.UserSubnetTTL); err != nil {
+					log.Printf("Ошибка кеширования org для ASN %s: %v", asnStr, err)
+				}
+			}
 		} else {
 			// Логируем для дебага, но продолжаем с fallback
 			if err != nil {
@@ -437,10 +446,12 @@ func (p *LogProcessor) processEntryByASN(ctx context.Context, entry models.LogEn
 	userASNLimit := p.cfg.MaxASNsPerUser
 	debugMarker := p.getDebugMarker(entry.UserEmail)
 
-	// Сохраняем связь ASN -> IP для последующей блокировки
+	// ВАЖНО: Сохраняем связь ASN -> IP ДО проверки лимита
+	// Это гарантирует что IP будет в Redis когда мы соберём данные для блокировки
 	if identifierType == "ASN" {
-		if err := p.storage.(*storage.RedisStore).AddIPToASNMapping(ctx, entry.UserEmail, identifier, entry.SourceIP, p.cfg.UserSubnetTTL); err != nil {
-			log.Printf("Ошибка сохранения связи ASN->IP для %s: %v", entry.UserEmail, err)
+		if err := redisStore.AddIPToASNMapping(ctx, entry.UserEmail, identifier, entry.SourceIP, p.cfg.UserSubnetTTL); err != nil {
+			log.Printf("Ошибка сохранения связи ASN->IP для %s: %v. Пропускаем обработку.", entry.UserEmail, err)
+			return // Прерываем если не удалось сохранить IP - иначе ASN будет без IP
 		}
 	}
 
@@ -470,7 +481,8 @@ func (p *LogProcessor) processEntryByASN(ctx context.Context, entry models.LogEn
 			identifierType, debugMarker, entry.UserEmail, res.CurrentCount, userASNLimit)
 
 		// Собираем все IP-адреса для блокировки
-		ipsToBlock := p.collectIPsForASNBlock(ctx, entry.UserEmail, res.AllUserItems)
+		// Передаём текущий IP чтобы гарантировать его включение даже если Redis ещё не обновился
+		ipsToBlock := p.collectIPsForASNBlock(ctx, entry.UserEmail, res.AllUserItems, entry.SourceIP)
 
 		// Фильтруем исключенные подсети/IP
 		if identifierType == "Subnet" {
@@ -512,7 +524,8 @@ func (p *LogProcessor) processEntryByASN(ctx context.Context, entry models.LogEn
 			asnCount := int(res.CurrentCount)
 			alertPayload.DetectedASNCount = &asnCount
 			alertPayload.AllUserASNs = res.AllUserItems
-			alertPayload.ASNDetails = p.collectASNDetails(ctx, entry.UserEmail, res.AllUserItems)
+			// Передаём текущий ASN и IP для гарантированного включения в детали
+			alertPayload.ASNDetails = p.collectASNDetails(ctx, entry.UserEmail, res.AllUserItems, identifier, entry.SourceIP)
 		} else {
 			// Для Subnet fallback: используем IP-поля
 			subnetCount := int(res.CurrentCount)
@@ -529,8 +542,10 @@ func (p *LogProcessor) processEntryByASN(ctx context.Context, entry models.LogEn
 }
 
 // collectASNDetails собирает детали по каждому ASN (организация, IP, количество)
-func (p *LogProcessor) collectASNDetails(ctx context.Context, email string, asns []string) map[string]*models.ASNInfo {
+// currentASN и currentIP - текущий ASN и IP для гарантированного включения в результат
+func (p *LogProcessor) collectASNDetails(ctx context.Context, email string, asns []string, currentASN, currentIP string) map[string]*models.ASNInfo {
 	result := make(map[string]*models.ASNInfo)
+	redisStore := p.storage.(*storage.RedisStore)
 
 	for _, asn := range asns {
 		// Пропускаем не-ASN идентификаторы (подсети)
@@ -539,26 +554,48 @@ func (p *LogProcessor) collectASNDetails(ctx context.Context, email string, asns
 		}
 
 		// Получаем IP-адреса для этого ASN
-		ips, err := p.storage.(*storage.RedisStore).GetIPsForUserASN(ctx, email, asn)
+		ips, err := redisStore.GetIPsForUserASN(ctx, email, asn)
 		if err != nil {
 			log.Printf("Ошибка получения IP для ASN %s пользователя %s: %v", asn, email, err)
-			continue
+			ips = []string{} // Продолжаем с пустым списком вместо пропуска
+		}
+
+		// Если это текущий ASN и текущий IP не в списке - добавляем
+		if asn == currentASN && currentIP != "" {
+			found := false
+			for _, ip := range ips {
+				if ip == currentIP {
+					found = true
+					break
+				}
+			}
+			if !found {
+				ips = append(ips, currentIP)
+			}
 		}
 
 		// Получаем название организации для ASN
-		org := ""
-		if p.asnLookup != nil {
-			// Извлекаем номер ASN (убираем префикс "AS")
-			asnNumber := asn[2:]
-			// Проверяем организацию через lookup (используем первый IP из списка)
-			if len(ips) > 0 {
-				_, orgName, err := p.asnLookup.LookupWithOrg(ips[0])
-				if err == nil {
-					org = orgName
+		// Сначала пробуем из кеша Redis
+		org, err := redisStore.GetASNOrgName(ctx, asn)
+		if err != nil {
+			log.Printf("Ошибка получения org из кеша для ASN %s: %v", asn, err)
+		}
+
+		// Если в кеше нет - пробуем через lookup по первому IP
+		if org == "" && p.asnLookup != nil && len(ips) > 0 {
+			_, orgName, err := p.asnLookup.LookupWithOrg(ips[0])
+			if err == nil && orgName != "" {
+				org = orgName
+				// Сохраняем в кеш для будущего использования
+				if cacheErr := redisStore.SetASNOrgName(ctx, asn, orgName, p.cfg.UserSubnetTTL); cacheErr != nil {
+					log.Printf("Ошибка кеширования org для ASN %s: %v", asn, cacheErr)
 				}
 			}
-			// Альтернативно: можно было бы хранить org_name в Redis при первом lookup
-			_ = asnNumber // На случай если понадобится другой способ получения org
+		}
+
+		// Если org всё ещё пустой - ставим fallback
+		if org == "" {
+			org = "Unknown"
 		}
 
 		result[asn] = &models.ASNInfo{
@@ -573,14 +610,27 @@ func (p *LogProcessor) collectASNDetails(ctx context.Context, email string, asns
 }
 
 // collectIPsForASNBlock собирает все IP-адреса для блокировки на основе ASN/подсетей
-func (p *LogProcessor) collectIPsForASNBlock(ctx context.Context, email string, identifiers []string) []string {
+// currentIP - текущий IP для гарантированного включения в результат
+func (p *LogProcessor) collectIPsForASNBlock(ctx context.Context, email string, identifiers []string, currentIP string) []string {
 	var result []string
 	seenIPs := make(map[string]struct{})
+	redisStore := p.storage.(*storage.RedisStore)
+
+	// Сначала добавляем текущий IP чтобы гарантировать его блокировку
+	if currentIP != "" {
+		seenIPs[currentIP] = struct{}{}
+		result = append(result, currentIP)
+	}
 
 	for _, item := range identifiers {
-		// Если это ASN (AS12345) - получаем все IP этого ASN
+		// Проверяем не в списке ли исключённых ASN
 		if len(item) > 2 && item[:2] == "AS" {
-			ips, err := p.storage.(*storage.RedisStore).GetIPsForUserASN(ctx, email, item)
+			if p.cfg.ExcludedASNs[item] {
+				log.Printf("ASN %s в списке исключённых, пропускаем при сборе IP для блокировки", item)
+				continue
+			}
+
+			ips, err := redisStore.GetIPsForUserASN(ctx, email, item)
 			if err != nil {
 				log.Printf("Ошибка получения IP для ASN %s пользователя %s: %v", item, email, err)
 				continue
