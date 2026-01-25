@@ -40,6 +40,20 @@ end
 return redis.call('DEL', unpack(keysToDelete))
 `
 
+// Скрипт для атомарной очистки всех ключей ASN пользователя.
+const clearUserASNsScript = `
+local asns = redis.call('SMEMBERS', KEYS[1])
+if #asns == 0 then
+    return redis.call('DEL', KEYS[1])
+end
+local keysToDelete = { KEYS[1] }
+local prefix = ARGV[1]
+for i, asn in ipairs(asns) do
+    table.insert(keysToDelete, prefix .. ':' .. asn)
+end
+return redis.call('DEL', unpack(keysToDelete))
+`
+
 // IPStorage определяет интерфейс для работы с хранилищем IP-адресов.
 type IPStorage interface {
 	CheckAndAddIP(ctx context.Context, email, ip string, limit int, ttl, cooldown time.Duration) (*models.CheckResult, error)
@@ -62,6 +76,8 @@ type RedisStore struct {
 	clearIPsScriptSHA       string
 	addCheckSubnetScriptSHA string
 	clearSubnetsScriptSHA   string
+	addCheckASNScriptSHA    string
+	clearASNsScriptSHA      string
 }
 
 // NewRedisStore создает новый экземпляр RedisStore.
@@ -102,6 +118,20 @@ func NewRedisStore(ctx context.Context, redisURL string, scriptPaths ...string) 
 	if err != nil {
 		return nil, fmt.Errorf("ошибка загрузки Lua-скрипта (clear subnet) в Redis: %w", err)
 	}
+	// Загрузка скрипта проверки и добавления ASN из файла
+	addCheckASNScript, err := os.ReadFile("internal/scripts/add_and_check_asn.lua")
+	if err != nil {
+		return nil, fmt.Errorf("ошибка чтения Lua-скрипта 'add_and_check_asn.lua': %w", err)
+	}
+	addCheckASNScriptSHA, err := client.ScriptLoad(ctx, string(addCheckASNScript)).Result()
+	if err != nil {
+		return nil, fmt.Errorf("ошибка загрузки Lua-скрипта (add/check asn) в Redis: %w", err)
+	}
+	// Загрузка скрипта атомарной очистки ASN из константы
+	clearASNsScriptSHA, err := client.ScriptLoad(ctx, clearUserASNsScript).Result()
+	if err != nil {
+		return nil, fmt.Errorf("ошибка загрузки Lua-скрипта (clear asn) в Redis: %w", err)
+	}
 	log.Println("Успешное подключение к Redis и загрузка Lua-скриптов.")
 	return &RedisStore{
 		client:                  client,
@@ -109,6 +139,8 @@ func NewRedisStore(ctx context.Context, redisURL string, scriptPaths ...string) 
 		clearIPsScriptSHA:       clearIPsScriptSHA,
 		addCheckSubnetScriptSHA: addCheckSubnetScriptSHA,
 		clearSubnetsScriptSHA:   clearSubnetsScriptSHA,
+		addCheckASNScriptSHA:    addCheckASNScriptSHA,
+		clearASNsScriptSHA:      clearASNsScriptSHA,
 	}, nil
 }
 
@@ -142,6 +174,23 @@ func (s *RedisStore) CheckAndAddSubnet(ctx context.Context, email, subnet string
 	result, err := s.client.EvalSha(ctx, s.addCheckSubnetScriptSHA, []string{userSubnetsSetKey, alertSentKey}, args...).Result()
 	if err != nil {
 		return nil, fmt.Errorf("ошибка выполнения Lua-скрипта (subnet) для %s: %w", email, err)
+	}
+	return parseCheckResult(result, email)
+}
+
+// CheckAndAddASN выполняет Lua-скрипт для атомарной проверки и добавления ASN с фильтрацией "мертвых" ASN.
+func (s *RedisStore) CheckAndAddASN(ctx context.Context, email, asn string, limit int, ttl, cooldown time.Duration) (*models.CheckResult, error) {
+	userASNsSetKey := fmt.Sprintf("user_asns:%s", email)
+	alertSentKey := fmt.Sprintf("alert_sent:%s", email)
+	args := []interface{}{
+		asn,
+		int(ttl.Seconds()),
+		limit,
+		int(cooldown.Seconds()),
+	}
+	result, err := s.client.EvalSha(ctx, s.addCheckASNScriptSHA, []string{userASNsSetKey, alertSentKey}, args...).Result()
+	if err != nil {
+		return nil, fmt.Errorf("ошибка выполнения Lua-скрипта (asn) для %s: %w", email, err)
 	}
 	return parseCheckResult(result, email)
 }
@@ -270,7 +319,8 @@ func (s *RedisStore) GetAllUserEmails(ctx context.Context) ([]string, error) {
 	// Сканируем по нескольким паттернам для поддержки всех режимов
 	patterns := []string{
 		"user_ips:*",     // Режим по IP
-		"user_subnets:*", // Режим по подсетям и ASN
+		"user_subnets:*", // Режим по подсетям
+		"user_asns:*",    // Режим по ASN
 	}
 
 	for _, pattern := range patterns {
@@ -372,10 +422,16 @@ func (s *RedisStore) GetAllIPsForUser(ctx context.Context, email string) ([]stri
 
 // ClearUserASNData очищает все данные ASN и связанные IP для пользователя
 func (s *RedisStore) ClearUserASNData(ctx context.Context, email string) (int, error) {
-	// Сначала очищаем подсети (ASN используют ту же структуру)
-	deleted, err := s.ClearUserSubnets(ctx, email)
+	// Очищаем ASN используя специальный скрипт
+	userASNsKey := fmt.Sprintf("user_asns:%s", email)
+	asnTtlPrefix := fmt.Sprintf("asn_ttl:%s", email)
+	deleted, err := s.client.EvalSha(ctx, s.clearASNsScriptSHA, []string{userASNsKey}, asnTtlPrefix).Int64()
 	if err != nil {
-		return 0, err
+		if err == redis.Nil {
+			deleted = 0
+		} else {
+			return 0, fmt.Errorf("ошибка выполнения Lua-скрипта (clear asn) для %s: %w", email, err)
+		}
 	}
 
 	// Затем очищаем mapping ASN -> IPs
@@ -388,18 +444,18 @@ func (s *RedisStore) ClearUserASNData(ctx context.Context, email string) (int, e
 	}
 
 	if err := iter.Err(); err != nil {
-		return deleted, err
+		return int(deleted), err
 	}
 
 	if len(keysToDelete) > 0 {
 		delCount, err := s.client.Del(ctx, keysToDelete...).Result()
 		if err != nil {
-			return deleted, err
+			return int(deleted), err
 		}
-		deleted += int(delCount)
+		deleted += delCount
 	}
 
-	return deleted, nil
+	return int(deleted), nil
 }
 
 // SetASNOrgName кеширует название организации для ASN
@@ -423,8 +479,8 @@ func (s *RedisStore) GetASNOrgName(ctx context.Context, asn string) (string, err
 
 // GetUserActiveASNs возвращает все активные ASN пользователя с их TTL и IP-адресами
 func (s *RedisStore) GetUserActiveASNs(ctx context.Context, userEmail string) (map[string]*models.ASNInfo, error) {
-	// ASN хранятся в том же формате что и подсети: user_subnets:{email}
-	key := fmt.Sprintf("user_subnets:%s", userEmail)
+	// ASN хранятся в отдельном множестве: user_asns:{email}
+	key := fmt.Sprintf("user_asns:%s", userEmail)
 	asns, err := s.client.SMembers(ctx, key).Result()
 	if err != nil {
 		return nil, err
@@ -433,7 +489,7 @@ func (s *RedisStore) GetUserActiveASNs(ctx context.Context, userEmail string) (m
 	result := make(map[string]*models.ASNInfo)
 	for _, asn := range asns {
 		// Получаем TTL для каждого ASN
-		asnKey := fmt.Sprintf("subnet_ttl:%s:%s", userEmail, asn)
+		asnKey := fmt.Sprintf("asn_ttl:%s:%s", userEmail, asn)
 		ttl, err := s.client.TTL(ctx, asnKey).Result()
 		if err != nil || ttl <= 0 {
 			continue

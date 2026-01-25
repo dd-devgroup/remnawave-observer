@@ -455,8 +455,15 @@ func (p *LogProcessor) processEntryByASN(ctx context.Context, entry models.LogEn
 		}
 	}
 
-	// Используем тот же механизм CheckAndAddSubnet, так как структура идентична
-	res, err := p.storage.CheckAndAddSubnet(ctx, entry.UserEmail, identifier, userASNLimit, p.cfg.UserSubnetTTL, p.cfg.AlertCooldown)
+	// Для ASN используем специальный метод CheckAndAddASN с фильтрацией "мертвых" ASN
+	// Для Subnet fallback используем стандартный CheckAndAddSubnet
+	var res *models.CheckResult
+	var err error
+	if identifierType == "ASN" {
+		res, err = redisStore.CheckAndAddASN(ctx, entry.UserEmail, identifier, userASNLimit, p.cfg.UserSubnetTTL, p.cfg.AlertCooldown)
+	} else {
+		res, err = p.storage.CheckAndAddSubnet(ctx, entry.UserEmail, identifier, userASNLimit, p.cfg.UserSubnetTTL, p.cfg.AlertCooldown)
+	}
 	if err != nil {
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			log.Printf("Операция CheckAndAdd%s отменена для %s: %v", identifierType, entry.UserEmail, err)
