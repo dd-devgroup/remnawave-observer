@@ -8,8 +8,8 @@
 -- Добавляем новый ASN в множество
 local isNewASN = redis.call('SADD', KEYS[1], ARGV[1])
 
--- Извлекаем email из ключа KEYS[1] (user_asns: -> 11 символов)
-local userEmail = string.sub(KEYS[1], 12)
+-- Извлекаем email из ключа KEYS[1] (user_asns: -> 10 символов)
+local userEmail = string.sub(KEYS[1], 11)
 -- Формируем ключ для TTL
 local asnTtlKey = 'asn_ttl:' .. userEmail .. ':' .. ARGV[1]
 redis.call('SETEX', asnTtlKey, ARGV[2], '1')
