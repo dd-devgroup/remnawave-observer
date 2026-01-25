@@ -48,7 +48,24 @@ end
 -- Обновляем TTL множества на основе максимального TTL активных ASN
 -- Это гарантирует, что множество само не истечет пока есть активные ASN
 if #activeASNs > 0 then
-    redis.call('EXPIRE', KEYS[1], ARGV[2])
+    -- Находим максимальный TTL среди всех активных ASN
+    local maxTTL = 0
+    for i, asn in ipairs(activeASNs) do
+        local asnKey = 'asn_ttl:' .. userEmail .. ':' .. asn
+        local ttl = redis.call('TTL', asnKey)
+        if ttl > maxTTL then
+            maxTTL = ttl
+        end
+    end
+
+    -- Устанавливаем TTL множества равным максимальному TTL + небольшой запас
+    -- Это гарантирует что множество не истечет пока есть хоть один активный ASN
+    if maxTTL > 0 then
+        redis.call('EXPIRE', KEYS[1], maxTTL + 60)
+    else
+        -- Fallback если не смогли получить TTL
+        redis.call('EXPIRE', KEYS[1], ARGV[2])
+    end
 else
     -- Если нет активных ASN - удаляем само множество
     redis.call('DEL', KEYS[1])
