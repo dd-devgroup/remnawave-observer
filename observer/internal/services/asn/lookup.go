@@ -1,112 +1,76 @@
 package asn
 
 import (
+	"context"
 	"fmt"
 	"log"
-	"net"
-	"sync"
-
-	"github.com/oschwald/maxminddb-golang"
+	"time"
 )
 
-// ASNRecord структура записи в базе MaxMind GeoLite2 ASN
-type ASNRecord struct {
-	AutonomousSystemNumber       uint   `maxminddb:"autonomous_system_number"`
-	AutonomousSystemOrganization string `maxminddb:"autonomous_system_organization"`
-}
-
 // ASNLookup сервис для определения ASN по IP-адресу
+// Использует базу данных iptoasn.com с автоматическим обновлением
 type ASNLookup struct {
-	db     *maxminddb.Reader
-	mu     sync.RWMutex
-	dbPath string
+	db      *IPtoASNDatabase
+	updater *ASNUpdater
 }
 
 // NewASNLookup создает новый экземпляр сервиса ASN lookup
-func NewASNLookup(dbPath string) (*ASNLookup, error) {
-	db, err := maxminddb.Open(dbPath)
-	if err != nil {
-		return nil, fmt.Errorf("не удалось открыть ASN базу %s: %w", dbPath, err)
+// downloadURL - URL для скачивания базы (пустая строка = default)
+// updateInterval - интервал обновления (0 = default 1 час)
+func NewASNLookup(downloadURL string, updateInterval time.Duration) (*ASNLookup, error) {
+	db := NewIPtoASNDatabase()
+	updater := NewASNUpdater(db, downloadURL, updateInterval)
+
+	// Запускаем загрузку базы и фоновое обновление
+	ctx := context.Background()
+	if err := updater.Start(ctx); err != nil {
+		return nil, fmt.Errorf("не удалось инициализировать ASN lookup: %w", err)
 	}
 
-	log.Printf("✅ ASN база успешно загружена: %s", dbPath)
-	return &ASNLookup{db: db, dbPath: dbPath}, nil
+	log.Printf("ASN lookup сервис инициализирован (источник: iptoasn.com)")
+	return &ASNLookup{
+		db:      db,
+		updater: updater,
+	}, nil
 }
 
 // Lookup возвращает ASN и имя организации для IP-адреса
 func (a *ASNLookup) Lookup(ipStr string) (uint, string, error) {
-	ip := net.ParseIP(ipStr)
-	if ip == nil {
-		return 0, "", fmt.Errorf("невалидный IP: %s", ipStr)
-	}
-
-	a.mu.RLock()
-	defer a.mu.RUnlock()
-
-	var record ASNRecord
-	err := a.db.Lookup(ip, &record)
+	asn, org, err := a.db.Lookup(ipStr)
 	if err != nil {
-		return 0, "", fmt.Errorf("ошибка lookup для %s: %w", ipStr, err)
+		return 0, "", err
 	}
-
-	if record.AutonomousSystemNumber == 0 {
-		return 0, "", fmt.Errorf("ASN не найден для %s", ipStr)
-	}
-
-	return record.AutonomousSystemNumber, record.AutonomousSystemOrganization, nil
+	return uint(asn), org, nil
 }
 
 // LookupString возвращает строковый идентификатор ASN (например "AS12389")
 func (a *ASNLookup) LookupString(ipStr string) (string, error) {
-	asn, _, err := a.Lookup(ipStr)
-	if err != nil {
-		return "", err
-	}
-	if asn == 0 {
-		return "", fmt.Errorf("ASN не найден для %s", ipStr)
-	}
-	return fmt.Sprintf("AS%d", asn), nil
+	return a.db.LookupString(ipStr)
 }
 
 // LookupWithOrg возвращает строковый идентификатор ASN с названием организации
 func (a *ASNLookup) LookupWithOrg(ipStr string) (string, string, error) {
-	asn, org, err := a.Lookup(ipStr)
-	if err != nil {
-		return "", "", err
-	}
-	if asn == 0 {
-		return "", "", fmt.Errorf("ASN не найден для %s", ipStr)
-	}
-	return fmt.Sprintf("AS%d", asn), org, nil
+	return a.db.LookupWithOrg(ipStr)
 }
 
-// Reload перезагружает базу данных (для hot-reload)
+// Reload перезагружает базу данных (принудительное обновление)
 func (a *ASNLookup) Reload() error {
-	newDB, err := maxminddb.Open(a.dbPath)
-	if err != nil {
-		return fmt.Errorf("ошибка перезагрузки ASN базы: %w", err)
-	}
+	return a.updater.ForceReload()
+}
 
-	a.mu.Lock()
-	oldDB := a.db
-	a.db = newDB
-	a.mu.Unlock()
-
-	if oldDB != nil {
-		oldDB.Close()
-	}
-
-	log.Println("ASN база успешно перезагружена")
+// Close останавливает фоновое обновление
+func (a *ASNLookup) Close() error {
+	a.updater.Stop()
+	log.Println("ASN lookup сервис остановлен")
 	return nil
 }
 
-// Close закрывает базу данных
-func (a *ASNLookup) Close() error {
-	a.mu.Lock()
-	defer a.mu.Unlock()
+// Count возвращает количество записей в базе данных
+func (a *ASNLookup) Count() int {
+	return a.db.Count()
+}
 
-	if a.db != nil {
-		return a.db.Close()
-	}
-	return nil
+// IsLoaded проверяет загружена ли база данных
+func (a *ASNLookup) IsLoaded() bool {
+	return a.db.IsLoaded()
 }

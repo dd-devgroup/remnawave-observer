@@ -47,12 +47,12 @@ func main() {
 	// Инициализация ASN lookup сервиса (опционально)
 	var asnLookup *asn.ASNLookup
 	if cfg.DetectByASN {
-		asnLookup, err = asn.NewASNLookup(cfg.ASNDatabasePath)
+		asnLookup, err = asn.NewASNLookup(cfg.IPtoASNDownloadURL, cfg.IPtoASNUpdateInterval)
 		if err != nil {
 			log.Fatalf("Критическая ошибка: не удалось загрузить ASN базу: %v", err)
 		}
 		defer asnLookup.Close()
-		log.Println("✅ ASN режим активирован и готов к работе")
+		log.Printf("✅ ASN режим активирован (записей: %d)", asnLookup.Count())
 	}
 
 	logProcessor := processor.NewLogProcessor(redisStore, rabbitPublisher, webhookAlerter, cfg, asnLookup)

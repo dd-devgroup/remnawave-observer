@@ -38,11 +38,12 @@ type Config struct {
 	ExcludedSubnets   map[string]bool 
 
 	// --- ПАРАМЕТРЫ ДЛЯ РЕЖИМА ASN ---
-	DetectByASN        bool            // Включить режим детекции по ASN
-	ASNDatabasePath    string          // Путь к файлу GeoLite2-ASN.mmdb
-	MaxASNsPerUser     int             // Лимит уникальных ASN на пользователя
-	ASNFallbackMask    int             // Маска для fallback если ASN не найден (по умолчанию 16)
-	ExcludedASNs       map[string]bool // ASN которые не считаются (например Cloudflare, Google)
+	DetectByASN          bool            // Включить режим детекции по ASN
+	IPtoASNDownloadURL   string          // URL для скачивания базы iptoasn.com
+	IPtoASNUpdateInterval time.Duration  // Интервал обновления базы ASN
+	MaxASNsPerUser       int             // Лимит уникальных ASN на пользователя
+	ASNFallbackMask      int             // Маска для fallback если ASN не найден (по умолчанию 16)
+	ExcludedASNs         map[string]bool // ASN которые не считаются (например Cloudflare, Google)
 }
 
 // New загружает конфигурацию из переменных окружения.
@@ -76,17 +77,18 @@ func New() *Config {
 		ExcludedSubnets:   parseSet(getEnv("EXCLUDED_SUBNETS", "")),
 
 		// --- Загрузка параметров ASN ---
-		DetectByASN:     getEnvBool("DETECT_BY_ASN", false),
-		ASNDatabasePath: getEnv("ASN_DATABASE_PATH", "/app/data/GeoLite2-ASN.mmdb"),
-		MaxASNsPerUser:  getEnvInt("MAX_ASNS_PER_USER", 4),
-		ASNFallbackMask: getEnvInt("ASN_FALLBACK_MASK", 16),
-		ExcludedASNs:    parseSet(getEnv("EXCLUDED_ASNS", "")),
+		DetectByASN:           getEnvBool("DETECT_BY_ASN", false),
+		IPtoASNDownloadURL:    getEnv("IPTOASN_DOWNLOAD_URL", ""),
+		IPtoASNUpdateInterval: time.Duration(getEnvInt("IPTOASN_UPDATE_INTERVAL_MINUTES", 60)) * time.Minute,
+		MaxASNsPerUser:        getEnvInt("MAX_ASNS_PER_USER", 4),
+		ASNFallbackMask:       getEnvInt("ASN_FALLBACK_MASK", 16),
+		ExcludedASNs:          parseSet(getEnv("EXCLUDED_ASNS", "")),
 	}
 
 	log.Printf("Конфигурация загружена. Порт: %s", cfg.Port)
 	if cfg.DetectByASN {
 		log.Printf("!!! РЕЖИМ ОБНАРУЖЕНИЯ: по ASN (провайдерам). Лимит: %d провайдеров на пользователя.", cfg.MaxASNsPerUser)
-		log.Printf("    База ASN: %s, Fallback маска: /%d", cfg.ASNDatabasePath, cfg.ASNFallbackMask)
+		log.Printf("    Источник: iptoasn.com, Интервал обновления: %v, Fallback маска: /%d", cfg.IPtoASNUpdateInterval, cfg.ASNFallbackMask)
 		if len(cfg.ExcludedASNs) > 0 {
 			log.Printf("    Исключенные ASN: %d", len(cfg.ExcludedASNs))
 		}
