@@ -58,6 +58,10 @@ func (m *MockStorage) GetUserActiveSubnets(ctx context.Context, userEmail string
 	return make(map[string]int), nil
 }
 
+func (m *MockStorage) GetUserActiveASNs(ctx context.Context, userEmail string) (map[string]*models.ASNInfo, error) {
+	return make(map[string]*models.ASNInfo), nil
+}
+
 type MockPublisher struct {
 	publishedMessages int
 }
@@ -68,6 +72,10 @@ func (m *MockPublisher) PublishBlockMessage(items []string, duration string) err
 }
 
 func (m *MockPublisher) Close() error {
+	return nil
+}
+
+func (m *MockPublisher) Ping() error {
 	return nil
 }
 
