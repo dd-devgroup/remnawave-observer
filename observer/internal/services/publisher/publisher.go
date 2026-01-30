@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"log"
 	"observer_service/internal/models"
-	"sync"
 	"time"
 
 	"github.com/rabbitmq/amqp091-go"
@@ -22,19 +21,23 @@ type EventPublisher interface {
 // RabbitMQPublisher реализует EventPublisher для RabbitMQ.
 type RabbitMQPublisher struct {
 	conn         *amqp091.Connection
-	channel      *amqp091.Channel
+	channelPool  chan *amqp091.Channel
 	exchangeName string
 	url          string
-	mux          sync.Mutex
+	poolSize     int
 	maxRetries   int
 	retryDelay   time.Duration
 }
 
 // NewRabbitMQPublisher создает и настраивает нового издателя RabbitMQ.
 func NewRabbitMQPublisher(url, exchangeName string) (*RabbitMQPublisher, error) {
+	poolSize := 5 // Константа: пул из 5 каналов
+
 	p := &RabbitMQPublisher{
 		url:          url,
 		exchangeName: exchangeName,
+		poolSize:     poolSize,
+		channelPool:  make(chan *amqp091.Channel, poolSize),
 		maxRetries:   5,
 		retryDelay:   2 * time.Second,
 	}
@@ -52,30 +55,44 @@ func (p *RabbitMQPublisher) connect() error {
 		return fmt.Errorf("ошибка подключения к RabbitMQ: %w", err)
 	}
 
-	ch, err := conn.Channel()
-	if err != nil {
-		conn.Close()
-		return fmt.Errorf("ошибка создания канала RabbitMQ: %w", err)
-	}
+	// Создаём пул каналов
+	for i := 0; i < p.poolSize; i++ {
+		ch, err := conn.Channel()
+		if err != nil {
+			conn.Close()
+			// Закрыть уже созданные каналы
+			close(p.channelPool)
+			for oldCh := range p.channelPool {
+				oldCh.Close()
+			}
+			return fmt.Errorf("ошибка создания канала %d: %w", i, err)
+		}
 
-	err = ch.ExchangeDeclare(
-		p.exchangeName, // name
-		"fanout",       // type
-		true,           // durable
-		false,          // auto-deleted
-		false,          // internal
-		false,          // no-wait
-		nil,            // arguments
-	)
-	if err != nil {
-		ch.Close()
-		conn.Close()
-		return fmt.Errorf("ошибка создания exchange: %w", err)
+		err = ch.ExchangeDeclare(
+			p.exchangeName,
+			"fanout",
+			true,
+			false,
+			false,
+			false,
+			nil,
+		)
+		if err != nil {
+			ch.Close()
+			conn.Close()
+			// Закрыть уже созданные каналы
+			close(p.channelPool)
+			for oldCh := range p.channelPool {
+				oldCh.Close()
+			}
+			return fmt.Errorf("ошибка создания exchange: %w", err)
+		}
+
+		p.channelPool <- ch
 	}
 
 	p.conn = conn
-	p.channel = ch
-	log.Println("Успешное (пере)подключение к RabbitMQ и настройка канала.")
+	log.Printf("Успешное (пере)подключение к RabbitMQ. Создан пул из %d каналов.", p.poolSize)
 	return nil
 }
 
@@ -92,11 +109,18 @@ func (p *RabbitMQPublisher) connectWithRetry() error {
 	return fmt.Errorf("не удалось подключиться к RabbitMQ после %d попыток: %w", p.maxRetries, err)
 }
 
+// getChannel получает канал из пула
+func (p *RabbitMQPublisher) getChannel() *amqp091.Channel {
+	return <-p.channelPool
+}
+
+// returnChannel возвращает канал обратно в пул
+func (p *RabbitMQPublisher) returnChannel(ch *amqp091.Channel) {
+	p.channelPool <- ch
+}
+
 // PublishBlockMessage публикует сообщение о блокировке с логикой переподключения.
 func (p *RabbitMQPublisher) PublishBlockMessage(ips []string, duration string) error {
-	p.mux.Lock()
-	defer p.mux.Unlock()
-
 	blockMsg := models.BlockMessage{
 		IPs:      ips,
 		Duration: duration,
@@ -116,7 +140,10 @@ func (p *RabbitMQPublisher) PublishBlockMessage(ips []string, duration string) e
 			}
 		}
 
-		err = p.channel.Publish(
+		// Берём канал из пула (без mutex!)
+		ch := p.getChannel()
+
+		err = ch.Publish(
 			p.exchangeName,
 			"",
 			false,
@@ -124,18 +151,18 @@ func (p *RabbitMQPublisher) PublishBlockMessage(ips []string, duration string) e
 			amqp091.Publishing{
 				ContentType:  "application/json",
 				Body:         body,
-				DeliveryMode: amqp091.Persistent,
+				DeliveryMode: amqp091.Transient, // Изменено на Transient!
 			},
 		)
+
+		// Возвращаем канал в пул
+		p.returnChannel(ch)
 
 		if err == nil {
 			return nil // Успех
 		}
 
 		log.Printf("Ошибка публикации сообщения в RabbitMQ (попытка %d/%d): %v. Повтор...", i+1, p.maxRetries, err)
-		if p.conn != nil {
-			p.conn.Close() // Принудительно закрываем, чтобы пересоздать на следующей итерации
-		}
 		time.Sleep(p.retryDelay)
 	}
 
@@ -144,20 +171,28 @@ func (p *RabbitMQPublisher) PublishBlockMessage(ips []string, duration string) e
 
 // Ping проверяет текущее состояние соединения с RabbitMQ без попытки переподключения.
 func (p *RabbitMQPublisher) Ping() error {
-	p.mux.Lock()
-	defer p.mux.Unlock()
-
 	if p.conn == nil || p.conn.IsClosed() {
 		return errors.New("rabbitmq connection is not active")
 	}
-	if p.channel == nil {
-		return errors.New("rabbitmq channel is not active")
+
+	// Проверяем что хотя бы один канал доступен
+	select {
+	case ch := <-p.channelPool:
+		p.channelPool <- ch // Возвращаем обратно
+		return nil
+	default:
+		return errors.New("rabbitmq channel pool is empty")
 	}
-	return nil
 }
 
 // Close закрывает соединение с RabbitMQ.
 func (p *RabbitMQPublisher) Close() error {
+	// Закрываем все каналы в пуле
+	close(p.channelPool)
+	for ch := range p.channelPool {
+		ch.Close()
+	}
+
 	if p.conn != nil && !p.conn.IsClosed() {
 		return p.conn.Close()
 	}
