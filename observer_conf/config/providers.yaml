@@ -1,0 +1,204 @@
+# Типы провайдеров и их модификаторы подозрительности
+# Чем выше модификатор - тем подозрительнее
+provider_types:
+  mobile:
+    modifier: 0.3
+    description: 'Мобильные пулы (CGNAT, LTE)'
+  mobile_isp:
+    modifier: 0.5
+    description: 'Мобильные операторы'
+  fixed:
+    modifier: 0.8
+    description: 'Проводной ШПД'
+  isp:
+    modifier: 1.0
+    description: 'Крупные ISP'
+  regional_isp:
+    modifier: 1.0
+    description: 'Региональные провайдеры'
+  business:
+    modifier: 1.2
+    description: 'Корпоративные сети'
+  infrastructure:
+    modifier: 1.3
+    description: 'Магистральная инфраструктура'
+  hosting:
+    modifier: 1.5
+    description: 'Хостинг и ДЦ'
+  vpn_proxy:
+    modifier: 1.8
+    description: 'VPN и прокси сервисы'
+
+# Ключевые слова для классификации (проверяются в названии организации)
+# Порядок важен - первое совпадение определяет тип
+keywords:
+  mobile:
+    - cgnat
+    - cg-nat
+    - lte pool
+    - 4g pool
+    - 5g pool
+    - gprs
+    - mobile pool
+
+  mobile_isp:
+    # Россия
+    - megafon
+    - мегафон
+    - mts
+    - мтс
+    - beeline
+    - билайн
+    - tele2
+    - yota
+    - йота
+    # Украина
+    - kyivstar
+    - київстар
+    - vodafone ua
+    - lifecell
+    # Казахстан
+    - kcell
+    - beeline kz
+    - altel
+    - activ
+    # Беларусь
+    - a1 belarus
+    - мтс беларусь
+    - life belarus
+    # Узбекистан
+    - ucell
+    - beeline uz
+    - uzmobile
+    - humans
+    # Азербайджан
+    - azercell
+    - bakcell
+    - nar mobile
+    # Грузия
+    - magticom
+    - geocell
+    - silknet mobile
+    # Армения
+    - ucom
+    - viva-mts
+    - team telecom armenia
+    # Молдова
+    - orange moldova
+    - moldcell
+    # Кыргызстан
+    - megacom
+    - beeline kg
+    - o! kyrgyzstan
+    # Таджикистан
+    - tcell
+    - megafon tajikistan
+    - beeline tj
+
+  isp:
+    # Россия
+    - rostelecom
+    - ростелеком
+    - ttk
+    - транстелеком
+    - er-telecom
+    - dom.ru
+    - дом.ру
+    # Украина
+    - ukrtelecom
+    - укртелеком
+    - triolan
+    - volia
+    - datagroup
+    # Казахстан
+    - kazakhtelecom
+    - казахтелеком
+    # Беларусь
+    - beltelecom
+    - белтелеком
+    # Узбекистан
+    - uzbektelecom
+    - turontelecom
+    # Азербайджан
+    - aztelekom
+    - azeronline
+    # Грузия
+    - silknet
+    - caucasus online
+    # Армения
+    - rostelecom armenia
+    # Молдова
+    - moldtelecom
+    - starnet
+
+  hosting:
+    # Международные
+    - digitalocean
+    - amazon
+    - aws
+    - google cloud
+    - gcp
+    - azure
+    - microsoft
+    - hetzner
+    - ovh
+    - linode
+    - vultr
+    - cloudflare
+    # Россия
+    - selectel
+    - timeweb
+    - beget
+    - vdsina
+    - firstvds
+    - reg.ru
+    - masterhost
+    - ruvds
+    - vscale
+    # Украина
+    - ukraine.com.ua
+    - hosting ukraine
+    - cityhost
+    - tuthost
+    # Казахстан
+    - ps.kz
+    - hoster.kz
+    - vps.kz
+
+  vpn_proxy:
+    - vpn
+    - proxy
+    - tunnel
+    - nordvpn
+    - expressvpn
+    - surfshark
+    - mullvad
+    - protonvpn
+    - private internet access
+    - cyberghost
+    - anonymizer
+    - tor exit
+    - tor relay
+
+  business:
+    - yandex
+    - яндекс
+    - mail.ru
+    - vk company
+    - kaspersky
+    - sberbank
+    - сбербанк
+    - gazprom
+    - газпром
+    - rosneft
+    - роснефть
+    - lukoil
+
+  infrastructure:
+    - backbone
+    - transit
+    - ix
+    - internet exchange
+    - peering
+    - tier-1
+    - tier-2

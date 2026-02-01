@@ -15,8 +15,8 @@ RUN apk --no-cache add ca-certificates tzdata
 
 WORKDIR /app
 
-# Создаем директорию для данных (ASN база будет монтироваться через volume)
-RUN mkdir -p /app/data
+# Создаем директории для данных и конфигов
+RUN mkdir -p /app/data /app/config
 
 COPY --from=builder /app/observer_service .
 
