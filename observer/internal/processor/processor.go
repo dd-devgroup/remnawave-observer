@@ -9,7 +9,9 @@ import (
 	"observer_service/internal/models"
 	"observer_service/internal/services/alerter"
 	"observer_service/internal/services/asn"
+	"observer_service/internal/services/geoip"
 	"observer_service/internal/services/publisher"
+	"observer_service/internal/services/scoring"
 	"observer_service/internal/services/storage"
 	"sync"
 	"time"
@@ -25,19 +27,39 @@ type LogProcessor struct {
 	logChannel        chan []models.LogEntry // Канал для получения пачек логов
 	sideEffectChannel chan func()            // Канал для побочных задач (алерты, очистка)
 
+	// Новые сервисы для Anti-Abuse системы
+	geoService    *geoip.GeoIPService   // Сервис геолокации
+	geoAnalyzer   *geoip.GeoAnalyzer    // Анализатор географии
+	asnClassifier *asn.ASNClassifier    // Классификатор провайдеров
+	scorer        *scoring.Scorer       // Система скоринга
+
 	// Кешированные распарсенные подсети для быстрой проверки вложенности
 	excludedSubnetsParsed []*net.IPNet
 	excludedIPsParsed     []*net.IPNet // Для случаев когда в ExcludedIPs указан CIDR
 }
 
 // NewLogProcessor создает новый экземпляр LogProcessor.
-func NewLogProcessor(s storage.IPStorage, p publisher.EventPublisher, a alerter.Notifier, cfg *config.Config, asnLookup *asn.ASNLookup) *LogProcessor {
+func NewLogProcessor(
+	s storage.IPStorage,
+	p publisher.EventPublisher,
+	a alerter.Notifier,
+	cfg *config.Config,
+	asnLookup *asn.ASNLookup,
+	geoService *geoip.GeoIPService,
+	geoAnalyzer *geoip.GeoAnalyzer,
+	asnClassifier *asn.ASNClassifier,
+	scorer *scoring.Scorer,
+) *LogProcessor {
 	lp := &LogProcessor{
 		storage:           s,
 		publisher:         p,
 		alerter:           a,
 		cfg:               cfg,
 		asnLookup:         asnLookup,
+		geoService:        geoService,
+		geoAnalyzer:       geoAnalyzer,
+		asnClassifier:     asnClassifier,
+		scorer:            scorer,
 		logChannel:        make(chan []models.LogEntry, cfg.LogChannelBufferSize),
 		sideEffectChannel: make(chan func(), cfg.SideEffectChannelBufferSize),
 	}
@@ -533,6 +555,36 @@ func (p *LogProcessor) processEntryByASN(ctx context.Context, entry models.LogEn
 			alertPayload.AllUserASNs = res.AllUserItems
 			// Передаём текущий ASN и IP для гарантированного включения в детали
 			alertPayload.ASNDetails = p.collectASNDetails(ctx, entry.UserEmail, res.AllUserItems, identifier, entry.SourceIP)
+
+			// Выполняем расширенную аналитику если включена
+			if p.cfg.ScoringEnabled || p.cfg.GeoIPEnabled {
+				geoResult, providerTypes, violationScore := p.performEnhancedAnalytics(
+					ctx,
+					entry.UserEmail,
+					res.AllUserItems,
+					alertPayload.ASNDetails,
+				)
+
+				// Добавляем результаты в alert payload
+				if geoResult != nil {
+					alertPayload.GeoAnalysis = geoResult
+				}
+				if providerTypes != nil {
+					alertPayload.ProviderTypes = providerTypes
+				}
+				if violationScore != nil {
+					score := violationScore.FinalScore
+					alertPayload.Score = &score
+					alertPayload.ScoreAction = string(violationScore.Action)
+
+					// Проверяем действие на основе скора
+					if violationScore.Action == scoring.ActionNone {
+						log.Printf("[Anti-Abuse] Скор %.1f < 30 для %s, блокировка отменена",
+							violationScore.FinalScore, entry.UserEmail)
+						return // Не блокируем и не отправляем алерт
+					}
+				}
+			}
 		} else {
 			// Для Subnet fallback: используем IP-поля
 			subnetCount := int(res.CurrentCount)
@@ -747,4 +799,77 @@ func (p *LogProcessor) scheduleSubnetsClear(ctx context.Context, userEmail strin
 		log.Printf("Отложенная очистка ПОДСЕТЕЙ для %s%s выполнена. Очищено ключей: %d",
 			userEmail, p.getDebugMarker(userEmail), cleared)
 	})
+}
+
+// performEnhancedAnalytics выполняет расширенную аналитику с GeoIP и скорингом
+func (p *LogProcessor) performEnhancedAnalytics(
+	ctx context.Context,
+	email string,
+	allASNs []string,
+	asnDetails map[string]*models.ASNInfo,
+) (
+	*models.GeoAnalysisResult,
+	map[string]string,
+	*scoring.ViolationScore,
+) {
+	// Если сервисы не настроены - возвращаем nil
+	if p.geoService == nil || p.geoAnalyzer == nil || p.asnClassifier == nil || p.scorer == nil {
+		return nil, nil, nil
+	}
+
+	// 1. Собираем все IP-адреса пользователя
+	allIPs := make([]string, 0)
+	for _, info := range asnDetails {
+		allIPs = append(allIPs, info.IPs...)
+	}
+
+	// 2. Выполняем географический анализ
+	geoResultInternal := p.geoAnalyzer.AnalyzeUserIPs(allIPs)
+
+	// Конвертируем в models.GeoAnalysisResult
+	geoResult := &models.GeoAnalysisResult{
+		UniqueCountries: geoResultInternal.UniqueCountries,
+		UniqueCities:    geoResultInternal.UniqueCities,
+		Agglomerations:  geoResultInternal.Agglomerations,
+		MaxDistanceKM:   geoResultInternal.MaxDistanceKM,
+		GeoScore:        geoResultInternal.GeoScore,
+		GeoFlags:        geoResultInternal.GeoFlags,
+	}
+
+	// 3. Классифицируем провайдеров и обогащаем ASNInfo
+	asnClassifications := make(map[string]*asn.ASNClassification)
+	providerTypes := make(map[string]string)
+
+	for asnStr, info := range asnDetails {
+		classification := p.asnClassifier.Classify(asnStr, info.Organization)
+		asnClassifications[asnStr] = classification
+		providerTypes[asnStr] = classification.ProviderType
+
+		// Обогащаем ASNInfo
+		info.ProviderType = classification.ProviderType
+		info.Modifier = classification.Modifier
+	}
+
+	// 4. Рассчитываем скор (конвертируем обратно в geoip.GeoAnalysisResult для scorer)
+	geoResultForScorer := &geoip.GeoAnalysisResult{
+		UniqueCountries: geoResult.UniqueCountries,
+		UniqueCities:    geoResult.UniqueCities,
+		Agglomerations:  geoResult.Agglomerations,
+		MaxDistanceKM:   geoResult.MaxDistanceKM,
+		GeoScore:        geoResult.GeoScore,
+		GeoFlags:        geoResult.GeoFlags,
+	}
+
+	violationScore := p.scorer.Calculate(
+		asnClassifications,
+		geoResultForScorer,
+		len(allASNs),
+		p.cfg.MaxASNsPerUser,
+	)
+
+	log.Printf("[Anti-Abuse] Анализ для %s: GeoScore=%d, ASNScore=%.1f, FinalScore=%.1f, Action=%s",
+		email, geoResult.GeoScore, violationScore.Components.ASNScore,
+		violationScore.FinalScore, violationScore.Action)
+
+	return geoResult, providerTypes, violationScore
 }

@@ -21,6 +21,12 @@ type AlertPayload struct {
 	DetectedASNCount *int                  `json:"detected_asn_count,omitempty"` // Количество уникальных провайдеров (ASN)
 	AllUserASNs      []string              `json:"all_user_asns,omitempty"`      // Список ASN (например: ["AS31133", "AS3267"])
 	ASNDetails       map[string]*ASNInfo   `json:"asn_details,omitempty"`        // Детальная информация по каждому ASN
+
+	// Поля для скоринга и GeoIP анализа
+	Score           *float64              `json:"score,omitempty"`            // Финальный скор нарушения (0-100)
+	ScoreAction     string                `json:"score_action,omitempty"`     // Действие на основе скора (none, monitor, warn, soft_block, block)
+	GeoAnalysis     *GeoAnalysisResult    `json:"geo_analysis,omitempty"`     // Результат географического анализа
+	ProviderTypes   map[string]string     `json:"provider_types,omitempty"`   // ASN -> тип провайдера
 }
 
 // UserIPStats содержит статистику по IP-адресам пользователя для мониторинга.
@@ -45,7 +51,19 @@ type ASNInfo struct {
 	Organization string   `json:"organization,omitempty"` // Название провайдера
 	TTLSeconds   int      `json:"ttl_seconds"`
 	IPs          []string `json:"ips"`
-	IPCount      int      `json:"ip_count"` // Количество IP в этом ASN
+	IPCount      int      `json:"ip_count"`       // Количество IP в этом ASN
+	ProviderType string   `json:"provider_type,omitempty"` // Тип провайдера (mobile, hosting, vpn_proxy, isp)
+	Modifier     float64  `json:"modifier,omitempty"`      // Модификатор подозрительности (0.3-1.8)
+}
+
+// GeoAnalysisResult результат географического анализа (для AlertPayload)
+type GeoAnalysisResult struct {
+	UniqueCountries []string `json:"unique_countries"`
+	UniqueCities    []string `json:"unique_cities"`
+	Agglomerations  []string `json:"agglomerations"`
+	MaxDistanceKM   float64  `json:"max_distance_km"`
+	GeoScore        int      `json:"geo_score"`
+	GeoFlags        []string `json:"geo_flags"`
 }
 
 // BlockMessage представляет сообщение для отправки в очередь на блокировку.

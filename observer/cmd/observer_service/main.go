@@ -16,7 +16,10 @@ import (
 	"observer_service/internal/processor"
 	"observer_service/internal/services/alerter"
 	"observer_service/internal/services/asn"
+	"observer_service/internal/services/geodata"
+	"observer_service/internal/services/geoip"
 	"observer_service/internal/services/publisher"
+	"observer_service/internal/services/scoring"
 	"observer_service/internal/services/storage"
 )
 
@@ -55,7 +58,63 @@ func main() {
 		log.Printf("✅ ASN режим активирован (записей: %d)", asnLookup.Count())
 	}
 
-	logProcessor := processor.NewLogProcessor(redisStore, rabbitPublisher, webhookAlerter, cfg, asnLookup)
+	// Инициализация GeoData загрузчика (опционально)
+	var geoDataLoader *geodata.GeoDataLoader
+	var geoService *geoip.GeoIPService
+	var geoAnalyzer *geoip.GeoAnalyzer
+	var asnClassifier *asn.ASNClassifier
+	var scorer *scoring.Scorer
+
+	if cfg.GeoIPEnabled || cfg.ScoringEnabled {
+		// Загружаем конфигурации провайдеров и агломераций
+		geoDataLoader, err = geodata.NewGeoDataLoader(cfg.GeoDataConfigDir)
+		if err != nil {
+			log.Fatalf("Критическая ошибка: не удалось загрузить географические данные: %v", err)
+		}
+		log.Printf("✅ GeoData загружен (агломерации: %d)", len(geoDataLoader.GetAgglomerations()))
+
+		// Инициализируем GeoIP сервис если ASN lookup доступен
+		if asnLookup != nil {
+			geoService = geoip.NewGeoIPService(asnLookup, redisStore.GetClient(), cfg.GeoIPCacheTTL)
+			geoAnalyzer = geoip.NewGeoAnalyzer(geoService, geoDataLoader)
+			log.Printf("✅ GeoIP сервис инициализирован (cache TTL: %v)", cfg.GeoIPCacheTTL)
+		}
+
+		// Инициализируем классификатор провайдеров
+		asnClassifier = asn.NewASNClassifier(geoDataLoader)
+		log.Printf("✅ ASN классификатор инициализирован")
+
+		// Инициализируем систему скоринга
+		if cfg.ScoringEnabled {
+			thresholds := scoring.ScoreThresholds{
+				MonitorThreshold:   30,
+				WarnThreshold:      cfg.ScoreThresholdWarn,
+				SoftBlockThreshold: 70,
+				BlockThreshold:     cfg.ScoreThresholdBlock,
+			}
+			scorer = scoring.NewScorer(thresholds)
+			log.Printf("✅ Система скоринга инициализирована (warn: %.1f, block: %.1f)",
+				cfg.ScoreThresholdWarn, cfg.ScoreThresholdBlock)
+		}
+	}
+
+	logProcessor := processor.NewLogProcessor(
+		redisStore,
+		rabbitPublisher,
+		webhookAlerter,
+		cfg,
+		asnLookup,
+		geoService,
+		geoAnalyzer,
+		asnClassifier,
+		scorer,
+	)
+
+	// Cleanup для GeoIP сервиса
+	if geoService != nil {
+		defer geoService.Close()
+	}
+
 	poolMonitor := monitor.NewPoolMonitor(redisStore, cfg)
 	apiServer := api.NewServer(cfg.Port, logProcessor, redisStore, rabbitPublisher)
 

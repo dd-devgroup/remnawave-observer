@@ -53,6 +53,15 @@ func (a *ASNLookup) LookupWithOrg(ipStr string) (string, string, error) {
 	return a.db.LookupWithOrg(ipStr)
 }
 
+// LookupFull возвращает полную информацию: ASN (string), CountryCode, Organization
+func (a *ASNLookup) LookupFull(ipStr string) (string, string, string, error) {
+	asn, countryCode, org, err := a.db.LookupFull(ipStr)
+	if err != nil {
+		return "", "", "", err
+	}
+	return fmt.Sprintf("AS%d", asn), countryCode, org, nil
+}
+
 // Reload перезагружает базу данных (принудительное обновление)
 func (a *ASNLookup) Reload() error {
 	return a.updater.ForceReload()

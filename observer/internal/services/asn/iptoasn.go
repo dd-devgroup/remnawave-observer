@@ -113,6 +113,36 @@ func (db *IPtoASNDatabase) LookupWithOrg(ipStr string) (string, string, error) {
 	return fmt.Sprintf("AS%d", asn), org, nil
 }
 
+// LookupFull возвращает полную информацию: ASN, CountryCode, Organization
+func (db *IPtoASNDatabase) LookupFull(ipStr string) (uint32, string, string, error) {
+	ipNum, err := ipToUint32(ipStr)
+	if err != nil {
+		return 0, "", "", err
+	}
+
+	db.mu.RLock()
+	defer db.mu.RUnlock()
+
+	if len(db.entries) == 0 {
+		return 0, "", "", fmt.Errorf("база данных пуста")
+	}
+
+	// Binary search
+	idx := sort.Search(len(db.entries), func(i int) bool {
+		return db.entries[i].RangeEnd >= ipNum
+	})
+
+	if idx < len(db.entries) && db.entries[idx].RangeStart <= ipNum {
+		entry := db.entries[idx]
+		if entry.ASN == 0 {
+			return 0, "", "", fmt.Errorf("IP %s не маршрутизируется (Not routed)", ipStr)
+		}
+		return entry.ASN, entry.CountryCode, entry.Description, nil
+	}
+
+	return 0, "", "", fmt.Errorf("ASN не найден для %s", ipStr)
+}
+
 // LoadFromReader загружает базу данных из io.Reader (TSV формат)
 func (db *IPtoASNDatabase) LoadFromReader(reader io.Reader) error {
 	var entries []ASNEntry

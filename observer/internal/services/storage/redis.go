@@ -519,3 +519,8 @@ func (s *RedisStore) GetUserActiveASNs(ctx context.Context, userEmail string) (m
 
 	return result, nil
 }
+
+// GetClient возвращает Redis клиент для использования в других сервисах
+func (s *RedisStore) GetClient() *redis.Client {
+	return s.client
+}

@@ -44,6 +44,16 @@ type Config struct {
 	MaxASNsPerUser       int             // Лимит уникальных ASN на пользователя
 	ASNFallbackMask      int             // Маска для fallback если ASN не найден (по умолчанию 16)
 	ExcludedASNs         map[string]bool // ASN которые не считаются (например Cloudflare, Google)
+
+	// --- ПАРАМЕТРЫ GEOIP ---
+	GeoIPEnabled     bool          // Включить GeoIP анализ
+	GeoIPCacheTTL    time.Duration // TTL для кэша GeoIP (default: 24 часа)
+	GeoDataConfigDir string        // Директория с конфигами (agglomerations.yaml, providers.yaml)
+
+	// --- ПАРАМЕТРЫ СКОРИНГА ---
+	ScoringEnabled      bool    // Включить систему скоринга
+	ScoreThresholdWarn  float64 // Порог для предупреждения (default: 50)
+	ScoreThresholdBlock float64 // Порог для блокировки (default: 85)
 }
 
 // New загружает конфигурацию из переменных окружения.
@@ -83,6 +93,16 @@ func New() *Config {
 		MaxASNsPerUser:        getEnvInt("MAX_ASNS_PER_USER", 4),
 		ASNFallbackMask:       getEnvInt("ASN_FALLBACK_MASK", 16),
 		ExcludedASNs:          parseSet(getEnv("EXCLUDED_ASNS", "")),
+
+		// --- Загрузка параметров GeoIP ---
+		GeoIPEnabled:     getEnvBool("GEOIP_ENABLED", false),
+		GeoIPCacheTTL:    time.Duration(getEnvInt("GEOIP_CACHE_TTL_HOURS", 24)) * time.Hour,
+		GeoDataConfigDir: getEnv("GEODATA_CONFIG_DIR", "/app/config"),
+
+		// --- Загрузка параметров скоринга ---
+		ScoringEnabled:      getEnvBool("SCORING_ENABLED", false),
+		ScoreThresholdWarn:  getEnvFloat("SCORE_THRESHOLD_WARN", 50.0),
+		ScoreThresholdBlock: getEnvFloat("SCORE_THRESHOLD_BLOCK", 85.0),
 	}
 
 	log.Printf("Конфигурация загружена. Порт: %s", cfg.Port)
@@ -111,6 +131,12 @@ func New() *Config {
 	if cfg.DebugEmail != "" {
 		log.Printf("Режим дебага включен для email: %s с лимитом IP: %d", cfg.DebugEmail, cfg.DebugIPLimit)
 	}
+	if cfg.GeoIPEnabled {
+		log.Printf("GeoIP анализ включен. Cache TTL: %v, Config dir: %s", cfg.GeoIPCacheTTL, cfg.GeoDataConfigDir)
+	}
+	if cfg.ScoringEnabled {
+		log.Printf("Система скоринга включена. Warn threshold: %.1f, Block threshold: %.1f", cfg.ScoreThresholdWarn, cfg.ScoreThresholdBlock)
+	}
 
 	return cfg
 }
@@ -135,6 +161,15 @@ func getEnvBool(key string, defaultValue bool) bool {
 	if value := os.Getenv(key); value != "" {
 		if boolValue, err := strconv.ParseBool(value); err == nil {
 			return boolValue
+		}
+	}
+	return defaultValue
+}
+
+func getEnvFloat(key string, defaultValue float64) float64 {
+	if value := os.Getenv(key); value != "" {
+		if floatValue, err := strconv.ParseFloat(value, 64); err == nil {
+			return floatValue
 		}
 	}
 	return defaultValue
