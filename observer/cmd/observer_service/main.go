@@ -115,7 +115,7 @@ func main() {
 		defer geoService.Close()
 	}
 
-	poolMonitor := monitor.NewPoolMonitor(redisStore, cfg)
+	poolMonitor := monitor.NewPoolMonitor(redisStore, cfg, geoService)
 	apiServer := api.NewServer(cfg.Port, logProcessor, redisStore, rabbitPublisher)
 
 	// Сообщаем WaitGroup, что будем ждать три горутины
