@@ -1,16 +1,16 @@
 services:
   observer:
     container_name: observer
-    image: quay.io/fxfuren/remnawave-observer:0.0.3-dev
+    image: quay.io/fxfuren/remnawave-observer:0.0.9-dev
     restart: unless-stopped
     expose:
       - '9000'
     volumes:
       - ./data:/app/data:ro
-      - ./config:/app/config:ro  # Конфиги Anti-Abuse (agglomerations.yaml, providers.yaml)
+      - ./config:/app/config:ro # Конфиги Anti-Abuse (agglomerations.yaml, providers.yaml)
     env_file:
       - .env
-      - .env.antiabuse  # Переменные для GeoIP и Scoring (опционально)
+      - .env.antiabuse # Переменные для GeoIP и Scoring (опционально)
     depends_on:
       rabbitmq:
         condition: service_healthy
