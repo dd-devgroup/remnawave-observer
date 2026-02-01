@@ -7,8 +7,10 @@ services:
       - '9000'
     volumes:
       - ./data:/app/data:ro
+      - ./config:/app/config:ro  # Конфиги Anti-Abuse (agglomerations.yaml, providers.yaml)
     env_file:
       - .env
+      - .env.antiabuse  # Переменные для GeoIP и Scoring (опционально)
     depends_on:
       rabbitmq:
         condition: service_healthy
