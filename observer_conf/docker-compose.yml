@@ -15,9 +15,9 @@ services:
       rabbitmq:
         condition: service_healthy
       vector-aggregator:
-        condition: service_started
+        condition: service_healthy
       redis:
-        condition: service_started
+        condition: service_healthy
     networks:
       - observer-net
     logging:
@@ -41,11 +41,11 @@ services:
     networks:
       - observer-net
     healthcheck:
-      test: ['CMD', 'rabbitmq-diagnostics', 'ping']
-      interval: 10s
+      test: ['CMD', 'rabbitmq-diagnostics', 'check_port_connectivity']
+      interval: 5s
       timeout: 5s
-      retries: 5
-      start_period: 20s
+      retries: 10
+      start_period: 30s
 
   vector-aggregator:
     image: timberio/vector:0.48.0-alpine
@@ -58,6 +58,12 @@ services:
     command: ['--config', '/etc/vector/vector.toml']
     networks:
       - observer-net
+    healthcheck:
+      test: ['CMD', 'wget', '--no-verbose', '--tries=1', '--spider', 'http://localhost:8686/health']
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
     logging:
       driver: json-file
       options:
@@ -74,7 +80,8 @@ services:
       - ./nginx.conf:/etc/nginx/conf.d/default.conf:ro
       - /etc/letsencrypt:/etc/letsencrypt:ro
     depends_on:
-      - vector-aggregator
+      vector-aggregator:
+        condition: service_healthy
     networks:
       - observer-net
     logging:
@@ -93,6 +100,12 @@ services:
       - redis-data:/data
     networks:
       - observer-net
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 3s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
     logging:
       driver: json-file
       options:

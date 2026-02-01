@@ -497,11 +497,26 @@ func (p *LogProcessor) processEntryByASN(ctx context.Context, entry models.LogEn
 
 	if res.StatusCode == 0 && res.IsNew {
 		if identifierType == "ASN" && orgName != "" {
-			log.Printf("Новый %s для пользователя %s%s: %s (%s) | IP: %s. Всего: %d/%d",
-				identifierType, entry.UserEmail, debugMarker, identifier, orgName, entry.SourceIP, res.CurrentCount, userASNLimit)
+			// Классифицируем провайдера для логирования
+			var providerInfo string
+			if p.asnClassifier != nil {
+				classification := p.asnClassifier.Classify(identifier, orgName)
+				providerInfo = fmt.Sprintf(" [%s, риск:%.1f]", classification.ProviderType, classification.Modifier)
+			}
+			log.Printf("Новый %s для пользователя %s%s: %s (%s)%s | IP: %s. Всего: %d/%d",
+				identifierType, entry.UserEmail, debugMarker, identifier, orgName, providerInfo, entry.SourceIP, res.CurrentCount, userASNLimit)
 		} else {
 			log.Printf("Новый %s для пользователя %s%s: %s | IP: %s. Всего: %d/%d",
 				identifierType, entry.UserEmail, debugMarker, identifier, entry.SourceIP, res.CurrentCount, userASNLimit)
+		}
+
+		// Логируем GeoIP анализ при каждом новом ASN (если включен)
+		if identifierType == "ASN" && p.geoService != nil && p.cfg.GeoIPEnabled {
+			if geoLoc, err := p.geoService.Lookup(entry.SourceIP); err == nil && geoLoc != nil {
+				log.Printf("[GeoIP] %s: %s -> %s, %s (%.2f, %.2f)",
+					entry.UserEmail, entry.SourceIP, geoLoc.CountryCode, geoLoc.City,
+					geoLoc.Latitude, geoLoc.Longitude)
+			}
 		}
 	}
 
