@@ -3,6 +3,7 @@ package processor
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log"
 	"net"
 	"observer_service/internal/config"
