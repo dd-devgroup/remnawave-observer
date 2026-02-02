@@ -49,6 +49,7 @@ type Config struct {
 	GeoIPEnabled     bool          // Включить GeoIP анализ
 	GeoIPCacheTTL    time.Duration // TTL для кэша GeoIP (default: 24 часа)
 	GeoDataConfigDir string        // Директория с конфигами (agglomerations.yaml, providers.yaml)
+	GeoDataDataDir   string        // Директория для записываемых данных (unknown_providers.json, backups)
 
 	// --- ПАРАМЕТРЫ СКОРИНГА ---
 	ScoringEnabled      bool    // Включить систему скоринга
@@ -107,6 +108,7 @@ func New() *Config {
 		GeoIPEnabled:     getEnvBool("GEOIP_ENABLED", false),
 		GeoIPCacheTTL:    time.Duration(getEnvInt("GEOIP_CACHE_TTL_HOURS", 24)) * time.Hour,
 		GeoDataConfigDir: getEnv("GEODATA_CONFIG_DIR", "/app/config"),
+		GeoDataDataDir:   getEnv("GEODATA_DATA_DIR", "/app/data"),
 
 		// --- Загрузка параметров скоринга ---
 		ScoringEnabled:      getEnvBool("SCORING_ENABLED", false),
@@ -148,7 +150,7 @@ func New() *Config {
 		log.Printf("Режим дебага включен для email: %s с лимитом IP: %d", cfg.DebugEmail, cfg.DebugIPLimit)
 	}
 	if cfg.GeoIPEnabled {
-		log.Printf("GeoIP анализ включен. Cache TTL: %v, Config dir: %s", cfg.GeoIPCacheTTL, cfg.GeoDataConfigDir)
+		log.Printf("GeoIP анализ включен. Cache TTL: %v, Config dir: %s, Data dir: %s", cfg.GeoIPCacheTTL, cfg.GeoDataConfigDir, cfg.GeoDataDataDir)
 	}
 	if cfg.ScoringEnabled {
 		log.Printf("Система скоринга включена. Warn threshold: %.1f, Block threshold: %.1f", cfg.ScoreThresholdWarn, cfg.ScoreThresholdBlock)

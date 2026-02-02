@@ -67,7 +67,7 @@ func main() {
 
 	if cfg.GeoIPEnabled || cfg.ScoringEnabled {
 		// Инициализируем логирование неизвестных провайдеров
-		geodata.InitUnknownProvidersLog(cfg.GeoDataConfigDir, cfg.UnknownProvidersLogEnabled)
+		geodata.InitUnknownProvidersLog(cfg.GeoDataDataDir, cfg.UnknownProvidersLogEnabled)
 
 		// Загружаем конфигурации провайдеров и агломераций
 		geoDataLoader, err = geodata.NewGeoDataLoader(cfg.GeoDataConfigDir)
@@ -127,6 +127,7 @@ func main() {
 		autoLearner = geodata.NewAutoLearner(
 			geoDataLoader,
 			cfg.GeoDataConfigDir,
+			cfg.GeoDataDataDir,
 			cfg.AutoLearningInterval,
 			cfg.AutoLearningMinCount,
 			cfg.AutoLearningMinConfidence,

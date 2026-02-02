@@ -31,14 +31,21 @@ var unknownLog *UnknownProvidersLog
 var unknownLogOnce sync.Once
 
 // InitUnknownProvidersLog инициализирует систему логирования неизвестных провайдеров
-func InitUnknownProvidersLog(configDir string, enabled bool) {
+func InitUnknownProvidersLog(dataDir string, enabled bool) {
 	unknownLogOnce.Do(func() {
 		if !enabled {
 			unknownLog = &UnknownProvidersLog{enabled: false}
 			return
 		}
 
-		logPath := filepath.Join(configDir, "unknown_providers.json")
+		// Создаем директорию если не существует
+		if err := os.MkdirAll(dataDir, 0755); err != nil {
+			log.Printf("[UnknownProviders] Failed to create data directory: %v", err)
+			unknownLog = &UnknownProvidersLog{enabled: false}
+			return
+		}
+
+		logPath := filepath.Join(dataDir, "unknown_providers.json")
 		unknownLog = &UnknownProvidersLog{
 			filePath:  logPath,
 			providers: make(map[string]*UnknownProvider),

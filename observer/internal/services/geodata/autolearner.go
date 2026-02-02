@@ -16,6 +16,7 @@ import (
 type AutoLearner struct {
 	geoDataLoader   *GeoDataLoader
 	configDir       string
+	dataDir         string
 	interval        time.Duration
 	minCount        int
 	minConfidence   string
@@ -23,10 +24,11 @@ type AutoLearner struct {
 }
 
 // NewAutoLearner создает новый AutoLearner
-func NewAutoLearner(geoDataLoader *GeoDataLoader, configDir string, interval time.Duration, minCount int, minConfidence string) *AutoLearner {
+func NewAutoLearner(geoDataLoader *GeoDataLoader, configDir string, dataDir string, interval time.Duration, minCount int, minConfidence string) *AutoLearner {
 	return &AutoLearner{
 		geoDataLoader: geoDataLoader,
 		configDir:     configDir,
+		dataDir:       dataDir,
 		interval:      interval,
 		minCount:      minCount,
 		minConfidence: minConfidence,
@@ -292,8 +294,13 @@ func (al *AutoLearner) updateProvidersConfig(config *ProvidersConfig, newKeyword
 	// Сохраняем обновленный конфиг
 	providersFile := filepath.Join(al.configDir, "providers.yaml")
 
-	// Создаем резервную копию
-	backupFile := filepath.Join(al.configDir, "providers.yaml.backup")
+	// Создаем директорию для данных если не существует
+	if err := os.MkdirAll(al.dataDir, 0755); err != nil {
+		log.Printf("[AutoLearner] Предупреждение: не удалось создать data директорию: %v", err)
+	}
+
+	// Создаем резервную копию в data директории
+	backupFile := filepath.Join(al.dataDir, "providers.yaml.backup")
 	originalData, err := os.ReadFile(providersFile)
 	if err != nil {
 		return err

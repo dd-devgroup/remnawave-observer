@@ -6,8 +6,8 @@ services:
     expose:
       - '9000'
     volumes:
-      - ./data:/app/data:ro
-      - ./config:/app/config:ro # Конфиги Anti-Abuse (agglomerations.yaml, providers.yaml)
+      - ./data:/app/data # Данные для записи (unknown_providers.json, backups) - read-write
+      - ./config:/app/config:ro # Конфиги Anti-Abuse (agglomerations.yaml, providers.yaml) - read-only
     env_file:
       - .env
       - .env.antiabuse # Переменные для GeoIP и Scoring (опционально)
