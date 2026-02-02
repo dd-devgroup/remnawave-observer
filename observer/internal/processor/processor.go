@@ -498,11 +498,13 @@ func (p *LogProcessor) processEntryByASN(ctx context.Context, entry models.LogEn
 
 	if res.StatusCode == 0 && res.IsNew {
 		if identifierType == "ASN" && orgName != "" {
-			// Получаем страну из GeoIP для передачи в классификатор
+			// Получаем GeoIP данные ОДИН раз для классификатора и логирования
 			var countryCode string
+			var geoLoc *geoip.GeoLocation
 			if p.geoService != nil && p.cfg.GeoIPEnabled {
-				if geoLoc, err := p.geoService.Lookup(entry.SourceIP); err == nil && geoLoc != nil {
-					countryCode = geoLoc.CountryCode
+				if loc, err := p.geoService.Lookup(entry.SourceIP); err == nil && loc != nil {
+					geoLoc = loc
+					countryCode = loc.CountryCode
 				}
 			}
 
@@ -514,18 +516,16 @@ func (p *LogProcessor) processEntryByASN(ctx context.Context, entry models.LogEn
 			}
 			log.Printf("Новый %s для пользователя %s%s: %s (%s)%s | IP: %s. Всего: %d/%d",
 				identifierType, entry.UserEmail, debugMarker, identifier, orgName, providerInfo, entry.SourceIP, res.CurrentCount, userASNLimit)
-		} else {
-			log.Printf("Новый %s для пользователя %s%s: %s | IP: %s. Всего: %d/%d",
-				identifierType, entry.UserEmail, debugMarker, identifier, entry.SourceIP, res.CurrentCount, userASNLimit)
-		}
 
-		// Логируем GeoIP анализ при каждом новом ASN (если включен)
-		if identifierType == "ASN" && p.geoService != nil && p.cfg.GeoIPEnabled {
-			if geoLoc, err := p.geoService.Lookup(entry.SourceIP); err == nil && geoLoc != nil {
+			// Логируем GeoIP анализ (используем уже полученные данные)
+			if geoLoc != nil {
 				log.Printf("[GeoIP] %s: %s -> %s, %s (%.2f, %.2f)",
 					entry.UserEmail, entry.SourceIP, geoLoc.CountryCode, geoLoc.City,
 					geoLoc.Latitude, geoLoc.Longitude)
 			}
+		} else {
+			log.Printf("Новый %s для пользователя %s%s: %s | IP: %s. Всего: %d/%d",
+				identifierType, entry.UserEmail, debugMarker, identifier, entry.SourceIP, res.CurrentCount, userASNLimit)
 		}
 	}
 
