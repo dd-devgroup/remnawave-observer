@@ -32,7 +32,7 @@ func (c *ASNClassifier) Classify(asn string, org string) *ASNClassification {
 
 // ClassifyWithCountry классифицирует провайдера с учетом страны
 func (c *ASNClassifier) ClassifyWithCountry(asn string, org string, country string) *ASNClassification {
-	providerType, modifier := c.geoData.GetProviderType(org)
+	providerType, modifier := c.geoData.GetProviderTypeWithCountry(org, country)
 
 	return &ASNClassification{
 		ASN:          asn,
