@@ -1,36 +1,36 @@
-# Типы провайдеров и их модификаторы подозрительности
-# Чем выше модификатор - тем подозрительнее
+# Provider types and their risk modifiers
+# Higher modifier = more suspicious
 provider_types:
   mobile:
     modifier: 0.3
-    description: 'Мобильные пулы (CGNAT, LTE)'
+    description: 'Mobile pools (CGNAT, LTE)'
   mobile_isp:
     modifier: 0.5
-    description: 'Мобильные операторы'
+    description: 'Mobile operators'
   fixed:
     modifier: 0.8
-    description: 'Проводной ШПД'
+    description: 'Fixed broadband'
   isp:
     modifier: 1.0
-    description: 'Крупные ISP'
+    description: 'Major ISPs'
   regional_isp:
     modifier: 1.0
-    description: 'Региональные провайдеры'
+    description: 'Regional providers'
   business:
     modifier: 1.2
-    description: 'Корпоративные сети'
+    description: 'Corporate networks'
   infrastructure:
     modifier: 1.3
-    description: 'Магистральная инфраструктура'
+    description: 'Backbone infrastructure'
   hosting:
     modifier: 1.5
-    description: 'Хостинг и ДЦ'
+    description: 'Hosting and data centers'
   vpn_proxy:
     modifier: 1.8
-    description: 'VPN и прокси сервисы'
+    description: 'VPN and proxy services'
 
-# Ключевые слова для классификации (проверяются в названии организации)
-# Порядок важен - первое совпадение определяет тип
+# Keywords for classification (checked in organization name)
+# Order matters - first match determines the type
 keywords:
   mobile:
     - cgnat
@@ -38,137 +38,218 @@ keywords:
     - lte pool
     - 4g pool
     - 5g pool
+    - 6g pool
     - gprs
     - mobile pool
+    - mobile network
+    - cellular
 
   mobile_isp:
-    # Россия
+    # Russia
     - megafon
-    - мегафон
     - mts
-    - мтс
     - beeline
-    - билайн
     - tele2
     - yota
-    - йота
-    # Украина
+    - motiv
+    - smarts
+    - baykal westcom
+    - kuban gsm
+    # Ukraine
     - kyivstar
-    - київстар
     - vodafone ua
     - lifecell
-    # Казахстан
+    - ukrtelecom mobile
+    - intertelecom
+    - 3mob
+    # Kazakhstan
     - kcell
     - beeline kz
     - altel
     - activ
-    # Беларусь
+    - tele2 kz
+    # Belarus
     - a1 belarus
-    - мтс беларусь
+    - velcom
+    - mts belarus
     - life belarus
-    # Узбекистан
+    # Uzbekistan
     - ucell
     - beeline uz
     - uzmobile
     - humans
-    # Азербайджан
+    - perfectum mobile
+    # Azerbaijan
     - azercell
     - bakcell
     - nar mobile
-    # Грузия
+    # Georgia
     - magticom
     - geocell
     - silknet mobile
-    # Армения
+    - veon georgia
+    # Armenia
     - ucom
     - viva-mts
     - team telecom armenia
-    # Молдова
+    # Moldova
     - orange moldova
     - moldcell
-    # Кыргызстан
+    - unite
+    # Kyrgyzstan
     - megacom
     - beeline kg
     - o! kyrgyzstan
-    # Таджикистан
+    - fonex
+    # Tajikistan
     - tcell
     - megafon tajikistan
     - beeline tj
+    - babilon-mobile
 
   isp:
-    # Россия
+    # Russia
     - rostelecom
-    - ростелеком
     - ttk
-    - транстелеком
+    - transtelecom
     - er-telecom
     - dom.ru
-    - дом.ру
-    # Украина
+    - akado
+    - netbynet
+    - lanport
+    - enforta
+    - convex
+    - sumtel
+    - cortex
+    - zhivoe tv
+    - intersvyaz
+    - svaytelecom
+    - telenet
+    - deltalink
+    - sibseti
+    - comstar
+    - flex
+    - quantum
+    # Ukraine
     - ukrtelecom
-    - укртелеком
     - triolan
     - volia
     - datagroup
-    # Казахстан
+    - lanet
+    - fregat
+    - wnet
+    - kyivnet
+    - uanet
+    - flynet
+    - omega
+    # Kazakhstan
     - kazakhtelecom
-    - казахтелеком
-    # Беларусь
+    - kcell fixed
+    - transtelecom kz
+    - almatvkabel
+    - astel
+    # Belarus
     - beltelecom
-    - белтелеком
-    # Узбекистан
+    - atlant telecom
+    - cosmos tv
+    # Uzbekistan
     - uzbektelecom
     - turontelecom
-    # Азербайджан
+    - sarkor telecom
+    - easttelekom
+    - sharq telecom
+    # Azerbaijan
     - aztelekom
     - azeronline
-    # Грузия
+    - delta telecom
+    # Georgia
     - silknet
     - caucasus online
-    # Армения
+    - globalnet
+    # Armenia
     - rostelecom armenia
-    # Молдова
+    - ucom fixed
+    - arminco
+    # Moldova
     - moldtelecom
     - starnet
+    - sun communications
+
+  regional_isp:
+    - regional
+    - municipal
+    - city net
+    - town network
+    - local isp
+    - oblast telecom
+    - krai telecom
 
   hosting:
-    # Международные
+    # Global
     - digitalocean
     - amazon
     - aws
     - google cloud
     - gcp
     - azure
-    - microsoft
+    - microsoft corporation
     - hetzner
     - ovh
     - linode
     - vultr
     - cloudflare
-    # Россия
+    - akamai
+    - leaseweb
+    - contabo
+    - scaleway
+    - rackspace
+    - choopa
+    - serverius
+    - hostkey
+    - quadranet
+    - psychz
+    - colocrossing
+    # Russia
     - selectel
     - timeweb
     - beget
     - vdsina
     - firstvds
     - reg.ru
+    - nic.ru
     - masterhost
     - ruvds
     - vscale
-    # Украина
+    - infobox
+    - dataline
+    - linxdatacenter
+    - marosnet
+    - severen telecom
+    - hostland
+    - adminvps
+    - vpsville
+    # Ukraine
     - ukraine.com.ua
     - hosting ukraine
     - cityhost
     - tuthost
-    # Казахстан
+    - freehost
+    - hostpro
+    # Kazakhstan
     - ps.kz
     - hoster.kz
     - vps.kz
+    - hosting.kz
+    # Other CIS
+    - hosted.by
+    - hoster.by
+    - hoster.uz
 
   vpn_proxy:
     - vpn
     - proxy
     - tunnel
+    - anonymizer
     - nordvpn
     - expressvpn
     - surfshark
@@ -176,23 +257,77 @@ keywords:
     - protonvpn
     - private internet access
     - cyberghost
-    - anonymizer
+    - ipvanish
+    - purevpn
+    - windscribe
+    - tunnelbear
+    - hide.me
     - tor exit
     - tor relay
+    - tor node
+    - exitnode
+    - relay node
+    - vpngate
+    - opera vpn
+    - m247
+    - m247 ltd
+    - datacamp limited
+    - shinjiru
+    - securedragon
+    - privacy services
+    - anonymous proxy
+    - residential proxy
+    - datacenter proxy
 
   business:
+    # Tech companies
     - yandex
-    - яндекс
     - mail.ru
     - vk company
+    - vkontakte
+    - odnoklassniki
+    - rambler
     - kaspersky
+    - dr.web
+    - eset
+    - abbyy
+    # Banks
     - sberbank
-    - сбербанк
+    - vtb
+    - alfabank
+    - raiffeisen
+    - gazprombank
+    - tinkoff
+    - rosbank
+    - sovcombank
+    # Energy
     - gazprom
-    - газпром
     - rosneft
-    - роснефть
     - lukoil
+    - tatneft
+    - surgutneftegaz
+    - transneft
+    # Retail
+    - magnit
+    - x5 retail
+    - metro
+    - auchan
+    - leroy merlin
+    - ozon
+    - wildberries
+    # Government
+    - government
+    - ministry
+    - administration
+    - municipal
+    - state institution
+    # Corporate
+    - corporate
+    - enterprise
+    - closed joint
+    - pjsc
+    - ojsc
+    - limited liability
 
   infrastructure:
     - backbone
@@ -202,3 +337,20 @@ keywords:
     - peering
     - tier-1
     - tier-2
+    - tier1
+    - tier2
+    - uplink
+    - core network
+    - bgp
+    - route server
+    - msk-ix
+    - dataix
+    - eurasia peering
+    - hurricane electric
+    - cogent
+    - ntt communications
+    - telia carrier
+    - telecom italia sparkle
+    - level 3
+    - centurylink
+    - gtt communications

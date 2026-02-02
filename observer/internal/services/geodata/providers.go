@@ -1,12 +1,159 @@
 package geodata
 
 import (
+	"encoding/json"
+	"log"
+	"os"
+	"path/filepath"
 	"strings"
+	"sync"
+	"time"
 )
+
+// UnknownProvider информация о неизвестном провайдере
+type UnknownProvider struct {
+	Organization string    `json:"organization"`
+	FirstSeen    time.Time `json:"first_seen"`
+	LastSeen     time.Time `json:"last_seen"`
+	Count        int       `json:"count"`
+	Countries    []string  `json:"countries,omitempty"`
+}
+
+// UnknownProvidersLog лог неизвестных провайдеров
+type UnknownProvidersLog struct {
+	mu        sync.Mutex
+	filePath  string
+	providers map[string]*UnknownProvider
+	enabled   bool
+}
+
+var unknownLog *UnknownProvidersLog
+var unknownLogOnce sync.Once
+
+// InitUnknownProvidersLog инициализирует систему логирования неизвестных провайдеров
+func InitUnknownProvidersLog(configDir string, enabled bool) {
+	unknownLogOnce.Do(func() {
+		if !enabled {
+			unknownLog = &UnknownProvidersLog{enabled: false}
+			return
+		}
+
+		logPath := filepath.Join(configDir, "unknown_providers.json")
+		unknownLog = &UnknownProvidersLog{
+			filePath:  logPath,
+			providers: make(map[string]*UnknownProvider),
+			enabled:   true,
+		}
+
+		// Загружаем существующий лог
+		if data, err := os.ReadFile(logPath); err == nil {
+			if err := json.Unmarshal(data, &unknownLog.providers); err != nil {
+				log.Printf("[UnknownProviders] Failed to load existing log: %v", err)
+			} else {
+				log.Printf("[UnknownProviders] Loaded %d unknown providers from log", len(unknownLog.providers))
+			}
+		}
+	})
+}
+
+// logUnknownProvider добавляет провайдера в лог неизвестных
+func (l *GeoDataLoader) logUnknownProvider(organization string, country string) {
+	if unknownLog == nil || !unknownLog.enabled {
+		return
+	}
+
+	unknownLog.mu.Lock()
+	defer unknownLog.mu.Unlock()
+
+	orgLower := strings.ToLower(organization)
+	if provider, exists := unknownLog.providers[orgLower]; exists {
+		provider.Count++
+		provider.LastSeen = time.Now()
+		if country != "" && !contains(provider.Countries, country) {
+			provider.Countries = append(provider.Countries, country)
+		}
+	} else {
+		countries := []string{}
+		if country != "" {
+			countries = append(countries, country)
+		}
+		unknownLog.providers[orgLower] = &UnknownProvider{
+			Organization: organization,
+			FirstSeen:    time.Now(),
+			LastSeen:     time.Now(),
+			Count:        1,
+			Countries:    countries,
+		}
+		log.Printf("[UnknownProvider] New: %s (country: %s)", organization, country)
+	}
+
+	// Периодически сохраняем в файл (каждые 10 новых записей)
+	if len(unknownLog.providers)%10 == 0 {
+		unknownLog.save()
+	}
+}
+
+// save сохраняет лог в файл
+func (ul *UnknownProvidersLog) save() {
+	if !ul.enabled {
+		return
+	}
+
+	data, err := json.MarshalIndent(ul.providers, "", "  ")
+	if err != nil {
+		log.Printf("[UnknownProviders] Failed to marshal log: %v", err)
+		return
+	}
+
+	if err := os.WriteFile(ul.filePath, data, 0644); err != nil {
+		log.Printf("[UnknownProviders] Failed to save log: %v", err)
+	}
+}
+
+// FlushUnknownProvidersLog принудительно сохраняет лог
+func FlushUnknownProvidersLog() {
+	if unknownLog != nil {
+		unknownLog.mu.Lock()
+		defer unknownLog.mu.Unlock()
+		unknownLog.save()
+	}
+}
+
+// GetUnknownProvidersStats возвращает статистику по неизвестным провайдерам
+func GetUnknownProvidersStats() map[string]*UnknownProvider {
+	if unknownLog == nil || !unknownLog.enabled {
+		return nil
+	}
+
+	unknownLog.mu.Lock()
+	defer unknownLog.mu.Unlock()
+
+	// Возвращаем копию
+	result := make(map[string]*UnknownProvider)
+	for k, v := range unknownLog.providers {
+		result[k] = v
+	}
+	return result
+}
+
+func contains(slice []string, item string) bool {
+	for _, s := range slice {
+		if s == item {
+			return true
+		}
+	}
+	return false
+}
 
 // GetProviderType определяет тип провайдера по названию организации
 // Возвращает тип провайдера и его модификатор
 func (l *GeoDataLoader) GetProviderType(organization string) (string, float64) {
+	return l.GetProviderTypeWithCountry(organization, "")
+}
+
+// GetProviderTypeWithCountry определяет тип провайдера с учетом страны
+// Возвращает тип провайдера и его модификатор
+func (l *GeoDataLoader) GetProviderTypeWithCountry(organization string, country string) (string, float64) {
 	orgLower := strings.ToLower(organization)
 
 	l.mu.RLock()
@@ -47,6 +194,8 @@ func (l *GeoDataLoader) GetProviderType(organization string) (string, float64) {
 	}
 
 	// По умолчанию - ISP с модификатором 1.0
+	// Логируем неизвестного провайдера для последующего анализа
+	l.logUnknownProvider(organization, country)
 	return "isp", 1.0
 }
 

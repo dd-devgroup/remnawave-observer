@@ -49,6 +49,7 @@ type UserIPStats struct {
 type ASNInfo struct {
 	ASN          string   `json:"asn"`
 	Organization string   `json:"organization,omitempty"` // Название провайдера
+	Country      string   `json:"country,omitempty"`      // Код страны (RU, UA, KZ, и т.д.)
 	TTLSeconds   int      `json:"ttl_seconds"`
 	IPs          []string `json:"ips"`
 	IPCount      int      `json:"ip_count"`       // Количество IP в этом ASN

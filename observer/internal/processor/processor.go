@@ -498,10 +498,18 @@ func (p *LogProcessor) processEntryByASN(ctx context.Context, entry models.LogEn
 
 	if res.StatusCode == 0 && res.IsNew {
 		if identifierType == "ASN" && orgName != "" {
-			// Классифицируем провайдера для логирования
+			// Получаем страну из GeoIP для передачи в классификатор
+			var countryCode string
+			if p.geoService != nil && p.cfg.GeoIPEnabled {
+				if geoLoc, err := p.geoService.Lookup(entry.SourceIP); err == nil && geoLoc != nil {
+					countryCode = geoLoc.CountryCode
+				}
+			}
+
+			// Классифицируем провайдера для логирования с учетом страны
 			var providerInfo string
 			if p.asnClassifier != nil {
-				classification := p.asnClassifier.Classify(identifier, orgName)
+				classification := p.asnClassifier.ClassifyWithCountry(identifier, orgName, countryCode)
 				providerInfo = fmt.Sprintf(" [%s, риск:%.1f]", classification.ProviderType, classification.Modifier)
 			}
 			log.Printf("Новый %s для пользователя %s%s: %s (%s)%s | IP: %s. Всего: %d/%d",
@@ -649,21 +657,34 @@ func (p *LogProcessor) collectASNDetails(ctx context.Context, email string, asns
 			}
 		}
 
-		// Получаем название организации для ASN
+		// Получаем название организации и страну для ASN
 		// Сначала пробуем из кеша Redis
 		org, err := redisStore.GetASNOrgName(ctx, asn)
 		if err != nil {
 			log.Printf("Ошибка получения org из кеша для ASN %s: %v", asn, err)
 		}
 
-		// Если в кеше нет - пробуем через lookup по первому IP
-		if org == "" && p.asnLookup != nil && len(ips) > 0 {
-			_, orgName, err := p.asnLookup.LookupWithOrg(ips[0])
-			if err == nil && orgName != "" {
-				org = orgName
-				// Сохраняем в кеш для будущего использования
-				if cacheErr := redisStore.SetASNOrgName(ctx, asn, orgName, p.cfg.UserSubnetTTL); cacheErr != nil {
-					log.Printf("Ошибка кеширования org для ASN %s: %v", asn, cacheErr)
+		// Получаем код страны через lookup
+		var countryCode string
+		if p.asnLookup != nil && len(ips) > 0 {
+			if org == "" {
+				// Если в кеше нет org - используем LookupFull
+				_, orgName, country, err := p.asnLookup.LookupFull(ips[0])
+				if err == nil {
+					if orgName != "" {
+						org = orgName
+						// Сохраняем в кеш для будущего использования
+						if cacheErr := redisStore.SetASNOrgName(ctx, asn, orgName, p.cfg.UserSubnetTTL); cacheErr != nil {
+							log.Printf("Ошибка кеширования org для ASN %s: %v", asn, cacheErr)
+						}
+					}
+					countryCode = country
+				}
+			} else {
+				// Если org уже есть - получаем только страну
+				_, _, country, err := p.asnLookup.LookupFull(ips[0])
+				if err == nil {
+					countryCode = country
 				}
 			}
 		}
@@ -676,6 +697,7 @@ func (p *LogProcessor) collectASNDetails(ctx context.Context, email string, asns
 		result[asn] = &models.ASNInfo{
 			ASN:          asn,
 			Organization: org,
+			Country:      countryCode,
 			IPs:          ips,
 			IPCount:      len(ips),
 		}
@@ -857,7 +879,8 @@ func (p *LogProcessor) performEnhancedAnalytics(
 	providerTypes := make(map[string]string)
 
 	for asnStr, info := range asnDetails {
-		classification := p.asnClassifier.Classify(asnStr, info.Organization)
+		// Используем ClassifyWithCountry для более точной классификации
+		classification := p.asnClassifier.ClassifyWithCountry(asnStr, info.Organization, info.Country)
 		asnClassifications[asnStr] = classification
 		providerTypes[asnStr] = classification.ProviderType
 

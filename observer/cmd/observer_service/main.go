@@ -66,6 +66,9 @@ func main() {
 	var scorer *scoring.Scorer
 
 	if cfg.GeoIPEnabled || cfg.ScoringEnabled {
+		// Инициализируем логирование неизвестных провайдеров
+		geodata.InitUnknownProvidersLog(cfg.GeoDataConfigDir, cfg.UnknownProvidersLogEnabled)
+
 		// Загружаем конфигурации провайдеров и агломераций
 		geoDataLoader, err = geodata.NewGeoDataLoader(cfg.GeoDataConfigDir)
 		if err != nil {
@@ -118,11 +121,34 @@ func main() {
 	poolMonitor := monitor.NewPoolMonitor(redisStore, cfg, geoService)
 	apiServer := api.NewServer(cfg.Port, logProcessor, redisStore, rabbitPublisher)
 
-	// Сообщаем WaitGroup, что будем ждать три горутины
-	wg.Add(3)
+	// Инициализация Auto-Learner (опционально)
+	var autoLearner *geodata.AutoLearner
+	if cfg.AutoLearningEnabled && geoDataLoader != nil {
+		autoLearner = geodata.NewAutoLearner(
+			geoDataLoader,
+			cfg.GeoDataConfigDir,
+			cfg.AutoLearningInterval,
+			cfg.AutoLearningMinCount,
+			cfg.AutoLearningMinConfidence,
+		)
+		log.Printf("✅ Auto-Learner инициализирован")
+	}
+
+	// Сообщаем WaitGroup, сколько горутин будем запускать
+	goroutineCount := 3
+	if autoLearner != nil {
+		goroutineCount++
+	}
+
+	wg.Add(goroutineCount)
 	go poolMonitor.Run(ctx, &wg)
 	go logProcessor.StartWorkerPool(ctx, &wg)
 	go logProcessor.StartSideEffectWorkerPool(ctx, &wg) // Запускаем новый пул воркеров
+
+	// Запускаем Auto-Learner если включен
+	if autoLearner != nil {
+		go autoLearner.Run(ctx, &wg)
+	}
 
 	srv := &http.Server{
 		Addr:    ":" + cfg.Port,
@@ -155,6 +181,12 @@ func main() {
 
 	log.Println("Ожидание завершения фоновых процессов...")
 	wg.Wait()
+
+	// Сохраняем лог неизвестных провайдеров перед выходом
+	if cfg.UnknownProvidersLogEnabled {
+		log.Println("Сохранение лога неизвестных провайдеров...")
+		geodata.FlushUnknownProvidersLog()
+	}
 
 	log.Println("Все фоновые процессы остановлены. Сервис успешно остановлен.")
 }

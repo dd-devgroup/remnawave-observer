@@ -54,6 +54,15 @@ type Config struct {
 	ScoringEnabled      bool    // Включить систему скоринга
 	ScoreThresholdWarn  float64 // Порог для предупреждения (default: 50)
 	ScoreThresholdBlock float64 // Порог для блокировки (default: 85)
+
+	// --- ПАРАМЕТРЫ АВТООБУЧЕНИЯ ---
+	UnknownProvidersLogEnabled bool // Включить логирование неизвестных провайдеров (default: false)
+
+	// Автоматическое обучение
+	AutoLearningEnabled       bool          // Включить автоматическое обучение (default: false)
+	AutoLearningInterval      time.Duration // Интервал проверки (default: 24 часа)
+	AutoLearningMinCount      int           // Минимальное количество встреч для автодобавления (default: 10)
+	AutoLearningMinConfidence string        // Минимальный уровень уверенности: high, medium (default: high)
 }
 
 // New загружает конфигурацию из переменных окружения.
@@ -103,6 +112,13 @@ func New() *Config {
 		ScoringEnabled:      getEnvBool("SCORING_ENABLED", false),
 		ScoreThresholdWarn:  getEnvFloat("SCORE_THRESHOLD_WARN", 50.0),
 		ScoreThresholdBlock: getEnvFloat("SCORE_THRESHOLD_BLOCK", 85.0),
+
+		// --- Загрузка параметров автообучения ---
+		UnknownProvidersLogEnabled: getEnvBool("UNKNOWN_PROVIDERS_LOG_ENABLED", false),
+		AutoLearningEnabled:        getEnvBool("AUTO_LEARNING_ENABLED", false),
+		AutoLearningInterval:       time.Duration(getEnvInt("AUTO_LEARNING_INTERVAL_HOURS", 24)) * time.Hour,
+		AutoLearningMinCount:       getEnvInt("AUTO_LEARNING_MIN_COUNT", 10),
+		AutoLearningMinConfidence:  getEnv("AUTO_LEARNING_MIN_CONFIDENCE", "high"),
 	}
 
 	log.Printf("Конфигурация загружена. Порт: %s", cfg.Port)
@@ -136,6 +152,13 @@ func New() *Config {
 	}
 	if cfg.ScoringEnabled {
 		log.Printf("Система скоринга включена. Warn threshold: %.1f, Block threshold: %.1f", cfg.ScoreThresholdWarn, cfg.ScoreThresholdBlock)
+	}
+	if cfg.UnknownProvidersLogEnabled {
+		log.Printf("Логирование неизвестных провайдеров включено")
+	}
+	if cfg.AutoLearningEnabled {
+		log.Printf("Автоматическое обучение включено. Интервал: %v, Min count: %d, Min confidence: %s",
+			cfg.AutoLearningInterval, cfg.AutoLearningMinCount, cfg.AutoLearningMinConfidence)
 	}
 
 	return cfg
