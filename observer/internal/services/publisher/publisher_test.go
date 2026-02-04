@@ -1,8 +1,11 @@
 package publisher
 
 import (
+	"fmt"
 	"testing"
 	"time"
+
+	"github.com/rabbitmq/amqp091-go"
 )
 
 // slowConfirm simulates a DeferredConfirmation that responds after a delay.
@@ -59,5 +62,33 @@ func TestWaitWithTimeout_ZeroDelay(t *testing.T) {
 	}
 	if !ack {
 		t.Fatal("expected ack=true")
+	}
+}
+
+// --- isChannelError tests (Commit B) ---
+
+func TestIsChannelError_AMQPClosedError(t *testing.T) {
+	if !isChannelError(amqp091.ErrClosed) {
+		t.Error("amqp091.ErrClosed must be detected as channel error")
+	}
+}
+
+func TestIsChannelError_WrappedAMQPError(t *testing.T) {
+	base := &amqp091.Error{Code: 504, Reason: "channel/connection is not open"}
+	err := fmt.Errorf("publish failed: %w", base)
+	if !isChannelError(err) {
+		t.Error("wrapped *amqp091.Error must be detected as channel error")
+	}
+}
+
+func TestIsChannelError_GenericError(t *testing.T) {
+	if isChannelError(fmt.Errorf("network timeout")) {
+		t.Error("generic error must NOT be channel error")
+	}
+}
+
+func TestIsChannelError_Nil(t *testing.T) {
+	if isChannelError(nil) {
+		t.Error("nil must NOT be channel error")
 	}
 }

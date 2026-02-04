@@ -199,7 +199,18 @@ func (p *RabbitMQPublisher) PublishBlockMessage(msg models.BlockMessage) error {
 			},
 		)
 		if err != nil {
-			p.channelPool <- ch
+			if isChannelError(err) {
+				ch.Close()
+				log.Printf("Канал в пуле закрыт, удалён из пула (попытка %d/%d). Попытка замещения...", attempt+1, p.maxRetries)
+				if !p.replaceChannel() {
+					log.Println("Замещение не удалось, инициируя переподключение...")
+					if reconnErr := p.connectWithRetry(); reconnErr != nil {
+						log.Printf("Не удалось переподключиться: %v", reconnErr)
+					}
+				}
+			} else {
+				p.channelPool <- ch
+			}
 			log.Printf("Ошибка публикации сообщения в RabbitMQ (попытка %d/%d): %v", attempt+1, p.maxRetries, err)
 			time.Sleep(p.backoffDelay(attempt))
 			continue
@@ -239,6 +250,41 @@ func (p *RabbitMQPublisher) Ping() error {
 	default:
 		return errors.New("rabbitmq channel pool is empty")
 	}
+}
+
+// isChannelError возвращает true, если ошибка указывает на закрытый / невалидный канал AMQP.
+func isChannelError(err error) bool {
+	if err == nil {
+		return false
+	}
+	var amqpErr *amqp091.Error
+	return errors.As(err, &amqpErr)
+}
+
+// replaceChannel создаёт новый канал на текущем соединении и кладёт его в пул.
+// Возвращает true при успехе; при отсутствии соединения — false.
+func (p *RabbitMQPublisher) replaceChannel() bool {
+	if p.conn == nil || p.conn.IsClosed() {
+		return false
+	}
+	ch, err := p.conn.Channel()
+	if err != nil {
+		log.Printf("Не удалось создать замещающий канал: %v", err)
+		return false
+	}
+	if err := ch.ExchangeDeclare(p.exchangeName, "fanout", true, false, false, false, nil); err != nil {
+		ch.Close()
+		log.Printf("Не удалось объявить exchange на замещающем канале: %v", err)
+		return false
+	}
+	if err := ch.Confirm(false); err != nil {
+		ch.Close()
+		log.Printf("Не удалось включить confirm mode на замещающем канале: %v", err)
+		return false
+	}
+	p.channelPool <- ch
+	log.Println("Замещающий канал успешно добавлен в пул.")
+	return true
 }
 
 // Close закрывает соединение с RabbitMQ.
