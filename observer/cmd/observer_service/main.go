@@ -39,7 +39,7 @@ func main() {
 	}
 	defer redisStore.Close()
 
-	rabbitPublisher, err := publisher.NewRabbitMQPublisher(cfg.RabbitMQURL, cfg.BlockingExchangeName)
+	rabbitPublisher, err := publisher.NewRabbitMQPublisher(cfg.RabbitMQURL, cfg.BlockingExchangeName, cfg.PublisherPoolSize, cfg.RabbitPublishMaxRetries, cfg.RabbitPublishBackoffBaseMs, cfg.RabbitPublishBackoffMaxMs)
 	if err != nil {
 		log.Fatalf("Критическая ошибка: не удалось подключиться к RabbitMQ: %v", err)
 	}

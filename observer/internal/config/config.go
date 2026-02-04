@@ -62,6 +62,12 @@ type Config struct {
 	MaxRequestBytes         int64 // Максимальный размер body POST /log-entry (default: 2MB)
 	MaxLogEntriesPerRequest int   // Максимальное количество записей в одном запросе (default: 1000)
 
+	// --- ПАРАМЕТРЫ PUBLISHER ---
+	PublisherPoolSize          int // Размер пула каналов RabbitMQ (default: 5)
+	RabbitPublishMaxRetries    int // Макс. количество повторов публикации (default: 5)
+	RabbitPublishBackoffBaseMs int // Базовый интервал backoff в ms (default: 500)
+	RabbitPublishBackoffMaxMs  int // Макс. интервал backoff в ms (default: 30000)
+
 	// --- ПАРАМЕТРЫ АВТООБУЧЕНИЯ ---
 	UnknownProvidersLogEnabled bool // Включить логирование неизвестных провайдеров (default: false)
 
@@ -98,6 +104,12 @@ func New() *Config {
 		// --- Загрузка параметров входящих запросов ---
 		MaxRequestBytes:         int64(getEnvInt("MAX_REQUEST_BYTES", 2*1024*1024)),
 		MaxLogEntriesPerRequest: getEnvInt("MAX_LOG_ENTRIES_PER_REQUEST", 1000),
+
+		// --- Загрузка параметров publisher ---
+		PublisherPoolSize:          getEnvInt("PUBLISHER_POOL_SIZE", 5),
+		RabbitPublishMaxRetries:    getEnvInt("RABBIT_PUBLISH_MAX_RETRIES", 5),
+		RabbitPublishBackoffBaseMs: getEnvInt("RABBIT_PUBLISH_BACKOFF_BASE_MS", 500),
+		RabbitPublishBackoffMaxMs:  getEnvInt("RABBIT_PUBLISH_BACKOFF_MAX_MS", 30000),
 
 		// --- Загрузка параметров подсетей ---
 		DetectBySubnet:    getEnvBool("DETECT_BY_SUBNET", false),
