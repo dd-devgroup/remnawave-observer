@@ -83,6 +83,7 @@ func (s *Server) handleProcessLogEntries(c *gin.Context) {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "empty request body", "code": "invalid_json"})
 			return
 		}
+		log.Printf("Ошибка декодирования body: %v", err)
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error(), "code": "invalid_json"})
 		return
 	}
