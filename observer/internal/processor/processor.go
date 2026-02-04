@@ -26,7 +26,7 @@ type LogProcessor struct {
 	cfg               *config.Config
 	asnLookup         *asn.ASNLookup         // Сервис для lookup ASN
 	logChannel        chan []models.LogEntry // Канал для получения пачек логов
-	sideEffectChannel chan func()            // Канал для побочных задач (алерты, очистка)
+	sideEffectChannel chan func(context.Context) // Канал для побочных задач (алерты, очистка)
 
 	// Новые сервисы для Anti-Abuse системы
 	geoService    *geoip.GeoIPService   // Сервис геолокации
@@ -62,7 +62,7 @@ func NewLogProcessor(
 		asnClassifier:     asnClassifier,
 		scorer:            scorer,
 		logChannel:        make(chan []models.LogEntry, cfg.LogChannelBufferSize),
-		sideEffectChannel: make(chan func(), cfg.SideEffectChannelBufferSize),
+		sideEffectChannel: make(chan func(context.Context), cfg.SideEffectChannelBufferSize),
 	}
 
 	// Парсим исключённые подсети один раз при инициализации
@@ -146,7 +146,9 @@ func (p *LogProcessor) StartSideEffectWorkerPool(ctx context.Context, mainWg *sy
 				case <-ctx.Done():
 					log.Printf("Воркер побочных задач %d пропустил задачу из-за отмены контекста.", workerID)
 				default:
-					task()
+					taskCtx, cancel := context.WithTimeout(ctx, p.cfg.SideEffectTimeout)
+					task(taskCtx)
+					cancel()
 				}
 			}
 			log.Printf("Воркер побочных задач %d останавливается.", workerID)
@@ -177,7 +179,7 @@ func (p *LogProcessor) EnqueueEntries(entries []models.LogEntry) error {
 }
 
 // enqueueSideEffectTask добавляет побочную задачу в очередь на выполнение.
-func (p *LogProcessor) enqueueSideEffectTask(task func()) {
+func (p *LogProcessor) enqueueSideEffectTask(task func(context.Context)) {
 	defer func() {
 		if r := recover(); r != nil {
 			log.Println("Попытка записи в закрытый канал побочных задач. Сервис находится в процессе остановки.")
@@ -249,7 +251,7 @@ func (p *LogProcessor) processEntryByIP(ctx context.Context, entry models.LogEnt
 				log.Printf("Ошибка отправки сообщения о блокировке: %v", err)
 			} else {
 				log.Printf("Сообщение о блокировке %d IP-адресов для %s%s отправлено", len(ipsToBlock), entry.UserEmail, debugMarker)
-				p.enqueueSideEffectTask(func() {
+				p.enqueueSideEffectTask(func(ctx context.Context) {
 					p.scheduleIPsClear(ctx, entry.UserEmail)
 				})
 			}
@@ -264,8 +266,8 @@ func (p *LogProcessor) processEntryByIP(ctx context.Context, entry models.LogEnt
 			BlockDuration:    p.cfg.BlockDuration,
 			ViolationType:    "ip_limit_exceeded",
 		}
-		p.enqueueSideEffectTask(func() {
-			if err := p.alerter.SendAlert(alertPayload); err != nil {
+		p.enqueueSideEffectTask(func(ctx context.Context) {
+			if err := p.alerter.SendAlert(ctx, alertPayload); err != nil {
 				log.Printf("Ошибка отправки вебхук-уведомления: %v", err)
 			}
 		})
@@ -312,7 +314,7 @@ func (p *LogProcessor) processEntryBySubnet(ctx context.Context, entry models.Lo
 				log.Printf("Ошибка отправки сообщения о блокировке подсетей: %v", err)
 			} else {
 				log.Printf("Сообщение о блокировке %d подсетей для %s%s отправлено", len(subnetsToBlock), entry.UserEmail, debugMarker)
-				p.enqueueSideEffectTask(func() {
+				p.enqueueSideEffectTask(func(ctx context.Context) {
 					p.scheduleSubnetsClear(ctx, entry.UserEmail)
 				})
 			}
@@ -327,8 +329,8 @@ func (p *LogProcessor) processEntryBySubnet(ctx context.Context, entry models.Lo
 			BlockDuration:    p.cfg.BlockDuration,
 			ViolationType:    "subnet_limit_exceeded",
 		}
-		p.enqueueSideEffectTask(func() {
-			if err := p.alerter.SendAlert(alertPayload); err != nil {
+		p.enqueueSideEffectTask(func(ctx context.Context) {
+			if err := p.alerter.SendAlert(ctx, alertPayload); err != nil {
 				log.Printf("Ошибка отправки вебхук-уведомления: %v", err)
 			}
 		})
@@ -551,7 +553,7 @@ func (p *LogProcessor) processEntryByASN(ctx context.Context, entry models.LogEn
 			} else {
 				log.Printf("✅ Сообщение о блокировке %d элементов для %s%s отправлено (тип: %s)",
 					len(ipsToBlock), entry.UserEmail, debugMarker, identifierType)
-				p.enqueueSideEffectTask(func() {
+				p.enqueueSideEffectTask(func(ctx context.Context) {
 					p.scheduleASNClear(ctx, entry.UserEmail)
 				})
 			}
@@ -617,8 +619,8 @@ func (p *LogProcessor) processEntryByASN(ctx context.Context, entry models.LogEn
 			alertPayload.AllUserIPs = res.AllUserItems
 		}
 
-		p.enqueueSideEffectTask(func() {
-			if err := p.alerter.SendAlert(alertPayload); err != nil {
+		p.enqueueSideEffectTask(func(ctx context.Context) {
+			if err := p.alerter.SendAlert(ctx, alertPayload); err != nil {
 				log.Printf("Ошибка отправки вебхук-уведомления: %v", err)
 			}
 		})

@@ -29,6 +29,7 @@ type Config struct {
 	LogChannelBufferSize        int
 	SideEffectWorkerPoolSize    int
 	SideEffectChannelBufferSize int
+	SideEffectTimeout          time.Duration // Таймаут на одну побочную задачу (default: 10s)
 
 	// --- ПАРАМЕТРЫ ДЛЯ РЕЖИМА ПОДСЕТЕЙ ---
 	DetectBySubnet    bool          // Включить режим детекции по подсетям
@@ -100,6 +101,7 @@ func New() *Config {
 		LogChannelBufferSize:        getEnvInt("LOG_CHANNEL_BUFFER_SIZE", 100),
 		SideEffectWorkerPoolSize:    getEnvInt("SIDE_EFFECT_WORKER_POOL_SIZE", 10),
 		SideEffectChannelBufferSize: getEnvInt("SIDE_EFFECT_CHANNEL_BUFFER_SIZE", 50),
+		SideEffectTimeout:          time.Duration(getEnvInt("SIDE_EFFECT_TIMEOUT_SECONDS", 10)) * time.Second,
 
 		// --- Загрузка параметров входящих запросов ---
 		MaxRequestBytes:         int64(getEnvInt("MAX_REQUEST_BYTES", 2*1024*1024)),

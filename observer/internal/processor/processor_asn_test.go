@@ -83,7 +83,7 @@ type MockAlerter struct {
 	alertsSent int
 }
 
-func (m *MockAlerter) SendAlert(payload models.AlertPayload) error {
+func (m *MockAlerter) SendAlert(ctx context.Context, payload models.AlertPayload) error {
 	m.alertsSent++
 	return nil
 }
