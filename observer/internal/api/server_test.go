@@ -178,23 +178,25 @@ func TestHandleProcessLogEntries_EmptyArray(t *testing.T) {
 	}
 }
 
-// --- unknown fields (DisallowUnknownFields) ---
+// --- extra fields from Vector are silently ignored ---
 
-func TestHandleProcessLogEntries_UnknownFields(t *testing.T) {
+func TestHandleProcessLogEntries_VectorExtraFields(t *testing.T) {
 	cfg := defaultCfg()
-	router := setupRouter(cfg, &testEnqueuer{})
+	eq := &testEnqueuer{}
+	router := setupRouter(cfg, eq)
 
-	body := `[{"user_email":"a@b.com","source_ip":"1.2.3.4","extra_field":"bad"}]`
+	// Vector adds "path" (and potentially other metadata) to every entry.
+	body := `[{"user_email":"a@b.com","source_ip":"1.2.3.4","path":"/var/log/app.log","timestamp":"2026-02-05T00:00:00Z"}]`
 	req := httptest.NewRequest("POST", "/log-entry", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 	router.ServeHTTP(w, req)
 
-	if w.Code != http.StatusBadRequest {
-		t.Errorf("expected 400 for unknown field, got %d; body: %s", w.Code, w.Body.String())
+	if w.Code != http.StatusAccepted {
+		t.Errorf("expected 202 with extra Vector fields, got %d; body: %s", w.Code, w.Body.String())
 	}
-	if !strings.Contains(w.Body.String(), "invalid_json") {
-		t.Errorf("expected code invalid_json; body: %s", w.Body.String())
+	if eq.enqueued != 1 {
+		t.Errorf("expected 1 enqueued entry, got %d", eq.enqueued)
 	}
 }
 

@@ -71,7 +71,6 @@ func (s *Server) handleProcessLogEntries(c *gin.Context) {
 
 	var entries []models.LogEntry
 	decoder := json.NewDecoder(c.Request.Body)
-	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&entries); err != nil {
 		metrics.RejectedRequestsTotal.Add(1)
 		var maxBytesErr *http.MaxBytesError
