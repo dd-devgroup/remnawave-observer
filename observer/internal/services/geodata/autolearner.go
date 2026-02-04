@@ -104,6 +104,7 @@ func (al *AutoLearner) performLearningCycle() {
 		}
 
 		suggestedType, confidence, _ := al.suggestProviderType(provider.Organization, providersConfig)
+		confidence = al.boostConfidenceByCount(confidence, provider.Count)
 
 		// Проверяем уровень уверенности
 		if !al.meetsConfidenceThreshold(confidence) {
@@ -236,13 +237,30 @@ func (al *AutoLearner) meetsConfidenceThreshold(confidence string) bool {
 	}
 }
 
+// boostConfidenceByCount повышает уверенность на основе количества наблюдений.
+// count >= 1000 → high (провайдер виден ≥1000 раз, достаточно для автодобавления).
+// count >= 100  → не ниже medium.
+func (al *AutoLearner) boostConfidenceByCount(confidence string, count int) string {
+	switch {
+	case count >= 1000:
+		return "high"
+	case count >= 100:
+		if confidence == "very_low" || confidence == "low" {
+			return "medium"
+		}
+		return confidence
+	default:
+		return confidence
+	}
+}
+
 // extractKeyword извлекает ключевое слово из названия организации
 func (al *AutoLearner) extractKeyword(org string) string {
 	orgLower := strings.ToLower(org)
 
-	// Убираем типичные префиксы и суффиксы
-	orgLower = strings.TrimPrefix(orgLower, "as")
+	// Убираем типичные префиксы и суффиксы ("asn" раньше "as", иначе "asn-..." → "n-...")
 	orgLower = strings.TrimPrefix(orgLower, "asn")
+	orgLower = strings.TrimPrefix(orgLower, "as")
 
 	// Берем первое слово
 	parts := strings.Fields(orgLower)
