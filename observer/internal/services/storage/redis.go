@@ -79,6 +79,8 @@ type RedisStore struct {
 	addCheckASNScriptSHA    string
 	clearASNsScriptSHA      string
 	scanMaxKeys             int
+	scanCount               int
+	scanTimeBudget          time.Duration
 }
 
 // NewRedisStore создает новый экземпляр RedisStore.
@@ -143,6 +145,8 @@ func NewRedisStore(ctx context.Context, redisURL string, scriptPaths ...string) 
 		addCheckASNScriptSHA:    addCheckASNScriptSHA,
 		clearASNsScriptSHA:      clearASNsScriptSHA,
 		scanMaxKeys:             10000,
+		scanCount:               100,
+		scanTimeBudget:          30 * time.Second,
 	}, nil
 }
 
@@ -150,6 +154,20 @@ func NewRedisStore(ctx context.Context, redisURL string, scriptPaths ...string) 
 func (s *RedisStore) SetScanMaxKeys(n int) {
 	if n > 0 {
 		s.scanMaxKeys = n
+	}
+}
+
+// SetScanCount задаёт hint COUNT для Redis SCAN команд.
+func (s *RedisStore) SetScanCount(n int) {
+	if n > 0 {
+		s.scanCount = n
+	}
+}
+
+// SetScanTimeBudget задаёт верхнюю границу по времени одной SCAN операции.
+func (s *RedisStore) SetScanTimeBudget(d time.Duration) {
+	if d > 0 {
+		s.scanTimeBudget = d
 	}
 }
 
@@ -321,11 +339,16 @@ func (s *RedisStore) GetUserActiveSubnets(ctx context.Context, userEmail string)
 }
 
 // GetAllUserEmails сканирует ключи Redis для получения всех username (email) пользователей.
+// Операция ограничена scanMaxKeys (кол-во ключей), scanTimeBudget (время) и дедлайном ctx.
+// При достижении любого из лимитов возвращает частичный результат и логирует предупреждение.
 func (s *RedisStore) GetAllUserEmails(ctx context.Context) ([]string, error) {
+	scanCtx, cancel := context.WithTimeout(ctx, s.scanTimeBudget)
+	defer cancel()
+
 	var cursor uint64
 	emailSet := make(map[string]struct{})
+	deadline := time.Now().Add(s.scanTimeBudget)
 
-	// Сканируем по нескольким паттернам для поддержки всех режимов
 	patterns := []string{
 		"user_ips:*",     // Режим по IP
 		"user_subnets:*", // Режим по подсетям
@@ -333,18 +356,28 @@ func (s *RedisStore) GetAllUserEmails(ctx context.Context) ([]string, error) {
 	}
 
 	scanned := 0
+	partial := false
 	for _, pattern := range patterns {
 		cursor = 0
 		for {
+			if time.Now().After(deadline) {
+				log.Printf("GetAllUserEmails: достигнут time budget %v, результат частичный", s.scanTimeBudget)
+				partial = true
+				break
+			}
 			var keys []string
 			var err error
-			keys, cursor, err = s.client.Scan(ctx, cursor, pattern, 100).Result()
+			keys, cursor, err = s.client.Scan(scanCtx, cursor, pattern, int64(s.scanCount)).Result()
 			if err != nil {
+				if scanCtx.Err() != nil {
+					log.Printf("GetAllUserEmails: контекст отменён (%v), результат частичный", scanCtx.Err())
+					partial = true
+					break
+				}
 				return nil, fmt.Errorf("ошибка при сканировании ключей по паттерну %s: %w", pattern, err)
 			}
 			scanned += len(keys)
 			for _, key := range keys {
-				// Извлекаем email из ключа вида "user_ips:email" или "user_subnets:email"
 				parts := strings.SplitN(key, ":", 2)
 				if len(parts) == 2 {
 					emailSet[parts[1]] = struct{}{}
@@ -354,8 +387,10 @@ func (s *RedisStore) GetAllUserEmails(ctx context.Context) ([]string, error) {
 				break
 			}
 		}
-		if scanned >= s.scanMaxKeys {
-			log.Printf("GetAllUserEmails: достигнут лимит сканирования %d ключей", s.scanMaxKeys)
+		if partial || scanned >= s.scanMaxKeys {
+			if scanned >= s.scanMaxKeys {
+				log.Printf("GetAllUserEmails: достигнут лимит сканирования %d ключей", s.scanMaxKeys)
+			}
 			break
 		}
 	}
@@ -406,22 +441,30 @@ func (s *RedisStore) GetIPsForUserASN(ctx context.Context, email, asn string) ([
 	return s.client.SMembers(ctx, key).Result()
 }
 
-// GetAllIPsForUser возвращает все IP пользователя из всех ASN
+// GetAllIPsForUser возвращает все IP пользователя из всех ASN.
+// Ограничено scanMaxKeys, scanTimeBudget и дедлайном ctx.
 func (s *RedisStore) GetAllIPsForUser(ctx context.Context, email string) ([]string, error) {
+	scanCtx, cancel := context.WithTimeout(ctx, s.scanTimeBudget)
+	defer cancel()
+
 	pattern := fmt.Sprintf("user_asn_ips:%s:*", email)
-	var allIPs []string
-	var uniqueIPs = make(map[string]struct{})
+	uniqueIPs := make(map[string]struct{})
+	deadline := time.Now().Add(s.scanTimeBudget)
 
 	scanned := 0
-	iter := s.client.Scan(ctx, 0, pattern, 0).Iterator()
-	for iter.Next(ctx) {
+	iter := s.client.Scan(scanCtx, 0, pattern, int64(s.scanCount)).Iterator()
+	for iter.Next(scanCtx) {
+		if time.Now().After(deadline) {
+			log.Printf("GetAllIPsForUser(%s): достигнут time budget %v, результат частичный", email, s.scanTimeBudget)
+			break
+		}
 		scanned++
 		if scanned > s.scanMaxKeys {
 			log.Printf("GetAllIPsForUser(%s): достигнут лимит сканирования %d ключей", email, s.scanMaxKeys)
 			break
 		}
 		key := iter.Val()
-		ips, err := s.client.SMembers(ctx, key).Result()
+		ips, err := s.client.SMembers(scanCtx, key).Result()
 		if err != nil {
 			continue
 		}
@@ -430,14 +473,14 @@ func (s *RedisStore) GetAllIPsForUser(ctx context.Context, email string) ([]stri
 		}
 	}
 
-	if err := iter.Err(); err != nil {
+	if err := iter.Err(); err != nil && scanCtx.Err() == nil {
 		return nil, err
 	}
 
+	allIPs := make([]string, 0, len(uniqueIPs))
 	for ip := range uniqueIPs {
 		allIPs = append(allIPs, ip)
 	}
-
 	return allIPs, nil
 }
 

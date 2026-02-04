@@ -13,6 +13,8 @@ type Config struct {
 	Port                        string
 	RedisURL                    string
 	ScanMaxKeys                 int    // Макс. количество ключей при SCAN (default: 10000)
+	ScanCount                   int    // Hint COUNT для Redis SCAN (default: 100)
+	ScanTimeBudgetSeconds       int    // Макс. время одной SCAN операции в секундах (default: 30)
 	RabbitMQURL                 string
 	MaxIPsPerUser               int
 	AlertWebhookURL             string
@@ -89,6 +91,8 @@ func New() *Config {
 		Port:                        getEnv("PORT", "9000"),
 		RedisURL:                    getEnv("REDIS_URL", "redis://localhost:6379/0"),
 		ScanMaxKeys:                 getEnvInt("SCAN_MAX_KEYS", 10000),
+		ScanCount:                   getEnvInt("SCAN_COUNT", 100),
+		ScanTimeBudgetSeconds:       getEnvInt("SCAN_TIME_BUDGET_SECONDS", 30),
 		RabbitMQURL:                 getEnv("RABBITMQ_URL", "amqp://guest:guest@localhost/"),
 		MaxIPsPerUser:               getEnvInt("MAX_IPS_PER_USER", 3),
 		AlertWebhookURL:             getEnv("ALERT_WEBHOOK_URL", ""),

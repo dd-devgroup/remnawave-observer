@@ -39,6 +39,8 @@ func main() {
 	}
 	defer redisStore.Close()
 	redisStore.SetScanMaxKeys(cfg.ScanMaxKeys)
+	redisStore.SetScanCount(cfg.ScanCount)
+	redisStore.SetScanTimeBudget(time.Duration(cfg.ScanTimeBudgetSeconds) * time.Second)
 
 	rabbitPublisher, err := publisher.NewRabbitMQPublisher(cfg.RabbitMQURL, cfg.BlockingExchangeName, cfg.PublisherPoolSize, cfg.RabbitPublishMaxRetries, cfg.RabbitPublishBackoffBaseMs, cfg.RabbitPublishBackoffMaxMs, cfg.PublishConfirmTimeoutMs)
 	if err != nil {
