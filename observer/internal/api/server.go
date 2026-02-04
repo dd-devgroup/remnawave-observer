@@ -2,10 +2,13 @@ package api
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"log"
 	"net/http"
+	"net/netip"
+	"observer_service/internal/config"
 	"observer_service/internal/models"
-	"observer_service/internal/processor"
 	"observer_service/internal/services/publisher"
 	"observer_service/internal/services/storage"
 	"time"
@@ -13,15 +16,21 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
+// EntryEnqueuer определяет интерфейс для добавления записей в очередь обработки.
+type EntryEnqueuer interface {
+	EnqueueEntries(entries []models.LogEntry) error
+}
+
 type Server struct {
 	router    *gin.Engine
-	processor *processor.LogProcessor
+	enqueuer  EntryEnqueuer
 	storage   storage.IPStorage
 	publisher publisher.EventPublisher
 	port      string
+	cfg       *config.Config
 }
 
-func NewServer(port string, proc *processor.LogProcessor, storage storage.IPStorage, pub publisher.EventPublisher) *Server {
+func NewServer(port string, enqueuer EntryEnqueuer, storage storage.IPStorage, pub publisher.EventPublisher, cfg *config.Config) *Server {
 	gin.SetMode(gin.ReleaseMode)
 	router := gin.Default()
 	router.Use(gin.Logger())
@@ -29,10 +38,11 @@ func NewServer(port string, proc *processor.LogProcessor, storage storage.IPStor
 
 	s := &Server{
 		router:    router,
-		processor: proc,
+		enqueuer:  enqueuer,
 		storage:   storage,
 		publisher: pub,
 		port:      port,
+		cfg:       cfg,
 	}
 
 	s.setupRoutes()
@@ -53,13 +63,43 @@ func (s *Server) Run() error {
 }
 
 func (s *Server) handleProcessLogEntries(c *gin.Context) {
+	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, s.cfg.MaxRequestBytes)
+
 	var entries []models.LogEntry
 	if err := c.ShouldBindJSON(&entries); err != nil {
+		var maxBytesErr *http.MaxBytesError
+		if errors.As(err, &maxBytesErr) {
+			c.JSON(http.StatusRequestEntityTooLarge, gin.H{"error": "request body exceeds maximum allowed size"})
+			return
+		}
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
 
-	if err := s.processor.EnqueueEntries(entries); err != nil {
+	if len(entries) == 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "empty entries array"})
+		return
+	}
+
+	if len(entries) > s.cfg.MaxLogEntriesPerRequest {
+		log.Printf("Отклонён запрос: %d записей, максимум %d", len(entries), s.cfg.MaxLogEntriesPerRequest)
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error": fmt.Sprintf("too many entries: %d, max allowed: %d", len(entries), s.cfg.MaxLogEntriesPerRequest),
+		})
+		return
+	}
+
+	for i, entry := range entries {
+		if _, err := netip.ParseAddr(entry.SourceIP); err != nil {
+			log.Printf("Невалидный source_ip в записи %d для пользователя %s: %q", i, entry.UserEmail, entry.SourceIP)
+			c.JSON(http.StatusBadRequest, gin.H{
+				"error": fmt.Sprintf("invalid source_ip at index %d: %q", i, entry.SourceIP),
+			})
+			return
+		}
+	}
+
+	if err := s.enqueuer.EnqueueEntries(entries); err != nil {
 		log.Printf("Warning: log queue is full. Rejecting request for %d entries. Error: %v", len(entries), err)
 		c.JSON(http.StatusServiceUnavailable, gin.H{
 			"error": "Service is temporarily overloaded. Please try again later.",
@@ -83,13 +123,11 @@ func (s *Server) handleHealthCheck(c *gin.Context) {
 		"rabbitmq_connection": "ok",
 	}
 
-	// Check Redis
 	if err := s.storage.Ping(ctx); err != nil {
 		status = http.StatusServiceUnavailable
 		response["redis_connection"] = "failed"
 	}
 
-	// Check RabbitMQ
 	if err := s.publisher.Ping(); err != nil {
 		status = http.StatusServiceUnavailable
 		response["rabbitmq_connection"] = "failed"

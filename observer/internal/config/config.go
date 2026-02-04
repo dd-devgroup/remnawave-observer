@@ -56,6 +56,10 @@ type Config struct {
 	ScoreThresholdWarn  float64 // Порог для предупреждения (default: 50)
 	ScoreThresholdBlock float64 // Порог для блокировки (default: 85)
 
+	// --- ПАРАМЕТРЫ ВХОДЯЩИХ ЗАПРОСОВ ---
+	MaxRequestBytes         int64 // Максимальный размер body POST /log-entry (default: 2MB)
+	MaxLogEntriesPerRequest int   // Максимальное количество записей в одном запросе (default: 1000)
+
 	// --- ПАРАМЕТРЫ АВТООБУЧЕНИЯ ---
 	UnknownProvidersLogEnabled bool // Включить логирование неизвестных провайдеров (default: false)
 
@@ -88,6 +92,10 @@ func New() *Config {
 		LogChannelBufferSize:        getEnvInt("LOG_CHANNEL_BUFFER_SIZE", 100),
 		SideEffectWorkerPoolSize:    getEnvInt("SIDE_EFFECT_WORKER_POOL_SIZE", 10),
 		SideEffectChannelBufferSize: getEnvInt("SIDE_EFFECT_CHANNEL_BUFFER_SIZE", 50),
+
+		// --- Загрузка параметров входящих запросов ---
+		MaxRequestBytes:         int64(getEnvInt("MAX_REQUEST_BYTES", 2*1024*1024)),
+		MaxLogEntriesPerRequest: getEnvInt("MAX_LOG_ENTRIES_PER_REQUEST", 1000),
 
 		// --- Загрузка параметров подсетей ---
 		DetectBySubnet:    getEnvBool("DETECT_BY_SUBNET", false),

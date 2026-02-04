@@ -4,11 +4,14 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"observer_service/internal/models"
 	"time"
 )
+
+const maxWebhookResponseBytes int64 = 8 * 1024
 
 // Notifier определяет интерфейс для отправки уведомлений.
 type Notifier interface {
@@ -51,10 +54,10 @@ func (a *WebhookAlerter) SendAlert(payload models.AlertPayload) error {
 	defer resp.Body.Close()
 
 	var respBody bytes.Buffer
-	_, _ = respBody.ReadFrom(resp.Body)
+	_, _ = io.Copy(&respBody, io.LimitReader(resp.Body, maxWebhookResponseBytes))
 
-	log.Printf("Вебхук-уведомление для %s отправлен. Статус ответа: %d. Тело ответа: %s",
-		payload.UserIdentifier, resp.StatusCode, respBody.String())
+	log.Printf("Вебхук-уведомление для %s отправлен. Статус ответа: %d. Тело ответа (макс. %d байт): %s",
+		payload.UserIdentifier, resp.StatusCode, maxWebhookResponseBytes, respBody.String())
 
 	if resp.StatusCode >= 400 {
 		return fmt.Errorf("сервер вебхука ответил ошибкой: %s", resp.Status)

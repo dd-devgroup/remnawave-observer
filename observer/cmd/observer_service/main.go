@@ -119,7 +119,7 @@ func main() {
 	}
 
 	poolMonitor := monitor.NewPoolMonitor(redisStore, cfg, geoService)
-	apiServer := api.NewServer(cfg.Port, logProcessor, redisStore, rabbitPublisher)
+	apiServer := api.NewServer(cfg.Port, logProcessor, redisStore, rabbitPublisher, cfg)
 
 	// Инициализация Auto-Learner (опционально)
 	var autoLearner *geodata.AutoLearner

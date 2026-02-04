@@ -108,7 +108,7 @@ func TestLogProcessor_ASNMode_Initialization(t *testing.T) {
 	alerter := &MockAlerter{}
 
 	// Без ASN lookup (будет использован fallback)
-	processor := NewLogProcessor(storage, publisher, alerter, cfg, nil)
+	processor := NewLogProcessor(storage, publisher, alerter, cfg, nil, nil, nil, nil, nil)
 
 	if processor.cfg.DetectByASN != true {
 		t.Error("Expected ASN mode to be enabled")
@@ -141,7 +141,7 @@ func TestLogProcessor_ASNMode_ProcessEntry(t *testing.T) {
 	publisher := &MockPublisher{}
 	alerter := &MockAlerter{}
 
-	processor := NewLogProcessor(storage, publisher, alerter, cfg, nil)
+	processor := NewLogProcessor(storage, publisher, alerter, cfg, nil, nil, nil, nil, nil)
 
 	entry := models.LogEntry{
 		UserEmail: "test@example.com",
@@ -182,7 +182,7 @@ func TestLogProcessor_ASNMode_ExcludedASN(t *testing.T) {
 
 	// Примечание: Для полного теста нужна реальная ASN база
 	// Здесь тестируем логику без реального lookup
-	processor := NewLogProcessor(storage, publisher, alerter, cfg, nil)
+	processor := NewLogProcessor(storage, publisher, alerter, cfg, nil, nil, nil, nil, nil)
 
 	entry := models.LogEntry{
 		UserEmail: "test@example.com",
@@ -217,7 +217,7 @@ func TestLogProcessor_FallbackBehavior(t *testing.T) {
 	publisher := &MockPublisher{}
 	alerter := &MockAlerter{}
 
-	processor := NewLogProcessor(storage, publisher, alerter, cfg, nil)
+	processor := NewLogProcessor(storage, publisher, alerter, cfg, nil, nil, nil, nil, nil)
 
 	testIPs := []string{
 		"176.59.40.10",
