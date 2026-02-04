@@ -40,7 +40,7 @@ func main() {
 	defer redisStore.Close()
 	redisStore.SetScanMaxKeys(cfg.ScanMaxKeys)
 
-	rabbitPublisher, err := publisher.NewRabbitMQPublisher(cfg.RabbitMQURL, cfg.BlockingExchangeName, cfg.PublisherPoolSize, cfg.RabbitPublishMaxRetries, cfg.RabbitPublishBackoffBaseMs, cfg.RabbitPublishBackoffMaxMs)
+	rabbitPublisher, err := publisher.NewRabbitMQPublisher(cfg.RabbitMQURL, cfg.BlockingExchangeName, cfg.PublisherPoolSize, cfg.RabbitPublishMaxRetries, cfg.RabbitPublishBackoffBaseMs, cfg.RabbitPublishBackoffMaxMs, cfg.PublishConfirmTimeoutMs)
 	if err != nil {
 		log.Fatalf("Критическая ошибка: не удалось подключиться к RabbitMQ: %v", err)
 	}

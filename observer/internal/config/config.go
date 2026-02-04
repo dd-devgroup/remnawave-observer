@@ -71,6 +71,7 @@ type Config struct {
 	RabbitPublishBackoffBaseMs int // Базовый интервал backoff в ms (default: 500)
 	RabbitPublishBackoffMaxMs  int // Макс. интервал backoff в ms (default: 30000)
 	MaxIPsPerBlockEvent        int // Макс. количество IP в одном block-event сообщении (default: 500)
+	PublishConfirmTimeoutMs    int // Таймаут ожидания подтверждения от брокера в ms (default: 3000)
 
 	// --- ПАРАМЕТРЫ АВТООБУЧЕНИЯ ---
 	UnknownProvidersLogEnabled bool // Включить логирование неизвестных провайдеров (default: false)
@@ -117,6 +118,7 @@ func New() *Config {
 		RabbitPublishBackoffBaseMs: getEnvInt("RABBIT_PUBLISH_BACKOFF_BASE_MS", 500),
 		RabbitPublishBackoffMaxMs:  getEnvInt("RABBIT_PUBLISH_BACKOFF_MAX_MS", 30000),
 		MaxIPsPerBlockEvent:        getEnvInt("MAX_IPS_PER_BLOCK_EVENT", 500),
+		PublishConfirmTimeoutMs:    getEnvInt("PUBLISH_CONFIRM_TIMEOUT_MS", 3000),
 
 		// --- Загрузка параметров подсетей ---
 		DetectBySubnet:    getEnvBool("DETECT_BY_SUBNET", false),

@@ -29,13 +29,14 @@ type RabbitMQPublisher struct {
 	poolSize      int
 	maxRetries    int
 	backoffBaseMs int
-	backoffMaxMs  int
+	backoffMaxMs     int
+	confirmTimeoutMs int
 }
 
 // NewRabbitMQPublisher создает и настраивает нового издателя RabbitMQ.
 // poolSize — количество каналов в пуле.
 // backoffBaseMs / backoffMaxMs — параметры экспоненциального backoff с full jitter.
-func NewRabbitMQPublisher(url, exchangeName string, poolSize, maxRetries, backoffBaseMs, backoffMaxMs int) (*RabbitMQPublisher, error) {
+func NewRabbitMQPublisher(url, exchangeName string, poolSize, maxRetries, backoffBaseMs, backoffMaxMs, confirmTimeoutMs int) (*RabbitMQPublisher, error) {
 	if poolSize <= 0 {
 		poolSize = 5
 	}
@@ -48,15 +49,19 @@ func NewRabbitMQPublisher(url, exchangeName string, poolSize, maxRetries, backof
 	if backoffMaxMs <= 0 {
 		backoffMaxMs = 30000
 	}
+	if confirmTimeoutMs <= 0 {
+		confirmTimeoutMs = 3000
+	}
 
 	p := &RabbitMQPublisher{
-		url:           url,
-		exchangeName:  exchangeName,
-		poolSize:      poolSize,
-		channelPool:   make(chan *amqp091.Channel, poolSize),
-		maxRetries:    maxRetries,
-		backoffBaseMs: backoffBaseMs,
-		backoffMaxMs:  backoffMaxMs,
+		url:              url,
+		exchangeName:     exchangeName,
+		poolSize:         poolSize,
+		channelPool:      make(chan *amqp091.Channel, poolSize),
+		maxRetries:       maxRetries,
+		backoffBaseMs:    backoffBaseMs,
+		backoffMaxMs:     backoffMaxMs,
+		confirmTimeoutMs: confirmTimeoutMs,
 	}
 
 	if err := p.connectWithRetry(); err != nil {
@@ -140,6 +145,28 @@ func (p *RabbitMQPublisher) backoffDelay(attempt int) time.Duration {
 	return time.Duration(rand.IntN(exp)) * time.Millisecond
 }
 
+// deferredConfirm абстрагирует Wait() у *amqp091.DeferredConfirmation,
+// позволяя подставлять фейки в unit-тестах.
+type deferredConfirm interface {
+	Wait() bool
+}
+
+// waitWithTimeout ожидает подтверждения от брокера с дедлайном.
+// При таймауте фоновая горутина с dc.Wait() продолжит ждать до ответа
+// брокера или закрытия соединения — утечка ограничена maxRetries × poolSize.
+func waitWithTimeout(dc deferredConfirm, timeout time.Duration) (ack bool, timedOut bool) {
+	done := make(chan bool, 1)
+	go func() {
+		done <- dc.Wait()
+	}()
+	select {
+	case ack = <-done:
+		return ack, false
+	case <-time.After(timeout):
+		return false, true
+	}
+}
+
 // PublishBlockMessage публикует сообщение о блокировке с подтверждением от брокера
 // и экспоненциальным backoff с jitter на каждом повторе.
 func (p *RabbitMQPublisher) PublishBlockMessage(msg models.BlockMessage) error {
@@ -178,8 +205,14 @@ func (p *RabbitMQPublisher) PublishBlockMessage(msg models.BlockMessage) error {
 			continue
 		}
 
-		// Wait блокируется до подтверждения от брокера; true = ack, false = nack
-		if !dc.Wait() {
+		ack, timedOut := waitWithTimeout(dc, time.Duration(p.confirmTimeoutMs)*time.Millisecond)
+		if timedOut {
+			p.channelPool <- ch
+			log.Printf("Таймаут подтверждения от брокера (%dms) (попытка %d/%d)", p.confirmTimeoutMs, attempt+1, p.maxRetries)
+			time.Sleep(p.backoffDelay(attempt))
+			continue
+		}
+		if !ack {
 			p.channelPool <- ch
 			log.Printf("Брокер отклонил сообщение (Nack) (попытка %d/%d)", attempt+1, p.maxRetries)
 			time.Sleep(p.backoffDelay(attempt))
