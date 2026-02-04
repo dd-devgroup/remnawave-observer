@@ -400,7 +400,7 @@ func (m *PoolMonitor) cachedLookup(ctx context.Context, ip string) (*geoip.GeoLo
 	m.geoChecksLeft--
 	m.geoCacheMu.Unlock()
 
-	loc, err := m.cachedLookup(ctx, ip)
+	loc, err := m.geoService.Lookup(ctx, ip)
 
 	m.geoCacheMu.Lock()
 	m.geoCache[ip] = &geoCacheEntry{loc: loc, err: err}
