@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/netip"
 	"observer_service/internal/config"
+	"observer_service/internal/metrics"
 	"observer_service/internal/models"
 	"observer_service/internal/services/publisher"
 	"observer_service/internal/services/storage"
@@ -65,12 +66,14 @@ func (s *Server) Run() error {
 }
 
 func (s *Server) handleProcessLogEntries(c *gin.Context) {
+	metrics.RequestsTotal.Add(1)
 	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, s.cfg.MaxRequestBytes)
 
 	var entries []models.LogEntry
 	decoder := json.NewDecoder(c.Request.Body)
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&entries); err != nil {
+		metrics.RejectedRequestsTotal.Add(1)
 		var maxBytesErr *http.MaxBytesError
 		if errors.As(err, &maxBytesErr) {
 			c.JSON(http.StatusRequestEntityTooLarge, gin.H{"error": "request body exceeds maximum allowed size", "code": "body_too_large"})
@@ -85,11 +88,13 @@ func (s *Server) handleProcessLogEntries(c *gin.Context) {
 	}
 
 	if len(entries) == 0 {
+		metrics.RejectedRequestsTotal.Add(1)
 		c.JSON(http.StatusBadRequest, gin.H{"error": "empty entries array", "code": "empty_entries"})
 		return
 	}
 
 	if len(entries) > s.cfg.MaxLogEntriesPerRequest {
+		metrics.RejectedRequestsTotal.Add(1)
 		log.Printf("Отклонён запрос: %d записей, максимум %d", len(entries), s.cfg.MaxLogEntriesPerRequest)
 		c.JSON(http.StatusBadRequest, gin.H{
 			"error": fmt.Sprintf("too many entries: %d, max allowed: %d", len(entries), s.cfg.MaxLogEntriesPerRequest),
@@ -117,6 +122,7 @@ func (s *Server) handleProcessLogEntries(c *gin.Context) {
 	}
 
 	if err := s.enqueuer.EnqueueEntries(entries); err != nil {
+		metrics.RejectedRequestsTotal.Add(1)
 		log.Printf("Warning: log queue is full. Rejecting request for %d entries. Error: %v", len(entries), err)
 		c.JSON(http.StatusServiceUnavailable, gin.H{
 			"error": "Service is temporarily overloaded. Please try again later.",

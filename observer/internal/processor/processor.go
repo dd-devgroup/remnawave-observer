@@ -9,6 +9,7 @@ import (
 	"log"
 	"net"
 	"observer_service/internal/config"
+	"observer_service/internal/metrics"
 	"observer_service/internal/models"
 	"observer_service/internal/services/alerter"
 	"observer_service/internal/services/asn"
@@ -150,6 +151,9 @@ func (p *LogProcessor) StartSideEffectWorkerPool(ctx context.Context, mainWg *sy
 				default:
 					taskCtx, cancel := context.WithTimeout(ctx, p.cfg.SideEffectTimeout)
 					task(taskCtx)
+					if taskCtx.Err() == context.DeadlineExceeded {
+						metrics.SideEffectTimeoutCount.Add(1)
+					}
 					cancel()
 				}
 			}
@@ -507,7 +511,15 @@ func (p *LogProcessor) processEntryByASN(ctx context.Context, entry models.LogEn
 			var countryCode string
 			var geoLoc *geoip.GeoLocation
 			if p.geoService != nil && p.cfg.GeoIPEnabled {
-				if loc, err := p.geoService.Lookup(ctx, entry.SourceIP); err == nil && loc != nil {
+				loc, lookupErr := p.geoService.Lookup(ctx, entry.SourceIP)
+				if lookupErr != nil {
+					if errors.Is(lookupErr, context.DeadlineExceeded) {
+						metrics.GeoIPLookupTimeout.Add(1)
+					} else {
+						metrics.GeoIPLookupFail.Add(1)
+					}
+				} else if loc != nil {
+					metrics.GeoIPLookupSuccess.Add(1)
 					geoLoc = loc
 					countryCode = loc.CountryCode
 				}

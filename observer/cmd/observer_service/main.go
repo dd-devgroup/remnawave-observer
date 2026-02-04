@@ -12,6 +12,7 @@ import (
 
 	"observer_service/internal/api"
 	"observer_service/internal/config"
+	"observer_service/internal/metrics"
 	"observer_service/internal/monitor"
 	"observer_service/internal/processor"
 	"observer_service/internal/services/alerter"
@@ -139,7 +140,7 @@ func main() {
 	}
 
 	// Сообщаем WaitGroup, сколько горутин будем запускать
-	goroutineCount := 3
+	goroutineCount := 4 // poolMonitor + workerPool + sideEffectPool + metricsDumper
 	if autoLearner != nil {
 		goroutineCount++
 	}
@@ -147,7 +148,8 @@ func main() {
 	wg.Add(goroutineCount)
 	go poolMonitor.Run(ctx, &wg)
 	go logProcessor.StartWorkerPool(ctx, &wg)
-	go logProcessor.StartSideEffectWorkerPool(ctx, &wg) // Запускаем новый пул воркеров
+	go logProcessor.StartSideEffectWorkerPool(ctx, &wg)
+	go metrics.StartDumper(ctx, &wg, 60*time.Second)
 
 	// Запускаем Auto-Learner если включен
 	if autoLearner != nil {

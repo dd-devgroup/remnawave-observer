@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"math/rand/v2"
+	"observer_service/internal/metrics"
 	"observer_service/internal/models"
 	"time"
 
@@ -212,6 +213,7 @@ func (p *RabbitMQPublisher) PublishBlockMessage(msg models.BlockMessage) error {
 				p.channelPool <- ch
 			}
 			log.Printf("Ошибка публикации сообщения в RabbitMQ (попытка %d/%d): %v", attempt+1, p.maxRetries, err)
+			metrics.RabbitPublishRetry.Add(1)
 			time.Sleep(p.backoffDelay(attempt))
 			continue
 		}
@@ -220,20 +222,24 @@ func (p *RabbitMQPublisher) PublishBlockMessage(msg models.BlockMessage) error {
 		if timedOut {
 			p.channelPool <- ch
 			log.Printf("Таймаут подтверждения от брокера (%dms) (попытка %d/%d)", p.confirmTimeoutMs, attempt+1, p.maxRetries)
+			metrics.RabbitPublishRetry.Add(1)
 			time.Sleep(p.backoffDelay(attempt))
 			continue
 		}
 		if !ack {
 			p.channelPool <- ch
 			log.Printf("Брокер отклонил сообщение (Nack) (попытка %d/%d)", attempt+1, p.maxRetries)
+			metrics.RabbitPublishRetry.Add(1)
 			time.Sleep(p.backoffDelay(attempt))
 			continue
 		}
 
 		p.channelPool <- ch
+		metrics.RabbitPublishSuccess.Add(1)
 		return nil // Сообщение подтверждено брокером
 	}
 
+	metrics.RabbitPublishFail.Add(1)
 	return fmt.Errorf("критическая ошибка: не удалось опубликовать сообщение в RabbitMQ после %d попыток", p.maxRetries)
 }
 

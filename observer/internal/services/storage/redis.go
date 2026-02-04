@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"observer_service/internal/metrics"
 	"observer_service/internal/models"
 	"os"
 	"strings"
@@ -362,6 +363,7 @@ func (s *RedisStore) GetAllUserEmails(ctx context.Context) ([]string, error) {
 		for {
 			if time.Now().After(deadline) {
 				log.Printf("GetAllUserEmails: достигнут time budget %v, результат частичный", s.scanTimeBudget)
+				metrics.ScanPartialRunsCount.Add(1)
 				partial = true
 				break
 			}
@@ -371,6 +373,7 @@ func (s *RedisStore) GetAllUserEmails(ctx context.Context) ([]string, error) {
 			if err != nil {
 				if scanCtx.Err() != nil {
 					log.Printf("GetAllUserEmails: контекст отменён (%v), результат частичный", scanCtx.Err())
+					metrics.ScanPartialRunsCount.Add(1)
 					partial = true
 					break
 				}
@@ -456,6 +459,7 @@ func (s *RedisStore) GetAllIPsForUser(ctx context.Context, email string) ([]stri
 	for iter.Next(scanCtx) {
 		if time.Now().After(deadline) {
 			log.Printf("GetAllIPsForUser(%s): достигнут time budget %v, результат частичный", email, s.scanTimeBudget)
+			metrics.ScanPartialRunsCount.Add(1)
 			break
 		}
 		scanned++
