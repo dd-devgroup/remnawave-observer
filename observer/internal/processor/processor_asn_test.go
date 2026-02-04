@@ -66,7 +66,7 @@ type MockPublisher struct {
 	publishedMessages int
 }
 
-func (m *MockPublisher) PublishBlockMessage(items []string, duration string) error {
+func (m *MockPublisher) PublishBlockMessage(msg models.BlockMessage) error {
 	m.publishedMessages++
 	return nil
 }

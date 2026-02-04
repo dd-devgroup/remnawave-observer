@@ -2,6 +2,8 @@ package processor
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"log"
@@ -247,7 +249,7 @@ func (p *LogProcessor) processEntryByIP(ctx context.Context, entry models.LogEnt
 		ipsToBlock := p.filterExcludedIPs(res.AllUserItems, entry.UserEmail)
 
 		if len(ipsToBlock) > 0 {
-			if err := p.publisher.PublishBlockMessage(ipsToBlock, p.cfg.BlockDuration); err != nil {
+			if err := p.publishBlockEvent(ipsToBlock, p.cfg.BlockDuration); err != nil {
 				log.Printf("Ошибка отправки сообщения о блокировке: %v", err)
 			} else {
 				log.Printf("Сообщение о блокировке %d IP-адресов для %s%s отправлено", len(ipsToBlock), entry.UserEmail, debugMarker)
@@ -310,7 +312,7 @@ func (p *LogProcessor) processEntryBySubnet(ctx context.Context, entry models.Lo
 		subnetsToBlock := p.filterExcludedSubnets(res.AllUserItems, entry.UserEmail)
 
 		if len(subnetsToBlock) > 0 {
-			if err := p.publisher.PublishBlockMessage(subnetsToBlock, p.cfg.BlockDuration); err != nil {
+			if err := p.publishBlockEvent(subnetsToBlock, p.cfg.BlockDuration); err != nil {
 				log.Printf("Ошибка отправки сообщения о блокировке подсетей: %v", err)
 			} else {
 				log.Printf("Сообщение о блокировке %d подсетей для %s%s отправлено", len(subnetsToBlock), entry.UserEmail, debugMarker)
@@ -548,7 +550,7 @@ func (p *LogProcessor) processEntryByASN(ctx context.Context, entry models.LogEn
 		}
 
 		if len(ipsToBlock) > 0 {
-			if err := p.publisher.PublishBlockMessage(ipsToBlock, p.cfg.BlockDuration); err != nil {
+			if err := p.publishBlockEvent(ipsToBlock, p.cfg.BlockDuration); err != nil {
 				log.Printf("Ошибка отправки сообщения о блокировке: %v", err)
 			} else {
 				log.Printf("✅ Сообщение о блокировке %d элементов для %s%s отправлено (тип: %s)",
@@ -755,6 +757,59 @@ func (p *LogProcessor) collectIPsForASNBlock(ctx context.Context, email string, 
 	}
 
 	return result
+}
+
+// generateEventID возвращает 16-байтовый hex-идентификатор события из crypto/rand.
+func generateEventID() string {
+	var b [16]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		// crypto/rand failure — крайне редкий случай, fallback на timestamp
+		return fmt.Sprintf("fallback-%d", time.Now().UnixNano())
+	}
+	return hex.EncodeToString(b[:])
+}
+
+// publishBlockEvent разбивает список IP на чанки по cfg.MaxIPsPerBlockEvent и
+// публикует каждый чанок как отдельное BlockMessage.  Если IP помещаются в один
+// чанок — поля EventID/Chunk* не добавляются (wire-совместимость со старым форматом).
+func (p *LogProcessor) publishBlockEvent(ips []string, duration string) error {
+	chunkSize := p.cfg.MaxIPsPerBlockEvent
+	if chunkSize <= 0 {
+		chunkSize = 500
+	}
+
+	// Один чанок — старый формат без обёртки
+	if len(ips) <= chunkSize {
+		return p.publisher.PublishBlockMessage(models.BlockMessage{
+			IPs:      ips,
+			Duration: duration,
+		})
+	}
+
+	// Несколько чанков — добавляем event envelope
+	eventID := generateEventID()
+	total := (len(ips) + chunkSize - 1) / chunkSize
+
+	for i := 0; i < total; i++ {
+		start := i * chunkSize
+		end := start + chunkSize
+		if end > len(ips) {
+			end = len(ips)
+		}
+		idx := i
+		msg := models.BlockMessage{
+			IPs:           ips[start:end],
+			Duration:      duration,
+			EventID:       eventID,
+			ChunkIndex:    &idx,
+			ChunkTotal:    &total,
+			SchemaVersion: 2,
+		}
+		if err := p.publisher.PublishBlockMessage(msg); err != nil {
+			return fmt.Errorf("chunk %d/%d (event %s): %w", i+1, total, eventID, err)
+		}
+	}
+	return nil
 }
 
 // scheduleASNClear планирует отложенную очистку ASN данных

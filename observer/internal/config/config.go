@@ -70,6 +70,7 @@ type Config struct {
 	RabbitPublishMaxRetries    int // Макс. количество повторов публикации (default: 5)
 	RabbitPublishBackoffBaseMs int // Базовый интервал backoff в ms (default: 500)
 	RabbitPublishBackoffMaxMs  int // Макс. интервал backoff в ms (default: 30000)
+	MaxIPsPerBlockEvent        int // Макс. количество IP в одном block-event сообщении (default: 500)
 
 	// --- ПАРАМЕТРЫ АВТООБУЧЕНИЯ ---
 	UnknownProvidersLogEnabled bool // Включить логирование неизвестных провайдеров (default: false)
@@ -115,6 +116,7 @@ func New() *Config {
 		RabbitPublishMaxRetries:    getEnvInt("RABBIT_PUBLISH_MAX_RETRIES", 5),
 		RabbitPublishBackoffBaseMs: getEnvInt("RABBIT_PUBLISH_BACKOFF_BASE_MS", 500),
 		RabbitPublishBackoffMaxMs:  getEnvInt("RABBIT_PUBLISH_BACKOFF_MAX_MS", 30000),
+		MaxIPsPerBlockEvent:        getEnvInt("MAX_IPS_PER_BLOCK_EVENT", 500),
 
 		// --- Загрузка параметров подсетей ---
 		DetectBySubnet:    getEnvBool("DETECT_BY_SUBNET", false),

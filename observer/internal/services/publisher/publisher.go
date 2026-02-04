@@ -14,7 +14,7 @@ import (
 
 // EventPublisher определяет интерфейс для публикации событий.
 type EventPublisher interface {
-	PublishBlockMessage(ips []string, duration string) error
+	PublishBlockMessage(msg models.BlockMessage) error
 	Close() error
 	Ping() error
 }
@@ -142,12 +142,8 @@ func (p *RabbitMQPublisher) backoffDelay(attempt int) time.Duration {
 
 // PublishBlockMessage публикует сообщение о блокировке с подтверждением от брокера
 // и экспоненциальным backoff с jitter на каждом повторе.
-func (p *RabbitMQPublisher) PublishBlockMessage(ips []string, duration string) error {
-	blockMsg := models.BlockMessage{
-		IPs:      ips,
-		Duration: duration,
-	}
-	body, err := json.Marshal(blockMsg)
+func (p *RabbitMQPublisher) PublishBlockMessage(msg models.BlockMessage) error {
+	body, err := json.Marshal(msg)
 	if err != nil {
 		return fmt.Errorf("ошибка сериализации сообщения о блокировке: %w", err)
 	}

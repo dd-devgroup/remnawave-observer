@@ -51,7 +51,7 @@ func (t *testStorage) GetUserActiveASNs(_ context.Context, _ string) (map[string
 
 type testPublisher struct{}
 
-func (t *testPublisher) PublishBlockMessage(_ []string, _ string) error { return nil }
+func (t *testPublisher) PublishBlockMessage(_ models.BlockMessage) error { return nil }
 func (t *testPublisher) Close() error                                   { return nil }
 func (t *testPublisher) Ping() error                                    { return nil }
 
