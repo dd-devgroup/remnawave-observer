@@ -78,6 +78,7 @@ type RedisStore struct {
 	clearSubnetsScriptSHA   string
 	addCheckASNScriptSHA    string
 	clearASNsScriptSHA      string
+	scanMaxKeys             int
 }
 
 // NewRedisStore создает новый экземпляр RedisStore.
@@ -141,7 +142,15 @@ func NewRedisStore(ctx context.Context, redisURL string, scriptPaths ...string) 
 		clearSubnetsScriptSHA:   clearSubnetsScriptSHA,
 		addCheckASNScriptSHA:    addCheckASNScriptSHA,
 		clearASNsScriptSHA:      clearASNsScriptSHA,
+		scanMaxKeys:             10000,
 	}, nil
+}
+
+// SetScanMaxKeys задаёт верхнюю границу количества ключей, сканируемых за один вызов SCAN.
+func (s *RedisStore) SetScanMaxKeys(n int) {
+	if n > 0 {
+		s.scanMaxKeys = n
+	}
 }
 
 // CheckAndAddIP выполняет Lua-скрипт для атомарной проверки и добавления IP.
@@ -323,6 +332,7 @@ func (s *RedisStore) GetAllUserEmails(ctx context.Context) ([]string, error) {
 		"user_asns:*",    // Режим по ASN
 	}
 
+	scanned := 0
 	for _, pattern := range patterns {
 		cursor = 0
 		for {
@@ -332,6 +342,7 @@ func (s *RedisStore) GetAllUserEmails(ctx context.Context) ([]string, error) {
 			if err != nil {
 				return nil, fmt.Errorf("ошибка при сканировании ключей по паттерну %s: %w", pattern, err)
 			}
+			scanned += len(keys)
 			for _, key := range keys {
 				// Извлекаем email из ключа вида "user_ips:email" или "user_subnets:email"
 				parts := strings.SplitN(key, ":", 2)
@@ -339,9 +350,13 @@ func (s *RedisStore) GetAllUserEmails(ctx context.Context) ([]string, error) {
 					emailSet[parts[1]] = struct{}{}
 				}
 			}
-			if cursor == 0 {
+			if cursor == 0 || scanned >= s.scanMaxKeys {
 				break
 			}
+		}
+		if scanned >= s.scanMaxKeys {
+			log.Printf("GetAllUserEmails: достигнут лимит сканирования %d ключей", s.scanMaxKeys)
+			break
 		}
 	}
 
@@ -397,8 +412,14 @@ func (s *RedisStore) GetAllIPsForUser(ctx context.Context, email string) ([]stri
 	var allIPs []string
 	var uniqueIPs = make(map[string]struct{})
 
+	scanned := 0
 	iter := s.client.Scan(ctx, 0, pattern, 0).Iterator()
 	for iter.Next(ctx) {
+		scanned++
+		if scanned > s.scanMaxKeys {
+			log.Printf("GetAllIPsForUser(%s): достигнут лимит сканирования %d ключей", email, s.scanMaxKeys)
+			break
+		}
 		key := iter.Val()
 		ips, err := s.client.SMembers(ctx, key).Result()
 		if err != nil {

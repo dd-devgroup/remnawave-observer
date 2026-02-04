@@ -38,6 +38,7 @@ func main() {
 		log.Fatalf("Критическая ошибка: не удалось подключиться к Redis: %v", err)
 	}
 	defer redisStore.Close()
+	redisStore.SetScanMaxKeys(cfg.ScanMaxKeys)
 
 	rabbitPublisher, err := publisher.NewRabbitMQPublisher(cfg.RabbitMQURL, cfg.BlockingExchangeName, cfg.PublisherPoolSize, cfg.RabbitPublishMaxRetries, cfg.RabbitPublishBackoffBaseMs, cfg.RabbitPublishBackoffMaxMs)
 	if err != nil {
