@@ -178,6 +178,107 @@ func TestHandleProcessLogEntries_EmptyArray(t *testing.T) {
 	}
 }
 
+// --- unknown fields (DisallowUnknownFields) ---
+
+func TestHandleProcessLogEntries_UnknownFields(t *testing.T) {
+	cfg := defaultCfg()
+	router := setupRouter(cfg, &testEnqueuer{})
+
+	body := `[{"user_email":"a@b.com","source_ip":"1.2.3.4","extra_field":"bad"}]`
+	req := httptest.NewRequest("POST", "/log-entry", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("expected 400 for unknown field, got %d; body: %s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "invalid_json") {
+		t.Errorf("expected code invalid_json; body: %s", w.Body.String())
+	}
+}
+
+// --- malformed JSON ---
+
+func TestHandleProcessLogEntries_MalformedJSON(t *testing.T) {
+	cfg := defaultCfg()
+	router := setupRouter(cfg, &testEnqueuer{})
+
+	body := `[{"user_email":"a@b.com","source_ip":}]`
+	req := httptest.NewRequest("POST", "/log-entry", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("expected 400 for malformed JSON, got %d; body: %s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "invalid_json") {
+		t.Errorf("expected code invalid_json; body: %s", w.Body.String())
+	}
+}
+
+// --- missing user_email ---
+
+func TestHandleProcessLogEntries_MissingUserEmail(t *testing.T) {
+	cfg := defaultCfg()
+	router := setupRouter(cfg, &testEnqueuer{})
+
+	body := `[{"source_ip":"1.2.3.4"}]`
+	req := httptest.NewRequest("POST", "/log-entry", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("expected 400 for missing email, got %d; body: %s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "invalid_json") {
+		t.Errorf("expected code invalid_json; body: %s", w.Body.String())
+	}
+}
+
+// --- error code on invalid IP ---
+
+func TestHandleProcessLogEntries_InvalidIPCode(t *testing.T) {
+	cfg := defaultCfg()
+	router := setupRouter(cfg, &testEnqueuer{})
+
+	body := `[{"user_email":"a@b.com","source_ip":"not-an-ip"}]`
+	req := httptest.NewRequest("POST", "/log-entry", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("expected 400, got %d; body: %s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "invalid_ip") {
+		t.Errorf("expected code invalid_ip; body: %s", w.Body.String())
+	}
+}
+
+// --- error code on too many entries ---
+
+func TestHandleProcessLogEntries_TooManyEntriesCode(t *testing.T) {
+	cfg := defaultCfg()
+	cfg.MaxLogEntriesPerRequest = 1
+	router := setupRouter(cfg, &testEnqueuer{})
+
+	body := `[{"user_email":"a@b.com","source_ip":"1.2.3.4"},{"user_email":"b@b.com","source_ip":"1.2.3.5"}]`
+	req := httptest.NewRequest("POST", "/log-entry", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("expected 400, got %d", w.Code)
+	}
+	if !strings.Contains(w.Body.String(), "too_many_entries") {
+		t.Errorf("expected code too_many_entries; body: %s", w.Body.String())
+	}
+}
+
 // --- happy path ---
 
 func TestHandleProcessLogEntries_Success(t *testing.T) {
