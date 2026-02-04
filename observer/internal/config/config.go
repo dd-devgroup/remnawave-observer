@@ -46,10 +46,12 @@ type Config struct {
 	ExcludedASNs         map[string]bool // ASN которые не считаются (например Cloudflare, Google)
 
 	// --- ПАРАМЕТРЫ GEOIP ---
-	GeoIPEnabled     bool          // Включить GeoIP анализ
-	GeoIPCacheTTL    time.Duration // TTL для кэша GeoIP (default: 24 часа)
-	GeoDataConfigDir string        // Директория с конфигами (agglomerations.yaml, providers.yaml)
-	GeoDataDataDir   string        // Директория для записываемых данных (unknown_providers.json, backups)
+	GeoIPEnabled        bool          // Включить GeoIP анализ
+	GeoIPCacheTTL       time.Duration // TTL для кэша GeoIP (default: 24 часа)
+	GeoIPTimeout        time.Duration // Таймаут на один HTTP-запрос к ip-api.com (default: 3s)
+	GeoIPRateIntervalMs int           // Минимальный интервал между запросами к ip-api.com в ms (default: 1350)
+	GeoDataConfigDir    string        // Директория с конфигами (agglomerations.yaml, providers.yaml)
+	GeoDataDataDir      string        // Директория для записываемых данных (unknown_providers.json, backups)
 
 	// --- ПАРАМЕТРЫ СКОРИНГА ---
 	ScoringEnabled      bool    // Включить систему скоринга
@@ -113,10 +115,12 @@ func New() *Config {
 		ExcludedASNs:          parseSet(getEnv("EXCLUDED_ASNS", "")),
 
 		// --- Загрузка параметров GeoIP ---
-		GeoIPEnabled:     getEnvBool("GEOIP_ENABLED", false),
-		GeoIPCacheTTL:    time.Duration(getEnvInt("GEOIP_CACHE_TTL_HOURS", 24)) * time.Hour,
-		GeoDataConfigDir: getEnv("GEODATA_CONFIG_DIR", "/app/config"),
-		GeoDataDataDir:   getEnv("GEODATA_DATA_DIR", "/app/data"),
+		GeoIPEnabled:        getEnvBool("GEOIP_ENABLED", false),
+		GeoIPCacheTTL:       time.Duration(getEnvInt("GEOIP_CACHE_TTL_HOURS", 24)) * time.Hour,
+		GeoIPTimeout:        time.Duration(getEnvInt("GEOIP_TIMEOUT_SECONDS", 3)) * time.Second,
+		GeoIPRateIntervalMs: getEnvInt("GEOIP_RATE_INTERVAL_MS", 1350),
+		GeoDataConfigDir:    getEnv("GEODATA_CONFIG_DIR", "/app/config"),
+		GeoDataDataDir:      getEnv("GEODATA_DATA_DIR", "/app/data"),
 
 		// --- Загрузка параметров скоринга ---
 		ScoringEnabled:      getEnvBool("SCORING_ENABLED", false),

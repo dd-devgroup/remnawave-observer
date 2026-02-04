@@ -78,8 +78,8 @@ func (m *PoolMonitor) performMonitoring(ctx context.Context) {
 		return allStats[i].IPCount > allStats[j].IPCount
 	})
 	m.printSummary(allStats)
-	m.printTopUsers(allStats)
-	m.printOverLimitUsers(allStats)
+	m.printTopUsers(ctx, allStats)
+	m.printOverLimitUsers(ctx, allStats)
 }
 
 func (m *PoolMonitor) getMonitoringModeName() string {
@@ -276,7 +276,7 @@ func (m *PoolMonitor) printSummary(stats []models.UserIPStats) {
 	}
 }
 
-func (m *PoolMonitor) printUserGeo(user models.UserIPStats, indent string) {
+func (m *PoolMonitor) printUserGeo(ctx context.Context, user models.UserIPStats, indent string) {
 	if !m.cfg.GeoIPEnabled || m.geoService == nil {
 		return
 	}
@@ -297,7 +297,7 @@ func (m *PoolMonitor) printUserGeo(user models.UserIPStats, indent string) {
 	ipRows := make([]ipGeo, 0, len(ips))
 
 	for _, ip := range ips {
-		loc, err := m.geoService.Lookup(ip)
+		loc, err := m.geoService.Lookup(ctx, ip)
 		if err != nil || loc == nil {
 			ipRows = append(ipRows, ipGeo{ip: ip, loc: nil})
 			continue
@@ -377,7 +377,7 @@ type geoSummary struct {
 	maxDistance float64
 }
 
-func (m *PoolMonitor) buildUserGeo(user models.UserIPStats) (*geoSummary, map[string]*geoip.GeoLocation) {
+func (m *PoolMonitor) buildUserGeo(ctx context.Context, user models.UserIPStats) (*geoSummary, map[string]*geoip.GeoLocation) {
 	if !m.cfg.GeoIPEnabled || m.geoService == nil {
 		return nil, nil
 	}
@@ -393,7 +393,7 @@ func (m *PoolMonitor) buildUserGeo(user models.UserIPStats) (*geoSummary, map[st
 	locations := make([]*geoip.GeoLocation, 0, len(ips))
 
 	for _, ip := range ips {
-		loc, err := m.geoService.Lookup(ip)
+		loc, err := m.geoService.Lookup(ctx, ip)
 		if err != nil || loc == nil {
 			geoByIP[ip] = nil
 			continue
@@ -486,7 +486,7 @@ func maxDistanceKM(locations []*geoip.GeoLocation) float64 {
 	return maxDist
 }
 
-func (m *PoolMonitor) printTopUsers(stats []models.UserIPStats) {
+func (m *PoolMonitor) printTopUsers(ctx context.Context, stats []models.UserIPStats) {
 	var title, itemLabel, itemsLabel string
 	if m.cfg.DetectByASN {
 		title = "📈 ТОП ПОЛЬЗОВАТЕЛИ ПО КОЛИЧЕСТВУ ПРОВАЙДЕРОВ (ASN):"
@@ -514,7 +514,7 @@ func (m *PoolMonitor) printTopUsers(stats []models.UserIPStats) {
 		var geoSummary *geoSummary
 		var geoByIP map[string]*geoip.GeoLocation
 		if m.cfg.GeoIPEnabled && m.geoService != nil {
-			geoSummary, geoByIP = m.buildUserGeo(user)
+			geoSummary, geoByIP = m.buildUserGeo(ctx, user)
 			if geoSummary != nil {
 				countries := formatGeoList(geoSummary.countries, 3)
 				cities := formatGeoList(geoSummary.cities, 3)
@@ -540,7 +540,7 @@ func (m *PoolMonitor) printTopUsers(stats []models.UserIPStats) {
 	}
 }
 
-func (m *PoolMonitor) printOverLimitUsers(stats []models.UserIPStats) {
+func (m *PoolMonitor) printOverLimitUsers(ctx context.Context, stats []models.UserIPStats) {
 	var overLimitUsers []models.UserIPStats
 	for _, user := range stats {
 		if user.Status == "OVER_LIMIT" {
@@ -567,7 +567,7 @@ func (m *PoolMonitor) printOverLimitUsers(stats []models.UserIPStats) {
 			var geoSummary *geoSummary
 			var geoByIP map[string]*geoip.GeoLocation
 			if m.cfg.GeoIPEnabled && m.geoService != nil {
-				geoSummary, geoByIP = m.buildUserGeo(user)
+				geoSummary, geoByIP = m.buildUserGeo(ctx, user)
 				if geoSummary != nil {
 					countries := formatGeoList(geoSummary.countries, 3)
 					cities := formatGeoList(geoSummary.cities, 3)

@@ -78,7 +78,7 @@ func main() {
 
 		// Инициализируем GeoIP сервис если ASN lookup доступен
 		if asnLookup != nil {
-			geoService = geoip.NewGeoIPService(asnLookup, redisStore.GetClient(), cfg.GeoIPCacheTTL)
+			geoService = geoip.NewGeoIPService(asnLookup, redisStore.GetClient(), cfg.GeoIPCacheTTL, cfg.GeoIPTimeout, cfg.GeoIPRateIntervalMs)
 			geoAnalyzer = geoip.NewGeoAnalyzer(geoService, geoDataLoader)
 			log.Printf("✅ GeoIP сервис инициализирован (cache TTL: %v)", cfg.GeoIPCacheTTL)
 		}

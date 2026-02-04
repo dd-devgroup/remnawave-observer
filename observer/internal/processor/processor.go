@@ -423,10 +423,11 @@ func (p *LogProcessor) processEntryByASN(ctx context.Context, entry models.LogEn
 	var identifierType string
 	var orgName string
 
-	redisStore := p.storage.(*storage.RedisStore)
+	var redisStore *storage.RedisStore
 
 	// Пытаемся получить ASN для IP
 	if p.asnLookup != nil {
+		redisStore = p.storage.(*storage.RedisStore)
 		asnStr, org, err := p.asnLookup.LookupWithOrg(entry.SourceIP)
 		if err == nil && asnStr != "" {
 			// Проверяем, не в списке ли исключённых ASN
@@ -502,7 +503,7 @@ func (p *LogProcessor) processEntryByASN(ctx context.Context, entry models.LogEn
 			var countryCode string
 			var geoLoc *geoip.GeoLocation
 			if p.geoService != nil && p.cfg.GeoIPEnabled {
-				if loc, err := p.geoService.Lookup(entry.SourceIP); err == nil && loc != nil {
+				if loc, err := p.geoService.Lookup(ctx, entry.SourceIP); err == nil && loc != nil {
 					geoLoc = loc
 					countryCode = loc.CountryCode
 				}
@@ -862,7 +863,7 @@ func (p *LogProcessor) performEnhancedAnalytics(
 	}
 
 	// 2. Выполняем географический анализ
-	geoResultInternal := p.geoAnalyzer.AnalyzeUserIPs(allIPs)
+	geoResultInternal := p.geoAnalyzer.AnalyzeUserIPs(ctx, allIPs)
 
 	// Конвертируем в models.GeoAnalysisResult
 	geoResult := &models.GeoAnalysisResult{
