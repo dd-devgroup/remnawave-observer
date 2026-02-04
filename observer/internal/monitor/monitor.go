@@ -15,11 +15,19 @@ import (
 	"time"
 )
 
+type geoCacheEntry struct {
+	loc *geoip.GeoLocation
+	err error
+}
+
 // PoolMonitor выполняет периодический мониторинг пулов IP.
 type PoolMonitor struct {
-	storage     storage.IPStorage
-	cfg         *config.Config
-	geoService  *geoip.GeoIPService
+	storage       storage.IPStorage
+	cfg           *config.Config
+	geoService    *geoip.GeoIPService
+	geoCache      map[string]*geoCacheEntry
+	geoCacheMu    sync.Mutex
+	geoChecksLeft int
 }
 
 // NewPoolMonitor создает новый экземпляр PoolMonitor.
@@ -50,6 +58,12 @@ func (m *PoolMonitor) Run(ctx context.Context, wg *sync.WaitGroup) {
 }
 
 func (m *PoolMonitor) performMonitoring(ctx context.Context) {
+	// Сброс кэша и бюджета GeoIP проверок на этот цикл мониторинга
+	m.geoCacheMu.Lock()
+	m.geoCache = make(map[string]*geoCacheEntry)
+	m.geoChecksLeft = m.cfg.GeoIPMonitorMaxChecksPerRun
+	m.geoCacheMu.Unlock()
+
 	userEmails, err := m.storage.GetAllUserEmails(ctx)
 	if err != nil {
 		log.Printf("Ошибка мониторинга (GetAllUserEmails): %v", err)
@@ -297,7 +311,7 @@ func (m *PoolMonitor) printUserGeo(ctx context.Context, user models.UserIPStats,
 	ipRows := make([]ipGeo, 0, len(ips))
 
 	for _, ip := range ips {
-		loc, err := m.geoService.Lookup(ctx, ip)
+		loc, err := m.cachedLookup(ctx, ip)
 		if err != nil || loc == nil {
 			ipRows = append(ipRows, ipGeo{ip: ip, loc: nil})
 			continue
@@ -371,6 +385,30 @@ func (m *PoolMonitor) collectUserIPs(user models.UserIPStats) []string {
 	return ips
 }
 
+// cachedLookup выполняет GeoIP lookup с мемоизацией в рамках текущего цикла мониторинга.
+// Возвращает nil, nil когда бюджет проверок исчерпан.
+func (m *PoolMonitor) cachedLookup(ctx context.Context, ip string) (*geoip.GeoLocation, error) {
+	m.geoCacheMu.Lock()
+	if entry, ok := m.geoCache[ip]; ok {
+		m.geoCacheMu.Unlock()
+		return entry.loc, entry.err
+	}
+	if m.geoChecksLeft <= 0 {
+		m.geoCacheMu.Unlock()
+		return nil, nil
+	}
+	m.geoChecksLeft--
+	m.geoCacheMu.Unlock()
+
+	loc, err := m.cachedLookup(ctx, ip)
+
+	m.geoCacheMu.Lock()
+	m.geoCache[ip] = &geoCacheEntry{loc: loc, err: err}
+	m.geoCacheMu.Unlock()
+
+	return loc, err
+}
+
 type geoSummary struct {
 	countries   []string
 	cities      []string
@@ -393,7 +431,7 @@ func (m *PoolMonitor) buildUserGeo(ctx context.Context, user models.UserIPStats)
 	locations := make([]*geoip.GeoLocation, 0, len(ips))
 
 	for _, ip := range ips {
-		loc, err := m.geoService.Lookup(ctx, ip)
+		loc, err := m.cachedLookup(ctx, ip)
 		if err != nil || loc == nil {
 			geoByIP[ip] = nil
 			continue
