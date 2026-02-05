@@ -125,6 +125,18 @@ func main() {
 	poolMonitor := monitor.NewPoolMonitor(redisStore, cfg, geoService)
 	apiServer := api.NewServer(cfg.Port, logProcessor, redisStore, rabbitPublisher, cfg)
 
+	// Инициализация CAIDA AS2Org (опционально, синхронная начальная загрузка)
+	var as2orgLoader *geodata.AS2OrgLoader
+	if cfg.CAIDAEnabled && cfg.GeoIPEnabled {
+		as2orgLoader = geodata.NewAS2OrgLoader(cfg.GeoDataDataDir, cfg.CAIDADownloadURL, time.Duration(cfg.CAIDARefreshHours)*time.Hour)
+		if err := as2orgLoader.InitialLoad(); err != nil {
+			log.Printf("Warning: CAIDA initial load failed: %v (работаем без CAIDA)", err)
+			as2orgLoader = nil
+		} else {
+			log.Printf("✅ CAIDA AS2Org загружен (%d записей, обновление каждые %dh)", as2orgLoader.Count(), cfg.CAIDARefreshHours)
+		}
+	}
+
 	// Инициализация Auto-Learner (опционально)
 	var autoLearner *geodata.AutoLearner
 	if cfg.AutoLearningEnabled && geoDataLoader != nil {
@@ -137,7 +149,7 @@ func main() {
 			cfg.AutoLearningMinConfidence,
 			cfg.AutoLearningMaxAddsPerRun,
 			cfg.AutoLearningOutputFile,
-			nil, // CAIDA as2org wired после инициализации в коммите I
+			as2orgLoader,
 		)
 		log.Printf("✅ Auto-Learner инициализирован")
 	}
@@ -146,6 +158,9 @@ func main() {
 	goroutineCount := 4 // poolMonitor + workerPool + sideEffectPool + metricsDumper
 	if autoLearner != nil {
 		goroutineCount++
+	}
+	if as2orgLoader != nil {
+		goroutineCount++ // RunRefresh
 	}
 
 	wg.Add(goroutineCount)
@@ -157,6 +172,11 @@ func main() {
 	// Запускаем Auto-Learner если включен
 	if autoLearner != nil {
 		go autoLearner.Run(ctx, &wg)
+	}
+
+	// Фоновое обновление CAIDA
+	if as2orgLoader != nil {
+		go as2orgLoader.RunRefresh(ctx, &wg)
 	}
 
 	srv := &http.Server{

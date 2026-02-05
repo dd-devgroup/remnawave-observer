@@ -34,6 +34,9 @@ func (c *ASNClassifier) Classify(asn string, org string) *ASNClassification {
 func (c *ASNClassifier) ClassifyWithCountry(asn string, org string, country string) *ASNClassification {
 	providerType, modifier := c.geoData.GetProviderTypeWithCountry(org, country)
 
+	// Если провайдер попал в unknown log — записываем ASN для AutoLearner (no-op если не unknown)
+	geodata.UpdateUnknownProviderASN(asn, org)
+
 	return &ASNClassification{
 		ASN:          asn,
 		Organization: org,

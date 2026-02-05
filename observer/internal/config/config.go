@@ -211,8 +211,11 @@ func New() *Config {
 		log.Printf("Логирование неизвестных провайдеров включено")
 	}
 	if cfg.AutoLearningEnabled {
-		log.Printf("Автоматическое обучение включено. Интервал: %v, Min count: %d, Min confidence: %s",
-			cfg.AutoLearningInterval, cfg.AutoLearningMinCount, cfg.AutoLearningMinConfidence)
+		log.Printf("Автоматическое обучение включено. Интервал: %v, Min count: %d, Min confidence: %s, Max adds/цикл: %d, Output: %s",
+			cfg.AutoLearningInterval, cfg.AutoLearningMinCount, cfg.AutoLearningMinConfidence, cfg.AutoLearningMaxAddsPerRun, cfg.AutoLearningOutputFile)
+	}
+	if cfg.CAIDAEnabled {
+		log.Printf("CAIDA AS2Org включен. Обновление каждые %dh", cfg.CAIDARefreshHours)
 	}
 
 	return cfg
