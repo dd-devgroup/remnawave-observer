@@ -6,6 +6,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -80,85 +81,100 @@ func (al *AutoLearner) Run(ctx context.Context, wg *sync.WaitGroup) {
 	}
 }
 
-// performLearningCycle выполняет цикл обучения
+// performLearningCycle выполняет цикл обучения.
+// Загружает merged-конфиг (base+overlay) через GeoDataLoader, для каждого unknown-провайдера
+// выполняет CAIDA-lookup по ASN, классифицирует, применяет антиспам и maxAddsPerRun.
 func (al *AutoLearner) performLearningCycle() {
 	al.mu.Lock()
 	defer al.mu.Unlock()
 
-	// Получаем статистику неизвестных провайдеров
 	unknownProviders := GetUnknownProvidersStats()
-	if unknownProviders == nil || len(unknownProviders) == 0 {
+	if len(unknownProviders) == 0 {
 		log.Println("[AutoLearner] Нет неизвестных провайдеров для обучения")
 		return
 	}
 
 	log.Printf("[AutoLearner] Найдено %d неизвестных провайдеров, анализирую...", len(unknownProviders))
 
-	// Загружаем текущий конфиг провайдеров
-	providersFile := filepath.Join(al.configDir, "providers.yaml")
-	providersData, err := os.ReadFile(providersFile)
-	if err != nil {
-		log.Printf("[AutoLearner] Ошибка чтения providers.yaml: %v", err)
+	// Snapshot merged конфиг (base + overlay) — copy-on-write под RLock в GetProviders
+	providersConfig := al.geoDataLoader.GetProviders()
+	if providersConfig == nil {
+		log.Println("[AutoLearner] Конфиг провайдеров не загружен")
 		return
 	}
 
-	providersConfig := &ProvidersConfig{}
-	if err := yaml.Unmarshal(providersData, providersConfig); err != nil {
-		log.Printf("[AutoLearner] Ошибка парсинга providers.yaml: %v", err)
-		return
-	}
-
-	// Анализируем и добавляем новых провайдеров
 	addedCount := 0
 	newKeywords := make(map[string][]string)
 
 	for _, provider := range unknownProviders {
+		if addedCount >= al.maxAddsPerRun {
+			log.Printf("[AutoLearner] Достигнут лимит добавлений за цикл (%d)", al.maxAddsPerRun)
+			break
+		}
+
 		if provider.Count < al.minCount {
 			continue
 		}
 
-		suggestedType, confidence, _ := al.suggestProviderType(provider.Organization, providersConfig)
-		confidence = al.boostConfidenceByCount(confidence, provider.Count)
+		// CAIDA lookup по ASN
+		asnNum := parseASNToInt(provider.ASN)
+		var caidaOrgName, caidaCountry string
+		hasCaida := false
+		if al.as2org != nil && asnNum > 0 {
+			orgName, country, _, ok := al.as2org.LookupOrgByASN(asnNum)
+			if ok {
+				caidaOrgName = orgName
+				caidaCountry = country
+				hasCaida = true
+			}
+		}
 
-		// Проверяем уровень уверенности
+		// Классифицируем: iptoasn org + CAIDA orgName (если доступен)
+		suggestedType, confidence, evidence := al.classifyProvider(provider.Organization, caidaOrgName, providersConfig)
+
+		// Антиспам: без CAIDA и без сильных признаков (keyword/heuristic) — пропускаем
+		if !hasCaida && evidence == "default" {
+			continue
+		}
+
+		// Повышаем уверенность по количеству наблюдений
+		boosted := al.boostConfidenceByCount(confidence, provider.Count)
+		if boosted != confidence {
+			evidence += "+count_boost"
+			confidence = boosted
+		}
+
 		if !al.meetsConfidenceThreshold(confidence) {
 			continue
 		}
 
-		// Извлекаем ключевое слово из названия организации
+		// Keyword — из iptoasn org (именно то, что встречается в трафике)
 		keyword := al.extractKeyword(provider.Organization)
-		if keyword == "" || len(keyword) < 3 {
+		if keyword == "" {
 			continue
 		}
 
-		// Проверяем, не существует ли уже такое ключевое слово
 		if al.keywordExists(keyword, providersConfig) {
 			continue
 		}
 
-		// Добавляем в список новых ключевых слов
-		if newKeywords[suggestedType] == nil {
-			newKeywords[suggestedType] = []string{}
-		}
 		newKeywords[suggestedType] = append(newKeywords[suggestedType], keyword)
 		addedCount++
 
-		log.Printf("[AutoLearner] Добавлен: %s -> %s (тип: %s, уверенность: %s, количество: %d)",
-			provider.Organization, keyword, suggestedType, confidence, provider.Count)
+		log.Printf("[AutoLearner] Добавлен: %s -> %s (тип: %s, уверенность: %s, evidence: %s, count: %d, ASN: %s, CAIDA: %s/%s)",
+			provider.Organization, keyword, suggestedType, confidence, evidence, provider.Count, provider.ASN, caidaOrgName, caidaCountry)
 	}
 
 	if addedCount == 0 {
-		log.Println("[AutoLearner] Нет новых провайдеров для добавления (все ниже порога уверенности)")
+		log.Println("[AutoLearner] Нет новых провайдеров для добавления")
 		return
 	}
 
-	// Записываем overlay (base providers.yaml не трогается)
 	if err := al.writeOverlay(newKeywords); err != nil {
 		log.Printf("[AutoLearner] Ошибка записи overlay: %v", err)
 		return
 	}
 
-	// Перезагружаем конфиг
 	if err := al.geoDataLoader.ReloadProviders(); err != nil {
 		log.Printf("[AutoLearner] Ошибка перезагрузки конфига провайдеров: %v", err)
 		return
@@ -268,34 +284,116 @@ func (al *AutoLearner) boostConfidenceByCount(confidence string, count int) stri
 	}
 }
 
-// extractKeyword извлекает ключевое слово из названия организации
+// classifyProvider классифицирует провайдера, используя iptoasn org и (опционально) CAIDA orgName.
+// Если CAIDA даёт более высокую уверенность — используется её тип; keyword всё равно берётся из iptoasn org.
+// Возвращает: тип провайдера, уверенность, evidence ("keyword" | "caida" | "heuristic" | "default").
+func (al *AutoLearner) classifyProvider(org, caidaOrg string, config *ProvidersConfig) (provType, confidence, evidence string) {
+	t1, c1, matched1 := al.suggestProviderType(org, config)
+	ev1 := evidenceFromMatch(matched1)
+
+	if caidaOrg == "" {
+		return t1, c1, ev1
+	}
+
+	t2, c2, matched2 := al.suggestProviderType(caidaOrg, config)
+	ev2 := evidenceFromMatch(matched2)
+	if ev2 != "default" {
+		ev2 = "caida" // весь результат CAIDA-driven
+	}
+
+	if confidenceRank(c2) > confidenceRank(c1) {
+		return t2, c2, ev2
+	}
+	return t1, c1, ev1
+}
+
+// evidenceFromMatch определяет источник доказательства по matched-списку из suggestProviderType.
+func evidenceFromMatch(matched []string) string {
+	if len(matched) == 0 || (len(matched) == 1 && matched[0] == "default") {
+		return "default"
+	}
+	if len(matched) == 1 && strings.HasPrefix(matched[0], "pattern:") {
+		return "heuristic"
+	}
+	return "keyword"
+}
+
+// confidenceRank возвращает численный ранг уверенности для сравнения.
+func confidenceRank(c string) int {
+	switch c {
+	case "high":
+		return 3
+	case "medium":
+		return 2
+	case "low":
+		return 1
+	default: // "very_low"
+		return 0
+	}
+}
+
+// parseASNToInt парсит строку вида "AS34533" в число 34533. Возвращает 0 при ошибке или пустой строке.
+func parseASNToInt(asnStr string) int {
+	s := strings.TrimPrefix(asnStr, "AS")
+	n, err := strconv.Atoi(s)
+	if err != nil {
+		return 0
+	}
+	return n
+}
+
+// stopWords слова, которые не подходят в качестве ключевых слов провайдеров
+var stopWords = map[string]bool{
+	"llc": true, "ltd": true, "inc": true,
+	"pjsc": true, "ojsc": true,
+	"company": true, "corp": true, "corporation": true,
+	"network": true, "communications": true,
+	"group": true, "holding": true, "holdings": true,
+}
+
+// asnSuffixes суффиксы для удаления из ключевых слов провайдеров
+var asnSuffixes = []string{"-as", "-net", "-isp"}
+
+// extractKeyword извлекает ключевое слово из названия организации.
+// Пропускает stop-words, убирает AS/ASN-префиксы и суффиксы (-as, -net, -isp).
+// Итерирует по словам org, пока не найдёт подходящее.
 func (al *AutoLearner) extractKeyword(org string) string {
 	orgLower := strings.ToLower(org)
 
-	// Убираем типичные префиксы и суффиксы ("asn" раньше "as", иначе "asn-..." → "n-...")
+	// Убираем AS/ASN-prefixes из начала ("asn" раньше "as")
 	orgLower = strings.TrimPrefix(orgLower, "asn")
 	orgLower = strings.TrimPrefix(orgLower, "as")
+	orgLower = strings.TrimLeft(orgLower, " -_")
 
-	// Берем первое слово
 	parts := strings.Fields(orgLower)
-	if len(parts) == 0 {
-		return ""
+	for _, part := range parts {
+		word := strings.Trim(part, "-_.,;:!?()[]{}\"'")
+		word = strings.TrimLeft(word, "0123456789")
+
+		if len(word) < 3 || len(word) > 30 {
+			continue
+		}
+
+		if stopWords[word] {
+			continue
+		}
+
+		// Убираем суффиксы -as / -net / -isp если остаток >= 3 символа
+		for _, suffix := range asnSuffixes {
+			if strings.HasSuffix(word, suffix) && len(word)-len(suffix) >= 3 {
+				word = strings.TrimSuffix(word, suffix)
+				break
+			}
+		}
+
+		if len(word) < 3 {
+			continue
+		}
+
+		return word
 	}
 
-	keyword := parts[0]
-
-	// Убираем специальные символы
-	keyword = strings.Trim(keyword, "-_.,;:!?()[]{}\"'")
-
-	// Убираем числа в начале
-	keyword = strings.TrimLeft(keyword, "0123456789")
-
-	// Если слово слишком короткое или слишком длинное - пропускаем
-	if len(keyword) < 3 || len(keyword) > 30 {
-		return ""
-	}
-
-	return keyword
+	return ""
 }
 
 // keywordExists проверяет, существует ли уже ключевое слово
