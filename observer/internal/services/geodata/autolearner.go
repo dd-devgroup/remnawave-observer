@@ -2,29 +2,40 @@ package geodata
 
 import (
 	"context"
+	"fmt"
 	"log"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
 
 	"gopkg.in/yaml.v3"
-	"os"
-	"path/filepath"
 )
 
 // AutoLearner автоматическое обучение провайдеров
 type AutoLearner struct {
-	geoDataLoader   *GeoDataLoader
-	configDir       string
-	dataDir         string
-	interval        time.Duration
-	minCount        int
-	minConfidence   string
-	mu              sync.Mutex
+	geoDataLoader *GeoDataLoader
+	configDir     string // read-only: base providers.yaml
+	dataDir       string // writable: overlay + backups
+	interval      time.Duration
+	minCount      int
+	minConfidence string
+	maxAddsPerRun int           // макс. добавлений за один цикл
+	outputFile    string        // имя overlay файла в dataDir
+	as2org        *AS2OrgLoader // CAIDA AS2Org (может быть nil)
+	mu            sync.Mutex
 }
 
-// NewAutoLearner создает новый AutoLearner
-func NewAutoLearner(geoDataLoader *GeoDataLoader, configDir string, dataDir string, interval time.Duration, minCount int, minConfidence string) *AutoLearner {
+// NewAutoLearner создает новый AutoLearner.
+// as2org может быть nil — тогда CAIDA-нормализация не применяется.
+func NewAutoLearner(geoDataLoader *GeoDataLoader, configDir, dataDir string, interval time.Duration, minCount int, minConfidence string, maxAddsPerRun int, outputFile string, as2org *AS2OrgLoader) *AutoLearner {
+	if outputFile == "" {
+		outputFile = "providers.learned.yaml"
+	}
+	if maxAddsPerRun <= 0 {
+		maxAddsPerRun = 20
+	}
 	return &AutoLearner{
 		geoDataLoader: geoDataLoader,
 		configDir:     configDir,
@@ -32,6 +43,9 @@ func NewAutoLearner(geoDataLoader *GeoDataLoader, configDir string, dataDir stri
 		interval:      interval,
 		minCount:      minCount,
 		minConfidence: minConfidence,
+		maxAddsPerRun: maxAddsPerRun,
+		outputFile:    outputFile,
+		as2org:        as2org,
 	}
 }
 
@@ -138,9 +152,9 @@ func (al *AutoLearner) performLearningCycle() {
 		return
 	}
 
-	// Обновляем конфиг
-	if err := al.updateProvidersConfig(providersConfig, newKeywords); err != nil {
-		log.Printf("[AutoLearner] Ошибка обновления providers.yaml: %v", err)
+	// Записываем overlay (base providers.yaml не трогается)
+	if err := al.writeOverlay(newKeywords); err != nil {
+		log.Printf("[AutoLearner] Ошибка записи overlay: %v", err)
 		return
 	}
 
@@ -299,65 +313,59 @@ func (al *AutoLearner) keywordExists(keyword string, config *ProvidersConfig) bo
 	return false
 }
 
-// updateProvidersConfig обновляет конфиг провайдеров
-func (al *AutoLearner) updateProvidersConfig(config *ProvidersConfig, newKeywords map[string][]string) error {
-	// Добавляем новые ключевые слова
-	for provType, keywords := range newKeywords {
-		if config.Keywords[provType] == nil {
-			config.Keywords[provType] = []string{}
-		}
-		config.Keywords[provType] = append(config.Keywords[provType], keywords...)
-	}
-
-	// Сохраняем обновленный конфиг
-	providersFile := filepath.Join(al.configDir, "providers.yaml")
-
-	// Создаем директорию для данных если не существует
+// writeOverlay атомарно записывает новые ключевые слова в overlay файл (dataDir/providers.learned.yaml).
+// Существующий overlay зачитывается и обновляется — base providers.yaml не трогается.
+func (al *AutoLearner) writeOverlay(newKeywords map[string][]string) error {
 	if err := os.MkdirAll(al.dataDir, 0755); err != nil {
-		log.Printf("[AutoLearner] Предупреждение: не удалось создать data директорию: %v", err)
+		return fmt.Errorf("mkdirAll dataDir: %w", err)
 	}
 
-	// Создаем резервную копию в data директории
-	backupFile := filepath.Join(al.dataDir, "providers.yaml.backup")
-	originalData, err := os.ReadFile(providersFile)
+	overlayPath := filepath.Join(al.dataDir, al.outputFile)
+
+	// Зачитываем существующий overlay (может не существовать)
+	existing := &ProvidersConfig{Keywords: make(map[string][]string)}
+	if data, err := os.ReadFile(overlayPath); err == nil {
+		_ = yaml.Unmarshal(data, existing)
+		if existing.Keywords == nil {
+			existing.Keywords = make(map[string][]string)
+		}
+	}
+
+	// Мержим новые ключевые слова
+	for provType, keywords := range newKeywords {
+		existing.Keywords[provType] = append(existing.Keywords[provType], keywords...)
+	}
+
+	data, err := yaml.Marshal(existing)
 	if err != nil {
-		return err
-	}
-	if err := os.WriteFile(backupFile, originalData, 0644); err != nil {
-		log.Printf("[AutoLearner] Предупреждение: не удалось создать резервную копию: %v", err)
+		return fmt.Errorf("marshal overlay: %w", err)
 	}
 
-	// Сохраняем обновленный конфиг
-	data, err := yaml.Marshal(config)
-	if err != nil {
-		return err
+	// Атомарная запись: tmp + rename
+	tmpPath := overlayPath + ".tmp"
+	if err := os.WriteFile(tmpPath, data, 0644); err != nil {
+		return fmt.Errorf("write tmp: %w", err)
+	}
+	if err := os.Rename(tmpPath, overlayPath); err != nil {
+		os.Remove(tmpPath)
+		return fmt.Errorf("rename tmp→overlay: %w", err)
 	}
 
-	if err := os.WriteFile(providersFile, data, 0644); err != nil {
-		return err
-	}
-
-	log.Printf("[AutoLearner] Обновлен providers.yaml (резервная копия сохранена в providers.yaml.backup)")
+	log.Printf("[AutoLearner] Overlay обновлён: %s", overlayPath)
 	return nil
 }
 
-// ReloadProviders перезагружает конфиг провайдеров
+// ReloadProviders перезагружает base providers.yaml + overlay (если есть).
 func (l *GeoDataLoader) ReloadProviders() error {
-	providersFile := filepath.Join(l.configDir, "providers.yaml")
-	providersData, err := os.ReadFile(providersFile)
+	merged, err := l.loadProvidersWithOverlay()
 	if err != nil {
-		return err
-	}
-
-	newProviders := &ProvidersConfig{}
-	if err := yaml.Unmarshal(providersData, newProviders); err != nil {
 		return err
 	}
 
 	l.mu.Lock()
-	l.providers = newProviders
+	l.providers = merged
 	l.mu.Unlock()
 
-	log.Println("[GeoDataLoader] Конфигурация провайдеров успешно перезагружена")
+	log.Println("[GeoDataLoader] Конфигурация провайдеров успешно перезагружена (base + overlay)")
 	return nil
 }

@@ -74,7 +74,7 @@ func main() {
 		geodata.InitUnknownProvidersLog(cfg.GeoDataDataDir, cfg.UnknownProvidersLogEnabled)
 
 		// Загружаем конфигурации провайдеров и агломераций
-		geoDataLoader, err = geodata.NewGeoDataLoader(cfg.GeoDataConfigDir)
+		geoDataLoader, err = geodata.NewGeoDataLoader(cfg.GeoDataConfigDir, cfg.GeoDataDataDir)
 		if err != nil {
 			log.Fatalf("Критическая ошибка: не удалось загрузить географические данные: %v", err)
 		}
@@ -135,6 +135,9 @@ func main() {
 			cfg.AutoLearningInterval,
 			cfg.AutoLearningMinCount,
 			cfg.AutoLearningMinConfidence,
+			cfg.AutoLearningMaxAddsPerRun,
+			cfg.AutoLearningOutputFile,
+			nil, // CAIDA as2org wired после инициализации в коммите I
 		)
 		log.Printf("✅ Auto-Learner инициализирован")
 	}

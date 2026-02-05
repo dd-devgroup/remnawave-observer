@@ -83,6 +83,13 @@ type Config struct {
 	AutoLearningInterval      time.Duration // Интервал проверки (default: 24 часа)
 	AutoLearningMinCount      int           // Минимальное количество встреч для автодобавления (default: 10)
 	AutoLearningMinConfidence string        // Минимальный уровень уверенности: high, medium (default: high)
+	AutoLearningMaxAddsPerRun int           // Макс. добавлений за один цикл (default: 20)
+	AutoLearningOutputFile    string        // Имя overlay файла в dataDir (default: providers.learned.yaml)
+
+	// --- ПАРАМЕТРЫ CAIDA AS2Org ---
+	CAIDAEnabled      bool   // Включить загрузку CAIDA AS-Organizations (default: true)
+	CAIDADownloadURL  string // URL файла CAIDA (default: из as2org.go)
+	CAIDARefreshHours int    // Интервал обновления в часах (default: 168 = 7 дней)
 }
 
 // New загружает конфигурацию из переменных окружения.
@@ -159,6 +166,13 @@ func New() *Config {
 		AutoLearningInterval:       time.Duration(getEnvInt("AUTO_LEARNING_INTERVAL_HOURS", 24)) * time.Hour,
 		AutoLearningMinCount:       getEnvInt("AUTO_LEARNING_MIN_COUNT", 10),
 		AutoLearningMinConfidence:  getEnv("AUTO_LEARNING_MIN_CONFIDENCE", "high"),
+		AutoLearningMaxAddsPerRun:  getEnvInt("AUTO_LEARNING_MAX_ADDS_PER_RUN", 20),
+		AutoLearningOutputFile:     getEnv("AUTO_LEARNING_OUTPUT_FILE", "providers.learned.yaml"),
+
+		// --- CAIDA AS2Org ---
+		CAIDAEnabled:      getEnvBool("CAIDA_ENABLED", true),
+		CAIDADownloadURL:  getEnv("CAIDA_DOWNLOAD_URL", ""),
+		CAIDARefreshHours: getEnvInt("CAIDA_REFRESH_HOURS", 168),
 	}
 
 	log.Printf("Конфигурация загружена. Порт: %s", cfg.Port)
