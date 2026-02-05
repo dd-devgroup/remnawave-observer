@@ -326,7 +326,7 @@ func TestAutoLearner_CAIDADrivenClassification(t *testing.T) {
 	}
 
 	// CAIDA: ASN 88888 → orgName "VPNCloud Server Ltd"
-	writeGzFixture(t, caidaDir, "O_VPN-TEST|TEST|VPNCloud Server Ltd|US|\n88888|TEST|VPN-TEST|Ua|Test-AS\n")
+	writeGzFixture(t, caidaDir, "# format:org_id|changed|org_name|country|source\nVPN-TEST|20200101|VPNCloud Server Ltd|US|TEST\n# format:aut|changed|aut_name|org_id|opaque_id|source\n88888|20200101|Test-AS|VPN-TEST|AS88888|TEST\n")
 	as2org := NewAS2OrgLoader(caidaDir, "", 24*time.Hour)
 	if err := as2org.loadFromFile(); err != nil {
 		t.Fatal(err)

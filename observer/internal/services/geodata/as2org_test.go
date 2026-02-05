@@ -9,19 +9,34 @@ import (
 	"time"
 )
 
-// caidaFixture — минимальный фрагмент файла CAIDA AS-Organizations.
+// caidaFixture — минимальный фрагмент файла CAIDA AS-Organizations (реальный формат).
 const caidaFixture = `# Test CAIDA fixture
-# AS lines: ASN|source|orgID|flags|description
-# Org lines: O_<orgID>|source|orgName|country|parentOrgID
-O_AS-CAIDA|CAIDA|CAIDA|US|
-O_RU-SAMARA|RIPE|Samara Region Telecom|RU|
-O_RU-BEE|RIPE|BEE Network LLC|RU|
-O_KZ-TEL|RIPE|Kazakhstan Telecom|KZ|
-1|ARIN|AS-CAIDA|Ua|CAIDA
-34533|RIPE|RU-SAMARA|Ua|ESAMARA-AS
-16345|RIPE|RU-BEE|Ua|BEE-AS Russia
-12345|RIPE|O_MISSING|Ua|ORPHAN-AS
-99001|RIPE|KZ-TEL|Ua|Kazakhtelecom AS
+# format:org_id|changed|org_name|country|source
+AS-CAIDA|20200101|CAIDA|US|ARIN
+RU-SAMARA|20200101|Samara Region Telecom|RU|RIPE
+RU-BEE|20200101|BEE Network LLC|RU|RIPE
+KZ-TEL|20200101|Kazakhstan Telecom|KZ|RIPE
+# format:aut|changed|aut_name|org_id|opaque_id|source
+1|20200101|CAIDA|AS-CAIDA|AS1|ARIN
+34533|20200101|ESAMARA-AS|RU-SAMARA|AS34533|RIPE
+16345|20200101|BEE-AS Russia|RU-BEE|AS16345|RIPE
+12345|20200101|ORPHAN-AS|O_MISSING|AS12345|RIPE
+99001|20200101|Kazakhtelecom AS|KZ-TEL|AS99001|RIPE
+`
+
+// caidaRealFileFixture имитирует реальный файл: заголовочные комментарии и строки
+// до первого «# format:» должны игнорироваться.
+const caidaRealFileFixture = `# AS Org
+# date: 202601
+# program: build-as_org2info.pl
+garbage_before_format|should|be|ignored|completely
+# format:org_id|changed|org_name|country|source
+RU-SAMARA|20200101|Samara Region Telecom|RU|RIPE
+KZ-TEL|20200101|Kazakhstan Telecom|KZ|RIPE
+# some mid-file comment
+# format:aut|changed|aut_name|org_id|opaque_id|source
+34533|20200101|ESAMARA-AS|RU-SAMARA|AS34533|RIPE
+99001|20200101|Kazakhtelecom AS|KZ-TEL|AS99001|RIPE
 `
 
 // writeGzFixture компрессирует текст и кладёт в dir/as-org2info.txt.gz.
@@ -141,5 +156,60 @@ func TestAS2OrgLoader_EmptyFile(t *testing.T) {
 	}
 	if loader.Count() != 0 {
 		t.Errorf("expected 0 entries, got %d", loader.Count())
+	}
+}
+
+// TestAS2OrgLoader_RealFormatParsing проверяет парсер на fixture, имитирующем реальный файл:
+//   - заголовочные комментарии и строка до «# format:» игнорируются,
+//   - оба раздела (org + as) парсятся корректно,
+//   - LookupOrgByASN возвращает org_name/country из Org-раздела.
+func TestAS2OrgLoader_RealFormatParsing(t *testing.T) {
+	dir := t.TempDir()
+	writeGzFixture(t, dir, caidaRealFileFixture)
+
+	loader := NewAS2OrgLoader(dir, "", 7*24*time.Hour)
+	if err := loader.loadFromFile(); err != nil {
+		t.Fatalf("loadFromFile: %v", err)
+	}
+
+	// Только 2 AS строки в fixture
+	if loader.Count() != 2 {
+		t.Fatalf("expected 2 ASN entries, got %d", loader.Count())
+	}
+
+	// ASN 34533 → org_id RU-SAMARA → "Samara Region Telecom", RU
+	orgName, country, orgID, ok := loader.LookupOrgByASN(34533)
+	if !ok {
+		t.Fatal("ASN 34533 expected to be found")
+	}
+	if orgName != "Samara Region Telecom" {
+		t.Errorf("orgName: got %q, want %q", orgName, "Samara Region Telecom")
+	}
+	if country != "RU" {
+		t.Errorf("country: got %q, want %q", country, "RU")
+	}
+	if orgID != "RU-SAMARA" {
+		t.Errorf("orgID: got %q, want %q", orgID, "RU-SAMARA")
+	}
+
+	// ASN 99001 → org_id KZ-TEL → "Kazakhstan Telecom", KZ
+	orgName, country, orgID, ok = loader.LookupOrgByASN(99001)
+	if !ok {
+		t.Fatal("ASN 99001 expected to be found")
+	}
+	if orgName != "Kazakhstan Telecom" {
+		t.Errorf("orgName: got %q, want %q", orgName, "Kazakhstan Telecom")
+	}
+	if country != "KZ" {
+		t.Errorf("country: got %q, want %q", country, "KZ")
+	}
+	if orgID != "KZ-TEL" {
+		t.Errorf("orgID: got %q, want %q", orgID, "KZ-TEL")
+	}
+
+	// garbage_before_format строка НЕ попала в orgMap (mode был modeNone)
+	_, _, _, ok = loader.LookupOrgByASN(0)
+	if ok {
+		t.Error("ASN 0 must not exist — garbage lines before # format: must be ignored")
 	}
 }

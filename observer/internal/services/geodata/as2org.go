@@ -36,12 +36,13 @@ type OrgInfo struct {
 
 // AS2OrgLoader загружает и кэшит CAIDA AS-Organizations dataset.
 //
-// Формат файла (pipe-separated):
+// Файл as-org2info.txt.gz содержит два раздела, разделённых строками «# format:»:
 //
-//	AS строки:  <ASN>|<source>|<orgID>|<flags>|<description>
-//	Org строки: O_<orgID>|<source>|<orgName>|<country>|<parentOrgID>
+//	Org раздел: org_id|changed|org_name|country|source          (5 полей)
+//	AS  раздел: aut|changed|aut_name|org_id|opaque_id|source    (6 полей)
 //
-// Комментарии начинаются с '#'.
+// Порядок разделов не фиксирован; строки до первого «# format:» игнорируются.
+// Все строки начинающиеся с «#» пропускаются (кроме смены режима).
 type AS2OrgLoader struct {
 	dataDir         string
 	downloadURL     string
@@ -198,38 +199,60 @@ func (l *AS2OrgLoader) loadFromFile() error {
 	asnMap := make(map[int]ASInfo)
 	orgMap := make(map[string]OrgInfo)
 
+	// Режимы парсинга: определяются строками «# format:»
+	const (
+		modeNone = iota
+		modeOrg  // org_id|changed|org_name|country|source
+		modeAS   // aut|changed|aut_name|org_id|opaque_id|source
+	)
+	mode := modeNone
+
 	scanner := bufio.NewScanner(gz)
 	// CAIDA файл может содержать очень длинные строки — увеличиваем буфер
 	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 
 	for scanner.Scan() {
 		line := scanner.Text()
-		if line == "" || line[0] == '#' {
+		if line == "" {
+			continue
+		}
+
+		// Комментарии: пропускаем, но отслеживаем смену раздела
+		if line[0] == '#' {
+			if strings.HasPrefix(line, "# format:org_id|") {
+				mode = modeOrg
+			} else if strings.HasPrefix(line, "# format:aut|") {
+				mode = modeAS
+			}
 			continue
 		}
 
 		fields := strings.Split(line, "|")
-		if len(fields) < 5 {
-			continue
-		}
 
-		if strings.HasPrefix(fields[0], "O_") {
-			// Org строка: O_<orgID>|source|orgName|country|parentOrgID
-			orgID := fields[0][2:]
-			orgMap[orgID] = OrgInfo{
+		switch mode {
+		case modeOrg:
+			// org_id|changed|org_name|country|source — ровно 5 полей
+			if len(fields) != 5 {
+				continue
+			}
+			orgMap[fields[0]] = OrgInfo{
 				OrgName: fields[2],
 				Country: fields[3],
 			}
-		} else {
-			// AS строка: <ASN>|source|orgID|flags|description
+		case modeAS:
+			// aut|changed|aut_name|org_id|opaque_id|source — ровно 6 полей
+			if len(fields) != 6 {
+				continue
+			}
 			asnNum, err := strconv.Atoi(fields[0])
 			if err != nil {
 				continue
 			}
 			asnMap[asnNum] = ASInfo{
-				OrgID:   fields[2],
-				AutName: fields[4],
+				OrgID:   fields[3],
+				AutName: fields[2],
 			}
+		// modeNone: строки до первого «# format:» молча игнорируются
 		}
 	}
 
