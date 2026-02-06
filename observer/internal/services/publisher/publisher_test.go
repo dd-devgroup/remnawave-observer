@@ -92,3 +92,28 @@ func TestIsChannelError_Nil(t *testing.T) {
 		t.Error("nil must NOT be channel error")
 	}
 }
+
+// --- generateMessageID tests (Commit N) ---
+
+func TestGenerateMessageID(t *testing.T) {
+	id1 := generateMessageID()
+	id2 := generateMessageID()
+	if id1 == id2 {
+		t.Fatal("generateMessageID must return unique IDs")
+	}
+	if len(id1) != 32 { // 16 bytes hex = 32 chars
+		t.Fatalf("expected 32 char hex string, got %d chars", len(id1))
+	}
+}
+
+func TestChannelWithReturns_Creation(t *testing.T) {
+	// Smoke test: убедимся что структура корректна
+	returns := make(chan amqp091.Return, 1)
+	chWrap := &channelWithReturns{
+		ch:      nil, // mock, не важно для этого теста
+		returns: returns,
+	}
+	if chWrap.returns == nil {
+		t.Fatal("returns channel must be initialized")
+	}
+}

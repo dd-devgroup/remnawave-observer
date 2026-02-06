@@ -1,11 +1,13 @@
 package publisher
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
-	"math/rand/v2"
+	mathrand "math/rand/v2"
 	"observer_service/internal/metrics"
 	"observer_service/internal/models"
 	"time"
@@ -20,11 +22,17 @@ type EventPublisher interface {
 	Ping() error
 }
 
+// channelWithReturns оборачивает AMQP канал с его return listener.
+type channelWithReturns struct {
+	ch      *amqp091.Channel
+	returns chan amqp091.Return
+}
+
 // RabbitMQPublisher реализует EventPublisher для RabbitMQ с confirm mode и
 // экспоненциальным backoff с full jitter на повторах.
 type RabbitMQPublisher struct {
 	conn          *amqp091.Connection
-	channelPool   chan *amqp091.Channel
+	channelPool   chan *channelWithReturns
 	exchangeName  string
 	url           string
 	poolSize      int
@@ -58,7 +66,7 @@ func NewRabbitMQPublisher(url, exchangeName string, poolSize, maxRetries, backof
 		url:              url,
 		exchangeName:     exchangeName,
 		poolSize:         poolSize,
-		channelPool:      make(chan *amqp091.Channel, poolSize),
+		channelPool:      make(chan *channelWithReturns, poolSize),
 		maxRetries:       maxRetries,
 		backoffBaseMs:    backoffBaseMs,
 		backoffMaxMs:     backoffMaxMs,
@@ -72,51 +80,53 @@ func NewRabbitMQPublisher(url, exchangeName string, poolSize, maxRetries, backof
 	return p, nil
 }
 
+// createChannelWithReturns создаёт и настраивает канал с return listener.
+func (p *RabbitMQPublisher) createChannelWithReturns(conn *amqp091.Connection) (*channelWithReturns, error) {
+	ch, err := conn.Channel()
+	if err != nil {
+		return nil, err
+	}
+
+	if err := ch.ExchangeDeclare(p.exchangeName, "fanout", true, false, false, false, nil); err != nil {
+		ch.Close()
+		return nil, err
+	}
+
+	if err := ch.Confirm(false); err != nil {
+		ch.Close()
+		return nil, err
+	}
+
+	// Подписываемся на returns (mandatory publish)
+	returns := make(chan amqp091.Return, 1)
+	ch.NotifyReturn(returns)
+
+	return &channelWithReturns{ch: ch, returns: returns}, nil
+}
+
 func (p *RabbitMQPublisher) connect() error {
 	conn, err := amqp091.Dial(p.url)
 	if err != nil {
 		return fmt.Errorf("ошибка подключения к RabbitMQ: %w", err)
 	}
 
-	pool := make(chan *amqp091.Channel, p.poolSize)
+	pool := make(chan *channelWithReturns, p.poolSize)
 	for i := 0; i < p.poolSize; i++ {
-		ch, err := conn.Channel()
+		chWrap, err := p.createChannelWithReturns(conn)
 		if err != nil {
 			conn.Close()
 			close(pool)
 			for old := range pool {
-				old.Close()
+				old.ch.Close()
 			}
 			return fmt.Errorf("ошибка создания канала %d: %w", i, err)
 		}
-
-		if err := ch.ExchangeDeclare(p.exchangeName, "fanout", true, false, false, false, nil); err != nil {
-			ch.Close()
-			conn.Close()
-			close(pool)
-			for old := range pool {
-				old.Close()
-			}
-			return fmt.Errorf("ошибка объявления exchange: %w", err)
-		}
-
-		// Переводим канал в режим подтверждений от брокера
-		if err := ch.Confirm(false); err != nil {
-			ch.Close()
-			conn.Close()
-			close(pool)
-			for old := range pool {
-				old.Close()
-			}
-			return fmt.Errorf("ошибка включения confirm mode на канале %d: %w", i, err)
-		}
-
-		pool <- ch
+		pool <- chWrap
 	}
 
 	p.channelPool = pool
 	p.conn = conn
-	log.Printf("Успешное (пере)подключение к RabbitMQ. Создан пул из %d каналов с confirm mode.", p.poolSize)
+	log.Printf("Успешное (пере)подключение к RabbitMQ. Создан пул из %d каналов с confirm mode + returns.", p.poolSize)
 	return nil
 }
 
@@ -143,7 +153,14 @@ func (p *RabbitMQPublisher) backoffDelay(attempt int) time.Duration {
 	if exp > p.backoffMaxMs || exp <= 0 {
 		exp = p.backoffMaxMs
 	}
-	return time.Duration(rand.IntN(exp)) * time.Millisecond
+	return time.Duration(mathrand.IntN(exp)) * time.Millisecond
+}
+
+// generateMessageID создаёт уникальный идентификатор сообщения для tracking returns.
+func generateMessageID() string {
+	buf := make([]byte, 16)
+	rand.Read(buf)
+	return hex.EncodeToString(buf)
 }
 
 // deferredConfirm абстрагирует Wait() у *amqp091.DeferredConfirmation,
@@ -168,8 +185,8 @@ func waitWithTimeout(dc deferredConfirm, timeout time.Duration) (ack bool, timed
 	}
 }
 
-// PublishBlockMessage публикует сообщение о блокировке с подтверждением от брокера
-// и экспоненциальным backoff с jitter на каждом повторе.
+// PublishBlockMessage публикует сообщение о блокировке с подтверждением от брокера,
+// mandatory publish (no-route detection) и экспоненциальным backoff с jitter на каждом повторе.
 func (p *RabbitMQPublisher) PublishBlockMessage(msg models.BlockMessage) error {
 	body, err := json.Marshal(msg)
 	if err != nil {
@@ -186,22 +203,25 @@ func (p *RabbitMQPublisher) PublishBlockMessage(msg models.BlockMessage) error {
 			}
 		}
 
-		ch := <-p.channelPool
+		chWrap := <-p.channelPool
+		messageID := generateMessageID()
 
-		dc, err := ch.PublishWithDeferredConfirm(
+		// Публикуем с mandatory=true для отслеживания unroutable сообщений
+		dc, err := chWrap.ch.PublishWithDeferredConfirm(
 			p.exchangeName,
 			"",
-			false,
+			true, // mandatory — брокер вернёт сообщение если нет binding
 			false,
 			amqp091.Publishing{
 				ContentType:  "application/json",
 				Body:         body,
 				DeliveryMode: amqp091.Persistent,
+				MessageId:    messageID,
 			},
 		)
 		if err != nil {
 			if isChannelError(err) {
-				ch.Close()
+				chWrap.ch.Close()
 				log.Printf("Канал в пуле закрыт, удалён из пула (попытка %d/%d). Попытка замещения...", attempt+1, p.maxRetries)
 				if !p.replaceChannel() {
 					log.Println("Замещение не удалось, инициируя переподключение...")
@@ -210,7 +230,7 @@ func (p *RabbitMQPublisher) PublishBlockMessage(msg models.BlockMessage) error {
 					}
 				}
 			} else {
-				p.channelPool <- ch
+				p.channelPool <- chWrap
 			}
 			log.Printf("Ошибка публикации сообщения в RabbitMQ (попытка %d/%d): %v", attempt+1, p.maxRetries, err)
 			metrics.RabbitPublishRetry.Add(1)
@@ -218,23 +238,36 @@ func (p *RabbitMQPublisher) PublishBlockMessage(msg models.BlockMessage) error {
 			continue
 		}
 
+		// Проверка возврата (unroutable message) с коротким таймаутом
+		select {
+		case ret := <-chWrap.returns:
+			p.channelPool <- chWrap
+			log.Printf("Сообщение возвращено брокером (unroutable): MessageId=%s ReplyCode=%d ReplyText=%s (попытка %d/%d)",
+				ret.MessageId, ret.ReplyCode, ret.ReplyText, attempt+1, p.maxRetries)
+			metrics.RabbitPublishRetry.Add(1)
+			time.Sleep(p.backoffDelay(attempt))
+			continue
+		case <-time.After(500 * time.Millisecond):
+			// Нет return — сообщение успешно роутится, переходим к ожиданию confirm
+		}
+
 		ack, timedOut := waitWithTimeout(dc, time.Duration(p.confirmTimeoutMs)*time.Millisecond)
 		if timedOut {
-			p.channelPool <- ch
+			p.channelPool <- chWrap
 			log.Printf("Таймаут подтверждения от брокера (%dms) (попытка %d/%d)", p.confirmTimeoutMs, attempt+1, p.maxRetries)
 			metrics.RabbitPublishRetry.Add(1)
 			time.Sleep(p.backoffDelay(attempt))
 			continue
 		}
 		if !ack {
-			p.channelPool <- ch
+			p.channelPool <- chWrap
 			log.Printf("Брокер отклонил сообщение (Nack) (попытка %d/%d)", attempt+1, p.maxRetries)
 			metrics.RabbitPublishRetry.Add(1)
 			time.Sleep(p.backoffDelay(attempt))
 			continue
 		}
 
-		p.channelPool <- ch
+		p.channelPool <- chWrap
 		metrics.RabbitPublishSuccess.Add(1)
 		return nil // Сообщение подтверждено брокером
 	}
@@ -273,22 +306,12 @@ func (p *RabbitMQPublisher) replaceChannel() bool {
 	if p.conn == nil || p.conn.IsClosed() {
 		return false
 	}
-	ch, err := p.conn.Channel()
+	chWrap, err := p.createChannelWithReturns(p.conn)
 	if err != nil {
 		log.Printf("Не удалось создать замещающий канал: %v", err)
 		return false
 	}
-	if err := ch.ExchangeDeclare(p.exchangeName, "fanout", true, false, false, false, nil); err != nil {
-		ch.Close()
-		log.Printf("Не удалось объявить exchange на замещающем канале: %v", err)
-		return false
-	}
-	if err := ch.Confirm(false); err != nil {
-		ch.Close()
-		log.Printf("Не удалось включить confirm mode на замещающем канале: %v", err)
-		return false
-	}
-	p.channelPool <- ch
+	p.channelPool <- chWrap
 	log.Println("Замещающий канал успешно добавлен в пул.")
 	return true
 }
@@ -296,8 +319,8 @@ func (p *RabbitMQPublisher) replaceChannel() bool {
 // Close закрывает соединение с RabbitMQ.
 func (p *RabbitMQPublisher) Close() error {
 	close(p.channelPool)
-	for ch := range p.channelPool {
-		ch.Close()
+	for chWrap := range p.channelPool {
+		chWrap.ch.Close()
 	}
 
 	if p.conn != nil && !p.conn.IsClosed() {
