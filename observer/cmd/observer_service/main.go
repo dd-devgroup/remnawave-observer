@@ -182,6 +182,12 @@ func main() {
 	srv := &http.Server{
 		Addr:    ":" + cfg.Port,
 		Handler: apiServer.GetRouter(), // Получаем роутер из нашего api.Server
+		// Таймауты для защиты от slowloris и других DoS атак
+		ReadHeaderTimeout: time.Duration(cfg.HTTPReadHeaderTimeoutSeconds) * time.Second,
+		ReadTimeout:       time.Duration(cfg.HTTPReadTimeoutSeconds) * time.Second,
+		WriteTimeout:      time.Duration(cfg.HTTPWriteTimeoutSeconds) * time.Second,
+		IdleTimeout:       time.Duration(cfg.HTTPIdleTimeoutSeconds) * time.Second,
+		MaxHeaderBytes:    cfg.HTTPMaxHeaderBytes,
 	}
 
 	go func() {

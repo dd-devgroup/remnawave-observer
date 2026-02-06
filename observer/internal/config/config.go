@@ -90,6 +90,13 @@ type Config struct {
 	CAIDAEnabled      bool   // Включить загрузку CAIDA AS-Organizations (default: true)
 	CAIDADownloadURL  string // URL файла CAIDA (default: из as2org.go)
 	CAIDARefreshHours int    // Интервал обновления в часах (default: 168 = 7 дней)
+
+	// --- ПАРАМЕТРЫ HTTP SERVER ---
+	HTTPReadHeaderTimeoutSeconds int // Таймаут чтения заголовков (default: 5)
+	HTTPReadTimeoutSeconds       int // Таймаут полного чтения запроса (default: 15)
+	HTTPWriteTimeoutSeconds      int // Таймаут записи ответа (default: 15)
+	HTTPIdleTimeoutSeconds       int // Таймаут keep-alive соединений (default: 60)
+	HTTPMaxHeaderBytes           int // Макс. размер заголовков в байтах (default: 1MB)
 }
 
 // New загружает конфигурацию из переменных окружения.
@@ -173,6 +180,13 @@ func New() *Config {
 		CAIDAEnabled:      getEnvBool("CAIDA_ENABLED", true),
 		CAIDADownloadURL:  getEnv("CAIDA_DOWNLOAD_URL", ""),
 		CAIDARefreshHours: getEnvInt("CAIDA_REFRESH_HOURS", 168),
+
+		// --- HTTP Server ---
+		HTTPReadHeaderTimeoutSeconds: getEnvInt("HTTP_READ_HEADER_TIMEOUT_SECONDS", 5),
+		HTTPReadTimeoutSeconds:       getEnvInt("HTTP_READ_TIMEOUT_SECONDS", 15),
+		HTTPWriteTimeoutSeconds:      getEnvInt("HTTP_WRITE_TIMEOUT_SECONDS", 15),
+		HTTPIdleTimeoutSeconds:       getEnvInt("HTTP_IDLE_TIMEOUT_SECONDS", 60),
+		HTTPMaxHeaderBytes:           getEnvInt("HTTP_MAX_HEADER_BYTES", 1<<20),
 	}
 
 	log.Printf("Конфигурация загружена. Порт: %s", cfg.Port)
@@ -217,6 +231,26 @@ func New() *Config {
 	if cfg.CAIDAEnabled {
 		log.Printf("CAIDA AS2Org включен. Обновление каждые %dh", cfg.CAIDARefreshHours)
 	}
+
+	// Валидация и логирование HTTP таймаутов
+	if cfg.HTTPReadHeaderTimeoutSeconds <= 0 {
+		cfg.HTTPReadHeaderTimeoutSeconds = 5
+	}
+	if cfg.HTTPReadTimeoutSeconds <= 0 {
+		cfg.HTTPReadTimeoutSeconds = 15
+	}
+	if cfg.HTTPWriteTimeoutSeconds <= 0 {
+		cfg.HTTPWriteTimeoutSeconds = 15
+	}
+	if cfg.HTTPIdleTimeoutSeconds <= 0 {
+		cfg.HTTPIdleTimeoutSeconds = 60
+	}
+	if cfg.HTTPMaxHeaderBytes <= 0 {
+		cfg.HTTPMaxHeaderBytes = 1 << 20
+	}
+	log.Printf("HTTP Server таймауты: ReadHeader=%ds Read=%ds Write=%ds Idle=%ds MaxHeaderBytes=%d",
+		cfg.HTTPReadHeaderTimeoutSeconds, cfg.HTTPReadTimeoutSeconds,
+		cfg.HTTPWriteTimeoutSeconds, cfg.HTTPIdleTimeoutSeconds, cfg.HTTPMaxHeaderBytes)
 
 	return cfg
 }
