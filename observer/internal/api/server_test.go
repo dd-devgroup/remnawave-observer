@@ -281,6 +281,50 @@ func TestHandleProcessLogEntries_TooManyEntriesCode(t *testing.T) {
 	}
 }
 
+// --- STRICT_JSON_DECODE tests (Commit P) ---
+
+func TestHandleProcessLogEntries_StrictMode_False_AcceptsUnknownFields(t *testing.T) {
+	cfg := defaultCfg()
+	cfg.StrictJSONDecode = false // default
+	eq := &testEnqueuer{}
+	router := setupRouter(cfg, eq)
+
+	// Body с дополнительным полем "extra_field"
+	body := `[{"user_email":"a@b.com","source_ip":"1.2.3.4","extra_field":"should be ignored"}]`
+	req := httptest.NewRequest("POST", "/log-entry", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusAccepted {
+		t.Errorf("strict=false should accept unknown fields; got %d; body: %s", w.Code, w.Body.String())
+	}
+	if eq.enqueued != 1 {
+		t.Errorf("expected 1 enqueued entry, got %d", eq.enqueued)
+	}
+}
+
+func TestHandleProcessLogEntries_StrictMode_True_RejectsUnknownFields(t *testing.T) {
+	cfg := defaultCfg()
+	cfg.StrictJSONDecode = true
+	router := setupRouter(cfg, &testEnqueuer{})
+
+	// Body с дополнительным полем "unknown_field"
+	body := `[{"user_email":"a@b.com","source_ip":"1.2.3.4","unknown_field":"reject me"}]`
+	req := httptest.NewRequest("POST", "/log-entry", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("strict=true should reject unknown fields; got %d; body: %s", w.Code, w.Body.String())
+	}
+	// Код ошибки должен быть "unknown_field" или "invalid_json" (DisallowUnknownFields даёт общую ошибку)
+	if !strings.Contains(w.Body.String(), "unknown") && !strings.Contains(w.Body.String(), "invalid") {
+		t.Errorf("expected error code with 'unknown' or 'invalid'; body: %s", w.Body.String())
+	}
+}
+
 // --- happy path ---
 
 func TestHandleProcessLogEntries_Success(t *testing.T) {

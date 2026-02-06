@@ -84,3 +84,31 @@ func TestHTTPTimeoutValidation(t *testing.T) {
 		t.Errorf("expected HTTPMaxHeaderBytes clamp to 1048576, got %d", cfg.HTTPMaxHeaderBytes)
 	}
 }
+
+// --- STRICT_JSON_DECODE tests (Commit P) ---
+
+func TestStrictJSONDecodeDefault(t *testing.T) {
+	os.Clearenv()
+	cfg := New()
+	if cfg.StrictJSONDecode {
+		t.Errorf("expected StrictJSONDecode default false, got true")
+	}
+}
+
+func TestStrictJSONDecodeTrue(t *testing.T) {
+	os.Clearenv()
+	os.Setenv("STRICT_JSON_DECODE", "true")
+	cfg := New()
+	if !cfg.StrictJSONDecode {
+		t.Errorf("expected StrictJSONDecode = true, got false")
+	}
+}
+
+func TestStrictJSONDecodeFalse(t *testing.T) {
+	os.Clearenv()
+	os.Setenv("STRICT_JSON_DECODE", "false")
+	cfg := New()
+	if cfg.StrictJSONDecode {
+		t.Errorf("expected StrictJSONDecode = false, got true")
+	}
+}

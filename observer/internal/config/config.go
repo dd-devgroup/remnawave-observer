@@ -97,6 +97,9 @@ type Config struct {
 	HTTPWriteTimeoutSeconds      int // Таймаут записи ответа (default: 15)
 	HTTPIdleTimeoutSeconds       int // Таймаут keep-alive соединений (default: 60)
 	HTTPMaxHeaderBytes           int // Макс. размер заголовков в байтах (default: 1MB)
+
+	// --- ПАРАМЕТРЫ JSON ДЕКОДИРОВАНИЯ ---
+	StrictJSONDecode bool // Отклонять unknown fields в JSON (default: false для backward compatibility)
 }
 
 // New загружает конфигурацию из переменных окружения.
@@ -187,6 +190,9 @@ func New() *Config {
 		HTTPWriteTimeoutSeconds:      getEnvInt("HTTP_WRITE_TIMEOUT_SECONDS", 15),
 		HTTPIdleTimeoutSeconds:       getEnvInt("HTTP_IDLE_TIMEOUT_SECONDS", 60),
 		HTTPMaxHeaderBytes:           getEnvInt("HTTP_MAX_HEADER_BYTES", 1<<20),
+
+		// --- JSON Decoding ---
+		StrictJSONDecode: getEnvBool("STRICT_JSON_DECODE", false),
 	}
 
 	log.Printf("Конфигурация загружена. Порт: %s", cfg.Port)
@@ -251,6 +257,10 @@ func New() *Config {
 	log.Printf("HTTP Server таймауты: ReadHeader=%ds Read=%ds Write=%ds Idle=%ds MaxHeaderBytes=%d",
 		cfg.HTTPReadHeaderTimeoutSeconds, cfg.HTTPReadTimeoutSeconds,
 		cfg.HTTPWriteTimeoutSeconds, cfg.HTTPIdleTimeoutSeconds, cfg.HTTPMaxHeaderBytes)
+
+	if cfg.StrictJSONDecode {
+		log.Printf("Строгая валидация JSON включена (unknown fields будут отклонены)")
+	}
 
 	return cfg
 }

@@ -71,6 +71,12 @@ func (s *Server) handleProcessLogEntries(c *gin.Context) {
 
 	var entries []models.LogEntry
 	decoder := json.NewDecoder(c.Request.Body)
+
+	// Опциональная строгая валидация JSON (отклонение unknown fields)
+	if s.cfg.StrictJSONDecode {
+		decoder.DisallowUnknownFields()
+	}
+
 	if err := decoder.Decode(&entries); err != nil {
 		metrics.RejectedRequestsTotal.Add(1)
 		var maxBytesErr *http.MaxBytesError
@@ -82,6 +88,14 @@ func (s *Server) handleProcessLogEntries(c *gin.Context) {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "empty request body", "code": "invalid_json"})
 			return
 		}
+
+		// Детектируем unknown field error для специфичного кода ошибки
+		if s.cfg.StrictJSONDecode && errors.Is(err, &json.UnmarshalTypeError{}) {
+			log.Printf("Отклонён запрос: unknown field в JSON: %v", err)
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error(), "code": "unknown_field"})
+			return
+		}
+
 		log.Printf("Ошибка декодирования body: %v", err)
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error(), "code": "invalid_json"})
 		return
