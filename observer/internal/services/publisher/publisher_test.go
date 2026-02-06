@@ -8,61 +8,125 @@ import (
 	"github.com/rabbitmq/amqp091-go"
 )
 
-// slowConfirm simulates a DeferredConfirmation that responds after a delay.
-type slowConfirm struct {
-	delay time.Duration
-	ack   bool
-}
+// --- Тесты для новой архитектуры confirms (Commit O) ---
 
-func (s *slowConfirm) Wait() bool {
-	time.Sleep(s.delay)
-	return s.ack
-}
+func TestRegisterWaiter_AckReceived(t *testing.T) {
+	chWrap := &channelWithReturns{
+		confirmWaiters: make(map[uint64]*confirmWaiter),
+		stopRouter:     make(chan struct{}),
+	}
 
-func TestWaitWithTimeout_Ack(t *testing.T) {
-	dc := &slowConfirm{delay: 1 * time.Millisecond, ack: true}
-	ack, timedOut := waitWithTimeout(dc, 1*time.Second)
-	if timedOut {
-		t.Fatal("unexpected timeout")
+	waiter := chWrap.registerWaiter(1, 1*time.Second)
+
+	// Simulate confirmRouter sending ack
+	go func() {
+		time.Sleep(10 * time.Millisecond)
+		waiter.timer.Stop()
+		waiter.result <- true
+		close(waiter.result)
+	}()
+
+	ack, ok := <-waiter.result
+	if !ok {
+		t.Fatal("result channel closed unexpectedly")
 	}
 	if !ack {
 		t.Fatal("expected ack=true")
 	}
 }
 
-func TestWaitWithTimeout_Nack(t *testing.T) {
-	dc := &slowConfirm{delay: 1 * time.Millisecond, ack: false}
-	ack, timedOut := waitWithTimeout(dc, 1*time.Second)
-	if timedOut {
-		t.Fatal("unexpected timeout")
+func TestRegisterWaiter_Timeout(t *testing.T) {
+	chWrap := &channelWithReturns{
+		confirmWaiters: make(map[uint64]*confirmWaiter),
+		stopRouter:     make(chan struct{}),
+	}
+
+	waiter := chWrap.registerWaiter(2, 50*time.Millisecond)
+
+	// Не отправляем confirm — таймер должен сработать
+	ack, ok := <-waiter.result
+	if !ok {
+		t.Fatal("result channel should not be closed on timeout")
 	}
 	if ack {
-		t.Fatal("expected ack=false (nack)")
+		t.Fatal("expected ack=false on timeout")
 	}
+
+	// Убедимся что waiter удалён из map
+	chWrap.waitersMutex.Lock()
+	if _, exists := chWrap.confirmWaiters[2]; exists {
+		t.Fatal("waiter should be removed from map on timeout")
+	}
+	chWrap.waitersMutex.Unlock()
 }
 
-func TestWaitWithTimeout_Timeout(t *testing.T) {
-	dc := &slowConfirm{delay: 10 * time.Second, ack: true}
-	start := time.Now()
-	_, timedOut := waitWithTimeout(dc, 50*time.Millisecond)
-	elapsed := time.Since(start)
-	if !timedOut {
-		t.Fatal("expected timeout")
+func TestConfirmRouter_AckDelivery(t *testing.T) {
+	confirmsChan := make(chan amqp091.Confirmation, 10)
+	chWrap := &channelWithReturns{
+		confirmsChan:   confirmsChan,
+		confirmWaiters: make(map[uint64]*confirmWaiter),
+		stopRouter:     make(chan struct{}),
 	}
-	if elapsed > 300*time.Millisecond {
-		t.Fatalf("timeout path took too long: %v", elapsed)
-	}
-}
 
-func TestWaitWithTimeout_ZeroDelay(t *testing.T) {
-	dc := &slowConfirm{delay: 0, ack: true}
-	ack, timedOut := waitWithTimeout(dc, 100*time.Millisecond)
-	if timedOut {
-		t.Fatal("unexpected timeout for zero-delay confirm")
+	go chWrap.confirmRouter()
+
+	// Регистрируем waiter
+	waiter := chWrap.registerWaiter(5, 1*time.Second)
+
+	// Отправляем confirm в канал
+	confirmsChan <- amqp091.Confirmation{DeliveryTag: 5, Ack: true}
+
+	// Ждём результат
+	ack, ok := <-waiter.result
+	if !ok {
+		t.Fatal("result channel closed unexpectedly")
 	}
 	if !ack {
 		t.Fatal("expected ack=true")
 	}
+
+	// Проверяем что waiter удалён из map
+	chWrap.waitersMutex.Lock()
+	if _, exists := chWrap.confirmWaiters[5]; exists {
+		t.Fatal("waiter should be removed from map after delivery")
+	}
+	chWrap.waitersMutex.Unlock()
+
+	// Останавливаем router
+	close(chWrap.stopRouter)
+	time.Sleep(10 * time.Millisecond) // Даём время на graceful shutdown
+}
+
+func TestConfirmRouter_StopRouter(t *testing.T) {
+	confirmsChan := make(chan amqp091.Confirmation, 10)
+	chWrap := &channelWithReturns{
+		confirmsChan:   confirmsChan,
+		confirmWaiters: make(map[uint64]*confirmWaiter),
+		stopRouter:     make(chan struct{}),
+	}
+
+	// Регистрируем несколько waiters
+	w1 := chWrap.registerWaiter(10, 5*time.Second)
+	w2 := chWrap.registerWaiter(11, 5*time.Second)
+
+	go chWrap.confirmRouter()
+
+	// Останавливаем router
+	close(chWrap.stopRouter)
+
+	// Все waiters должны получить закрытый канал
+	_, ok1 := <-w1.result
+	_, ok2 := <-w2.result
+	if ok1 || ok2 {
+		t.Fatal("waiter result channels should be closed when router stops")
+	}
+
+	// Map должна быть очищена
+	chWrap.waitersMutex.Lock()
+	if chWrap.confirmWaiters != nil && len(chWrap.confirmWaiters) > 0 {
+		t.Fatalf("confirmWaiters should be cleared, got %d entries", len(chWrap.confirmWaiters))
+	}
+	chWrap.waitersMutex.Unlock()
 }
 
 // --- isChannelError tests (Commit B) ---

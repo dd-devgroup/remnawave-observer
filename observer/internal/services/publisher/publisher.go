@@ -10,6 +10,7 @@ import (
 	mathrand "math/rand/v2"
 	"observer_service/internal/metrics"
 	"observer_service/internal/models"
+	"sync"
 	"time"
 
 	"github.com/rabbitmq/amqp091-go"
@@ -22,10 +23,23 @@ type EventPublisher interface {
 	Ping() error
 }
 
-// channelWithReturns оборачивает AMQP канал с его return listener.
+// confirmWaiter — ожидатель подтверждения для одной публикации.
+type confirmWaiter struct {
+	result chan bool // true=ack, false=nack
+	timer  *time.Timer
+}
+
+// channelWithReturns оборачивает AMQP канал с returns, confirms reader и картой waiters.
 type channelWithReturns struct {
-	ch      *amqp091.Channel
-	returns chan amqp091.Return
+	ch           *amqp091.Channel
+	returns      chan amqp091.Return
+	confirmsChan chan amqp091.Confirmation
+	// confirmWaiters хранит ожидателей подтверждений по sequence number
+	confirmWaiters map[uint64]*confirmWaiter
+	// waitersMutex защищает confirmWaiters map
+	waitersMutex   sync.Mutex
+	// stopRouter закрывает reader goroutine
+	stopRouter     chan struct{}
 }
 
 // RabbitMQPublisher реализует EventPublisher для RabbitMQ с confirm mode и
@@ -80,7 +94,7 @@ func NewRabbitMQPublisher(url, exchangeName string, poolSize, maxRetries, backof
 	return p, nil
 }
 
-// createChannelWithReturns создаёт и настраивает канал с return listener.
+// createChannelWithReturns создаёт и настраивает канал с return + confirm listeners.
 func (p *RabbitMQPublisher) createChannelWithReturns(conn *amqp091.Connection) (*channelWithReturns, error) {
 	ch, err := conn.Channel()
 	if err != nil {
@@ -101,7 +115,68 @@ func (p *RabbitMQPublisher) createChannelWithReturns(conn *amqp091.Connection) (
 	returns := make(chan amqp091.Return, 1)
 	ch.NotifyReturn(returns)
 
-	return &channelWithReturns{ch: ch, returns: returns}, nil
+	// Подписываемся на confirms (buffered для предотвращения deadlock)
+	confirmsChan := make(chan amqp091.Confirmation, 100)
+	ch.NotifyPublish(confirmsChan)
+
+	chWrap := &channelWithReturns{
+		ch:             ch,
+		returns:        returns,
+		confirmsChan:   confirmsChan,
+		confirmWaiters: make(map[uint64]*confirmWaiter),
+		stopRouter:     make(chan struct{}),
+	}
+
+	// Запускаем confirmRouter goroutine для раздачи подтверждений
+	go chWrap.confirmRouter()
+
+	return chWrap, nil
+}
+
+// confirmRouter читает подтверждения и раздаёт их ожидателям.
+func (chWrap *channelWithReturns) confirmRouter() {
+	for {
+		select {
+		case <-chWrap.stopRouter:
+			// Закрытие канала: завершить всех ожидателей с ошибкой
+			chWrap.waitersMutex.Lock()
+			for _, w := range chWrap.confirmWaiters {
+				w.timer.Stop()
+				close(w.result) // закрытие без значения = признак ошибки
+			}
+			chWrap.confirmWaiters = nil
+			chWrap.waitersMutex.Unlock()
+			return
+		case conf, ok := <-chWrap.confirmsChan:
+			if !ok {
+				// Канал confirmsChan закрыт (соединение оборвано)
+				chWrap.waitersMutex.Lock()
+				for _, w := range chWrap.confirmWaiters {
+					w.timer.Stop()
+					close(w.result)
+				}
+				chWrap.confirmWaiters = nil
+				chWrap.waitersMutex.Unlock()
+				return
+			}
+
+			// Раздаём подтверждение соответствующему waiter'у
+			chWrap.waitersMutex.Lock()
+			w, exists := chWrap.confirmWaiters[conf.DeliveryTag]
+			if exists {
+				delete(chWrap.confirmWaiters, conf.DeliveryTag)
+				w.timer.Stop()
+				w.result <- conf.Ack
+				close(w.result)
+			}
+			chWrap.waitersMutex.Unlock()
+		}
+	}
+}
+
+// closeRouter останавливает confirmRouter goroutine.
+func (chWrap *channelWithReturns) closeRouter() {
+	close(chWrap.stopRouter)
 }
 
 func (p *RabbitMQPublisher) connect() error {
@@ -163,30 +238,34 @@ func generateMessageID() string {
 	return hex.EncodeToString(buf)
 }
 
-// deferredConfirm абстрагирует Wait() у *amqp091.DeferredConfirmation,
-// позволяя подставлять фейки в unit-тестах.
-type deferredConfirm interface {
-	Wait() bool
-}
-
-// waitWithTimeout ожидает подтверждения от брокера с дедлайном.
-// При таймауте фоновая горутина с dc.Wait() продолжит ждать до ответа
-// брокера или закрытия соединения — утечка ограничена maxRetries × poolSize.
-func waitWithTimeout(dc deferredConfirm, timeout time.Duration) (ack bool, timedOut bool) {
-	done := make(chan bool, 1)
-	go func() {
-		done <- dc.Wait()
-	}()
-	select {
-	case ack = <-done:
-		return ack, false
-	case <-time.After(timeout):
-		return false, true
+// registerWaiter регистрирует waiter для ожидания confirm по seqNo с таймаутом.
+func (chWrap *channelWithReturns) registerWaiter(seqNo uint64, timeout time.Duration) *confirmWaiter {
+	w := &confirmWaiter{
+		result: make(chan bool, 1),
 	}
+
+	chWrap.waitersMutex.Lock()
+	chWrap.confirmWaiters[seqNo] = w
+	chWrap.waitersMutex.Unlock()
+
+	// Таймер удаляет waiter если confirm не пришёл вовремя
+	w.timer = time.AfterFunc(timeout, func() {
+		chWrap.waitersMutex.Lock()
+		delete(chWrap.confirmWaiters, seqNo)
+		chWrap.waitersMutex.Unlock()
+		// Отправляем признак таймаута (не закрываем канал, а шлём false)
+		select {
+		case w.result <- false:
+		default:
+		}
+	})
+
+	return w
 }
 
 // PublishBlockMessage публикует сообщение о блокировке с подтверждением от брокера,
 // mandatory publish (no-route detection) и экспоненциальным backoff с jitter на каждом повторе.
+// Использует seqNo-based confirms без горутины-на-публикацию.
 func (p *RabbitMQPublisher) PublishBlockMessage(msg models.BlockMessage) error {
 	body, err := json.Marshal(msg)
 	if err != nil {
@@ -206,8 +285,14 @@ func (p *RabbitMQPublisher) PublishBlockMessage(msg models.BlockMessage) error {
 		chWrap := <-p.channelPool
 		messageID := generateMessageID()
 
+		// Получаем seqNo ПЕРЕД публикацией (в confirm mode это sequence number следующего сообщения)
+		seqNo := chWrap.ch.GetNextPublishSeqNo()
+
+		// Регистрируем waiter для ожидания confirm с таймаутом
+		waiter := chWrap.registerWaiter(seqNo, time.Duration(p.confirmTimeoutMs)*time.Millisecond)
+
 		// Публикуем с mandatory=true для отслеживания unroutable сообщений
-		dc, err := chWrap.ch.PublishWithDeferredConfirm(
+		err := chWrap.ch.Publish(
 			p.exchangeName,
 			"",
 			true, // mandatory — брокер вернёт сообщение если нет binding
@@ -220,7 +305,14 @@ func (p *RabbitMQPublisher) PublishBlockMessage(msg models.BlockMessage) error {
 			},
 		)
 		if err != nil {
+			// Отменяем waiter при ошибке публикации
+			waiter.timer.Stop()
+			chWrap.waitersMutex.Lock()
+			delete(chWrap.confirmWaiters, seqNo)
+			chWrap.waitersMutex.Unlock()
+
 			if isChannelError(err) {
+				chWrap.closeRouter()
 				chWrap.ch.Close()
 				log.Printf("Канал в пуле закрыт, удалён из пула (попытка %d/%d). Попытка замещения...", attempt+1, p.maxRetries)
 				if !p.replaceChannel() {
@@ -241,35 +333,43 @@ func (p *RabbitMQPublisher) PublishBlockMessage(msg models.BlockMessage) error {
 		// Проверка возврата (unroutable message) с коротким таймаутом
 		select {
 		case ret := <-chWrap.returns:
+			waiter.timer.Stop()
+			chWrap.waitersMutex.Lock()
+			delete(chWrap.confirmWaiters, seqNo)
+			chWrap.waitersMutex.Unlock()
 			p.channelPool <- chWrap
 			log.Printf("Сообщение возвращено брокером (unroutable): MessageId=%s ReplyCode=%d ReplyText=%s (попытка %d/%d)",
 				ret.MessageId, ret.ReplyCode, ret.ReplyText, attempt+1, p.maxRetries)
 			metrics.RabbitPublishRetry.Add(1)
 			time.Sleep(p.backoffDelay(attempt))
 			continue
-		case <-time.After(500 * time.Millisecond):
+		case <-time.After(200 * time.Millisecond):
 			// Нет return — сообщение успешно роутится, переходим к ожиданию confirm
 		}
 
-		ack, timedOut := waitWithTimeout(dc, time.Duration(p.confirmTimeoutMs)*time.Millisecond)
-		if timedOut {
+		// Ожидаем confirm через waiter.result
+		ack, ok := <-waiter.result
+		if !ok {
+			// Канал закрыт = соединение оборвано (confirmRouter закрыт)
 			p.channelPool <- chWrap
-			log.Printf("Таймаут подтверждения от брокера (%dms) (попытка %d/%d)", p.confirmTimeoutMs, attempt+1, p.maxRetries)
+			log.Printf("Соединение с RabbitMQ потеряно во время ожидания подтверждения (попытка %d/%d)", attempt+1, p.maxRetries)
 			metrics.RabbitPublishRetry.Add(1)
 			time.Sleep(p.backoffDelay(attempt))
 			continue
 		}
 		if !ack {
+			// Nack или таймаут (таймер AfterFunc отправил false)
 			p.channelPool <- chWrap
-			log.Printf("Брокер отклонил сообщение (Nack) (попытка %d/%d)", attempt+1, p.maxRetries)
+			log.Printf("Брокер отклонил сообщение или таймаут (%dms) (попытка %d/%d)", p.confirmTimeoutMs, attempt+1, p.maxRetries)
 			metrics.RabbitPublishRetry.Add(1)
 			time.Sleep(p.backoffDelay(attempt))
 			continue
 		}
 
+		// Успех: ack=true, сообщение подтверждено
 		p.channelPool <- chWrap
 		metrics.RabbitPublishSuccess.Add(1)
-		return nil // Сообщение подтверждено брокером
+		return nil
 	}
 
 	metrics.RabbitPublishFail.Add(1)
@@ -320,6 +420,7 @@ func (p *RabbitMQPublisher) replaceChannel() bool {
 func (p *RabbitMQPublisher) Close() error {
 	close(p.channelPool)
 	for chWrap := range p.channelPool {
+		chWrap.closeRouter()
 		chWrap.ch.Close()
 	}
 
