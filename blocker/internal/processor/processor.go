@@ -18,13 +18,15 @@ var validDurationPattern = regexp.MustCompile(`^\d+[smhd]$`)
 type MessageProcessor struct {
 	logger   *logger.Logger
 	executor *command.Executor
+	pool     *WorkerPool
 }
 
 // NewMessageProcessor создает новый обработчик сообщений.
-func NewMessageProcessor(l *logger.Logger, exec *command.Executor) *MessageProcessor {
+func NewMessageProcessor(l *logger.Logger, exec *command.Executor, pool *WorkerPool) *MessageProcessor {
 	return &MessageProcessor{
 		logger:   l,
 		executor: exec,
+		pool:     pool,
 	}
 }
 
@@ -86,20 +88,37 @@ func (p *MessageProcessor) Process(ctx context.Context, body []byte) error {
 
 	p.logger.Info(fmt.Sprintf("Обработка %d валидных IP/CIDR из %d. %s", len(validIPs), len(payload.IPs), eventCtx))
 
+	// Отправляем задачи в worker pool вместо создания неограниченных goroutines
 	var wg sync.WaitGroup
 	for _, ip := range validIPs {
 		wg.Add(1)
-		go func(ipAddress string) {
+		ipAddress := ip // Захватываем переменную для closure
+
+		task := func(taskCtx context.Context) {
 			defer wg.Done()
 
 			// Используем безопасную функцию формирования set expression
 			setExpr := command.BuildSetExpression(ipAddress, duration)
-			err := p.executor.RunNftCommand(ctx, "add", "element", "inet", "firewall", "user_blacklist", setExpr)
+			err := p.executor.RunNftCommand(taskCtx, "add", "element", "inet", "firewall", "user_blacklist", setExpr)
 			if err != nil {
 				p.logger.Error(fmt.Sprintf("Ошибка при обработке IP %s: %v %s", ipAddress, err, eventCtx))
 			}
-		}(ip)
+		}
+
+		// Пытаемся отправить задачу в pool
+		if !p.pool.Submit(task) {
+			// Pool остановлен (shutdown) — уменьшаем счетчик и прерываем
+			wg.Done()
+			p.logger.Warning(fmt.Sprintf("Worker pool остановлен, прерываем обработку. %s", eventCtx))
+			break
+		}
+
+		// Проверяем, не заполнена ли очередь (для логирования backpressure)
+		if p.pool.QueueLen() > p.pool.QueueCap()*9/10 {
+			p.logger.Warning(fmt.Sprintf("Очередь worker pool почти заполнена: %d/%d. %s", p.pool.QueueLen(), p.pool.QueueCap(), eventCtx))
+		}
 	}
+
 	wg.Wait()
 	return nil
 }

@@ -6,6 +6,7 @@ import (
 	"blocker-worker/internal/processor"
 	"blocker-worker/internal/services/command"
 	"blocker-worker/internal/worker"
+	"fmt"
 )
 
 func main() {
@@ -13,11 +14,18 @@ func main() {
 	l := logger.New()
 	cfg := config.New()
 	cmdExecutor := command.NewExecutor(l)
-	msgProcessor := processor.NewMessageProcessor(l, cmdExecutor)
 
-	// 2. Инициализация главного воркера
-	appWorker := worker.New(l, cfg, msgProcessor)
+	// 2. Создание worker pool
+	pool := processor.NewWorkerPool(cfg.BlockerWorkers, cfg.QueueSize, cfg.DrainTimeout)
+	pool.Start()
+	l.Info(fmt.Sprintf("Worker pool запущен: %d воркеров, очередь %d", cfg.BlockerWorkers, cfg.QueueSize))
 
-	// 3. Запуск приложения
+	// 3. Инициализация процессора с pool
+	msgProcessor := processor.NewMessageProcessor(l, cmdExecutor, pool)
+
+	// 4. Инициализация главного воркера
+	appWorker := worker.New(l, cfg, msgProcessor, pool)
+
+	// 5. Запуск приложения
 	appWorker.Run()
 }

@@ -2,18 +2,40 @@ package config
 
 import (
 	"os"
+	"strconv"
 	"time"
 )
 
 const (
-	defaultRabbitMQURL = "amqp://guest:guest@localhost/"
-	reconnectDelay     = 5 * time.Second
+	defaultRabbitMQURL    = "amqp://guest:guest@localhost/"
+	reconnectDelay        = 5 * time.Second
+	defaultBlockerWorkers = 16
+	defaultQueueSize      = 1000
+	defaultDrainTimeout   = 10 * time.Second
 )
 
 // Config хранит конфигурацию приложения.
 type Config struct {
 	RabbitMQURL    string
 	ReconnectDelay time.Duration
+
+	// Worker pool settings
+	BlockerWorkers int           // Количество воркеров для обработки nft команд
+	QueueSize      int           // Размер буфера очереди задач
+	DrainTimeout   time.Duration // Таймаут на drain очереди при shutdown
+}
+
+// getEnvInt возвращает значение переменной окружения как int, или defaultVal при ошибке.
+func getEnvInt(key string, defaultVal int) int {
+	val := os.Getenv(key)
+	if val == "" {
+		return defaultVal
+	}
+	i, err := strconv.Atoi(val)
+	if err != nil || i <= 0 {
+		return defaultVal
+	}
+	return i
 }
 
 // New создает новый экземпляр Config из переменных окружения.
@@ -26,5 +48,8 @@ func New() *Config {
 	return &Config{
 		RabbitMQURL:    rabbitmqURL,
 		ReconnectDelay: reconnectDelay,
+		BlockerWorkers: getEnvInt("BLOCKER_WORKERS", defaultBlockerWorkers),
+		QueueSize:      getEnvInt("BLOCKER_QUEUE_SIZE", defaultQueueSize),
+		DrainTimeout:   defaultDrainTimeout,
 	}
 }

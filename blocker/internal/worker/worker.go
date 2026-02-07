@@ -20,17 +20,19 @@ type Worker struct {
 	logger    *logger.Logger
 	cfg       *config.Config
 	processor *processor.MessageProcessor
+	pool      *processor.WorkerPool
 	ctx       context.Context
 	cancel    context.CancelFunc
 }
 
 // New создает нового Worker'а.
-func New(l *logger.Logger, cfg *config.Config, proc *processor.MessageProcessor) *Worker {
+func New(l *logger.Logger, cfg *config.Config, proc *processor.MessageProcessor, pool *processor.WorkerPool) *Worker {
 	ctx, cancel := context.WithCancel(context.Background())
 	return &Worker{
 		logger:    l,
 		cfg:       cfg,
 		processor: proc,
+		pool:      pool,
 		ctx:       ctx,
 		cancel:    cancel,
 	}
@@ -69,7 +71,9 @@ func (w *Worker) Run() {
 	for {
 		select {
 		case <-w.ctx.Done():
-			w.logger.Info("Воркер остановлен.")
+			w.logger.Info("Получена команда shutdown, останавливаем worker pool...")
+			w.pool.Shutdown()
+			w.logger.Info("Worker pool остановлен. Воркер завершен.")
 			return
 		default:
 			consumer := rabbitmq.NewConsumer(w.logger, w.cfg.RabbitMQURL)
