@@ -9,9 +9,11 @@ COPY . .
 
 RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-w -s" -o blocker-worker ./cmd/blocker_worker
 
-FROM alpine:3.22
+FROM alpine:3.20
 
-RUN apk --no-cache add nftables
+# Устанавливаем nftables с retry (для стабильности сборки)
+RUN apk --no-cache add nftables || \
+    (sleep 5 && apk --no-cache add nftables)
 
 WORKDIR /app
 
