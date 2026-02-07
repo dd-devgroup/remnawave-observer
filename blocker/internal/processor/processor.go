@@ -92,8 +92,8 @@ func (p *MessageProcessor) Process(ctx context.Context, body []byte) error {
 		go func(ipAddress string) {
 			defer wg.Done()
 
-			// Баг #1: Объединяем set expression в один аргумент для корректной работы nft
-			setExpr := fmt.Sprintf("{ %s timeout %s }", ipAddress, duration)
+			// Используем безопасную функцию формирования set expression
+			setExpr := command.BuildSetExpression(ipAddress, duration)
 			err := p.executor.RunNftCommand(ctx, "add", "element", "inet", "firewall", "user_blacklist", setExpr)
 			if err != nil {
 				p.logger.Error(fmt.Sprintf("Ошибка при обработке IP %s: %v %s", ipAddress, err, eventCtx))
