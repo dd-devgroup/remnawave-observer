@@ -12,6 +12,7 @@ const (
 	defaultBlockerWorkers = 16
 	defaultQueueSize      = 1000
 	defaultDrainTimeout   = 10 * time.Second
+	defaultNftTimeout     = 3 * time.Second
 )
 
 // Config хранит конфигурацию приложения.
@@ -23,6 +24,9 @@ type Config struct {
 	BlockerWorkers int           // Количество воркеров для обработки nft команд
 	QueueSize      int           // Размер буфера очереди задач
 	DrainTimeout   time.Duration // Таймаут на drain очереди при shutdown
+
+	// NFT command settings
+	NftTimeout time.Duration // Таймаут на выполнение одной nft команды
 }
 
 // getEnvInt возвращает значение переменной окружения как int, или defaultVal при ошибке.
@@ -38,6 +42,19 @@ func getEnvInt(key string, defaultVal int) int {
 	return i
 }
 
+// getEnvDuration возвращает значение переменной окружения как duration (секунды), или defaultVal при ошибке.
+func getEnvDuration(key string, defaultVal time.Duration) time.Duration {
+	val := os.Getenv(key)
+	if val == "" {
+		return defaultVal
+	}
+	i, err := strconv.Atoi(val)
+	if err != nil || i <= 0 {
+		return defaultVal
+	}
+	return time.Duration(i) * time.Second
+}
+
 // New создает новый экземпляр Config из переменных окружения.
 func New() *Config {
 	rabbitmqURL := os.Getenv("RABBITMQ_URL")
@@ -51,5 +68,6 @@ func New() *Config {
 		BlockerWorkers: getEnvInt("BLOCKER_WORKERS", defaultBlockerWorkers),
 		QueueSize:      getEnvInt("BLOCKER_QUEUE_SIZE", defaultQueueSize),
 		DrainTimeout:   defaultDrainTimeout,
+		NftTimeout:     getEnvDuration("NFT_TIMEOUT_SECONDS", defaultNftTimeout),
 	}
 }

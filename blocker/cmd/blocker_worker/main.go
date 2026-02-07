@@ -20,8 +20,8 @@ func main() {
 	pool.Start()
 	l.Info(fmt.Sprintf("Worker pool запущен: %d воркеров, очередь %d", cfg.BlockerWorkers, cfg.QueueSize))
 
-	// 3. Инициализация процессора с pool
-	msgProcessor := processor.NewMessageProcessor(l, cmdExecutor, pool)
+	// 3. Инициализация процессора с pool и nftTimeout
+	msgProcessor := processor.NewMessageProcessor(l, cmdExecutor, pool, cfg.NftTimeout)
 
 	// 4. Инициализация главного воркера
 	appWorker := worker.New(l, cfg, msgProcessor, pool)

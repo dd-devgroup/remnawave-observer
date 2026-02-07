@@ -7,26 +7,30 @@ import (
 	"blocker-worker/internal/validation"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"regexp"
 	"sync"
+	"time"
 )
 
 var validDurationPattern = regexp.MustCompile(`^\d+[smhd]$`)
 
 // MessageProcessor инкапсулирует логику обработки одного сообщения RabbitMQ.
 type MessageProcessor struct {
-	logger   *logger.Logger
-	executor *command.Executor
-	pool     *WorkerPool
+	logger     *logger.Logger
+	executor   *command.Executor
+	pool       *WorkerPool
+	nftTimeout time.Duration
 }
 
 // NewMessageProcessor создает новый обработчик сообщений.
-func NewMessageProcessor(l *logger.Logger, exec *command.Executor, pool *WorkerPool) *MessageProcessor {
+func NewMessageProcessor(l *logger.Logger, exec *command.Executor, pool *WorkerPool, nftTimeout time.Duration) *MessageProcessor {
 	return &MessageProcessor{
-		logger:   l,
-		executor: exec,
-		pool:     pool,
+		logger:     l,
+		executor:   exec,
+		pool:       pool,
+		nftTimeout: nftTimeout,
 	}
 }
 
@@ -97,11 +101,22 @@ func (p *MessageProcessor) Process(ctx context.Context, body []byte) error {
 		task := func(taskCtx context.Context) {
 			defer wg.Done()
 
+			// Создаем child context с timeout для конкретной nft операции
+			nftCtx, cancel := context.WithTimeout(taskCtx, p.nftTimeout)
+			defer cancel()
+
 			// Используем безопасную функцию формирования set expression
 			setExpr := command.BuildSetExpression(ipAddress, duration)
-			err := p.executor.RunNftCommand(taskCtx, "add", "element", "inet", "firewall", "user_blacklist", setExpr)
+			err := p.executor.RunNftCommand(nftCtx, "add", "element", "inet", "firewall", "user_blacklist", setExpr)
 			if err != nil {
-				p.logger.Error(fmt.Sprintf("Ошибка при обработке IP %s: %v %s", ipAddress, err, eventCtx))
+				// Проверяем, была ли это timeout ошибка
+				if errors.Is(err, context.DeadlineExceeded) {
+					p.logger.Error(fmt.Sprintf("TIMEOUT при обработке IP %s (превышен лимит %v). %s", ipAddress, p.nftTimeout, eventCtx))
+				} else if errors.Is(err, context.Canceled) {
+					p.logger.Warning(fmt.Sprintf("Операция отменена для IP %s (shutdown). %s", ipAddress, eventCtx))
+				} else {
+					p.logger.Error(fmt.Sprintf("Ошибка при обработке IP %s: %v %s", ipAddress, err, eventCtx))
+				}
 			}
 		}
 
