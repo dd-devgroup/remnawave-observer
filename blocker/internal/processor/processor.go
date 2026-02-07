@@ -2,6 +2,7 @@ package processor
 
 import (
 	"blocker-worker/internal/logger"
+	"blocker-worker/internal/metrics"
 	"blocker-worker/internal/models"
 	"blocker-worker/internal/services/command"
 	"blocker-worker/internal/validation"
@@ -79,6 +80,7 @@ func (p *MessageProcessor) Process(ctx context.Context, body []byte) error {
 		result := validation.ValidateIPOrCIDR(ip)
 		if !result.Valid {
 			p.logger.Warning(fmt.Sprintf("Невалидный IP/CIDR пропущен: %s (причина: %s) %s", ip, result.Error, eventCtx))
+			metrics.Get().InvalidIPsCount.Add(1)
 			continue
 		}
 		validIPs = append(validIPs, ip)
@@ -107,16 +109,23 @@ func (p *MessageProcessor) Process(ctx context.Context, body []byte) error {
 
 			// Используем безопасную функцию формирования set expression
 			setExpr := command.BuildSetExpression(ipAddress, duration)
+			metrics.Get().NftCommandsTotal.Add(1)
 			err := p.executor.RunNftCommand(nftCtx, "add", "element", "inet", "firewall", "user_blacklist", setExpr)
 			if err != nil {
 				// Проверяем, была ли это timeout ошибка
 				if errors.Is(err, context.DeadlineExceeded) {
 					p.logger.Error(fmt.Sprintf("TIMEOUT при обработке IP %s (превышен лимит %v). %s", ipAddress, p.nftTimeout, eventCtx))
+					metrics.Get().NftCommandsTimeout.Add(1)
+					metrics.Get().NftCommandsFail.Add(1)
 				} else if errors.Is(err, context.Canceled) {
 					p.logger.Warning(fmt.Sprintf("Операция отменена для IP %s (shutdown). %s", ipAddress, eventCtx))
+					metrics.Get().NftCommandsFail.Add(1)
 				} else {
 					p.logger.Error(fmt.Sprintf("Ошибка при обработке IP %s: %v %s", ipAddress, err, eventCtx))
+					metrics.Get().NftCommandsFail.Add(1)
 				}
+			} else {
+				metrics.Get().NftCommandsSuccess.Add(1)
 			}
 		}
 
@@ -131,6 +140,7 @@ func (p *MessageProcessor) Process(ctx context.Context, body []byte) error {
 		// Проверяем, не заполнена ли очередь (для логирования backpressure)
 		if p.pool.QueueLen() > p.pool.QueueCap()*9/10 {
 			p.logger.Warning(fmt.Sprintf("Очередь worker pool почти заполнена: %d/%d. %s", p.pool.QueueLen(), p.pool.QueueCap(), eventCtx))
+			metrics.Get().PoolQueueFullWarnings.Add(1)
 		}
 	}
 

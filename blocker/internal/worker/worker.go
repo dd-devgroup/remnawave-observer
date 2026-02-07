@@ -3,6 +3,7 @@ package worker
 import (
 	"blocker-worker/internal/config"
 	"blocker-worker/internal/logger"
+	"blocker-worker/internal/metrics"
 	"blocker-worker/internal/processor"
 	"blocker-worker/internal/services/rabbitmq"
 	"context"
@@ -40,11 +41,15 @@ func New(l *logger.Logger, cfg *config.Config, proc *processor.MessageProcessor,
 
 // handleMessage является функцией обратного вызова для потребителя RabbitMQ.
 func (w *Worker) handleMessage(ctx context.Context, msg amqp.Delivery) error {
+	metrics.Get().MessagesReceived.Add(1)
+
 	err := w.processor.Process(ctx, msg.Body)
 	if err != nil {
 		w.logger.Error(fmt.Sprintf("Произошла ошибка при обработке сообщения: %v. Сообщение не будет подтверждено.", err))
 		if errNack := msg.Nack(false, false); errNack != nil {
 			w.logger.Error(fmt.Sprintf("Ошибка при Nack сообщения: %v", errNack))
+		} else {
+			metrics.Get().MessagesNack.Add(1)
 		}
 		return nil
 	}
@@ -53,6 +58,7 @@ func (w *Worker) handleMessage(ctx context.Context, msg amqp.Delivery) error {
 		w.logger.Error(fmt.Sprintf("Ошибка при Ack сообщения: %v", errAck))
 		return errAck
 	}
+	metrics.Get().MessagesAck.Add(1)
 	return nil
 }
 
