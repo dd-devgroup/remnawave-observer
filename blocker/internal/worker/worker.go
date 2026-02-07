@@ -76,7 +76,7 @@ func (w *Worker) Run() {
 			w.logger.Info("Worker pool остановлен. Воркер завершен.")
 			return
 		default:
-			consumer := rabbitmq.NewConsumer(w.logger, w.cfg.RabbitMQURL)
+			consumer := rabbitmq.NewConsumer(w.logger, w.cfg.RabbitMQURL, w.cfg.PrefetchCount)
 			if err := consumer.Connect(); err != nil {
 				w.logger.Warning(fmt.Sprintf("Не удалось подключиться к RabbitMQ: %v. Повторная попытка через %v...", err, w.cfg.ReconnectDelay))
 				w.waitOrExit()

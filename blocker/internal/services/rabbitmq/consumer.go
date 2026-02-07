@@ -13,17 +13,19 @@ const (
 
 // Consumer обрабатывает подключение и получение сообщений из RabbitMQ.
 type Consumer struct {
-	logger      *logger.Logger
-	conn        *amqp.Connection
-	channel     *amqp.Channel
-	rabbitMQURL string
+	logger        *logger.Logger
+	conn          *amqp.Connection
+	channel       *amqp.Channel
+	rabbitMQURL   string
+	prefetchCount int
 }
 
 // NewConsumer создает нового потребителя RabbitMQ.
-func NewConsumer(l *logger.Logger, url string) *Consumer {
+func NewConsumer(l *logger.Logger, url string, prefetchCount int) *Consumer {
 	return &Consumer{
-		logger:      l,
-		rabbitMQURL: url,
+		logger:        l,
+		rabbitMQURL:   url,
+		prefetchCount: prefetchCount,
 	}
 }
 
@@ -48,9 +50,11 @@ func (c *Consumer) Connect() error {
 // SetupAndConsume настраивает обменник, очередь и начинает потребление сообщений.
 // Принимает функцию-обработчик для обработки сообщений.
 func (c *Consumer) SetupAndConsume(ctx context.Context, handler func(context.Context, amqp.Delivery) error) error {
-	if err := c.channel.Qos(1, 0, false); err != nil {
-		return fmt.Errorf("не удалось установить QoS: %w", err)
+	// QoS: prefetchCount сообщений предварительно загружается, prefetchSize=0 (без лимита по размеру)
+	if err := c.channel.Qos(c.prefetchCount, 0, false); err != nil {
+		return fmt.Errorf("не удалось установить QoS (prefetch=%d): %w", c.prefetchCount, err)
 	}
+	c.logger.Info(fmt.Sprintf("QoS установлен: prefetchCount=%d", c.prefetchCount))
 
 	err := c.channel.ExchangeDeclare(
 		blockingExchangeName, "fanout", true, false, false, false, nil,
