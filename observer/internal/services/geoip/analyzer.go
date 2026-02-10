@@ -1,6 +1,7 @@
 package geoip
 
 import (
+	"context"
 	"math"
 
 	"observer_service/internal/services/geodata"
@@ -31,7 +32,7 @@ func NewGeoAnalyzer(geoService *GeoIPService, geoData *geodata.GeoDataLoader) *G
 }
 
 // AnalyzeUserIPs анализирует список IP-адресов пользователя
-func (a *GeoAnalyzer) AnalyzeUserIPs(ips []string) *GeoAnalysisResult {
+func (a *GeoAnalyzer) AnalyzeUserIPs(ctx context.Context, ips []string) *GeoAnalysisResult {
 	if len(ips) == 0 {
 		return &GeoAnalysisResult{
 			UniqueCountries: []string{},
@@ -46,7 +47,7 @@ func (a *GeoAnalyzer) AnalyzeUserIPs(ips []string) *GeoAnalysisResult {
 	// Получаем геолокации для всех IP
 	locations := make([]*GeoLocation, 0, len(ips))
 	for _, ip := range ips {
-		loc, err := a.geoService.Lookup(ip)
+		loc, err := a.geoService.Lookup(ctx, ip)
 		if err == nil && loc != nil {
 			locations = append(locations, loc)
 		}

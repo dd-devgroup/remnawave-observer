@@ -7,7 +7,6 @@ import (
 	"log"
 	"net/http"
 	"strings"
-	"sync"
 	"time"
 
 	"observer_service/internal/services/asn"
@@ -17,13 +16,13 @@ import (
 
 // GeoLocation представляет геолокацию IP адреса
 type GeoLocation struct {
-	IP          string
-	CountryCode string
-	City        string
-	Region      string
-	Latitude    float64
-	Longitude   float64
-	ASN         string
+	IP           string
+	CountryCode  string
+	City         string
+	Region       string
+	Latitude     float64
+	Longitude    float64
+	ASN          string
 	Organization string
 }
 
@@ -34,7 +33,7 @@ type GeoIPService struct {
 	cacheTTL    time.Duration
 	httpClient  *http.Client
 	rateLimiter *time.Ticker
-	mu          sync.Mutex
+	timeout     time.Duration // таймаут на один запрос к ip-api.com
 }
 
 // IPAPIResponse структура ответа от ip-api.com
@@ -52,42 +51,40 @@ type IPAPIResponse struct {
 	Message     string  `json:"message,omitempty"`
 }
 
-// NewGeoIPService создает новый GeoIP сервис
-func NewGeoIPService(asnLookup *asn.ASNLookup, redisClient *redis.Client, cacheTTL time.Duration) *GeoIPService {
+// NewGeoIPService создает новый GeoIP сервис.
+// rateIntervalMs — минимальный интервал между запросами к ip-api.com в миллисекундах.
+// timeout — таймаут на один HTTP-запрос.
+func NewGeoIPService(asnLookup *asn.ASNLookup, redisClient *redis.Client, cacheTTL time.Duration, timeout time.Duration, rateIntervalMs int) *GeoIPService {
+	if rateIntervalMs <= 0 {
+		rateIntervalMs = 1350
+	}
 	return &GeoIPService{
 		asnLookup:   asnLookup,
 		redisClient: redisClient,
 		cacheTTL:    cacheTTL,
-		httpClient: &http.Client{
-			Timeout: 5 * time.Second,
-		},
-		// ip-api.com ограничение: 45 запросов в минуту
-		// Используем rate limiter для безопасности
-		rateLimiter: time.NewTicker(1350 * time.Millisecond), // ~44 req/min
+		httpClient:  &http.Client{},
+		timeout:     timeout,
+		rateLimiter: time.NewTicker(time.Duration(rateIntervalMs) * time.Millisecond),
 	}
 }
 
-// Lookup выполняет геолокацию IP адреса
-func (s *GeoIPService) Lookup(ip string) (*GeoLocation, error) {
-	// Проверяем кэш Redis
+// Lookup выполняет геолокацию IP адреса с учётом контекста.
+func (s *GeoIPService) Lookup(ctx context.Context, ip string) (*GeoLocation, error) {
 	if s.redisClient != nil {
-		cached, err := s.getFromCache(ip)
+		cached, err := s.getFromCache(ctx, ip)
 		if err == nil && cached != nil {
 			return cached, nil
 		}
 	}
 
-	// Получаем ASN, CountryCode и Organization из iptoasn.com (всегда доступно)
 	asnStr, countryCode, org, err := s.asnLookup.LookupFull(ip)
 	if err != nil {
-		// Если ASN lookup не удался, возвращаем базовую информацию
 		log.Printf("[GeoIP] ASN lookup failed for %s: %v", ip, err)
 		asnStr = ""
 		countryCode = ""
 		org = ""
 	}
 
-	// Создаем базовую локацию
 	location := &GeoLocation{
 		IP:           ip,
 		CountryCode:  countryCode,
@@ -95,37 +92,46 @@ func (s *GeoIPService) Lookup(ip string) (*GeoLocation, error) {
 		Organization: org,
 	}
 
-	// Пытаемся получить расширенную информацию от ip-api.com
-	if apiData := s.fetchFromIPAPI(ip); apiData != nil {
+	if apiData := s.fetchFromIPAPI(ctx, ip); apiData != nil {
 		location.City = apiData.City
 		location.Region = apiData.RegionName
 		location.Latitude = apiData.Lat
 		location.Longitude = apiData.Lon
-
-		// Обновляем CountryCode если получили от API
 		if apiData.CountryCode != "" {
 			location.CountryCode = apiData.CountryCode
 		}
 	}
 
-	// Сохраняем в кэш
 	if s.redisClient != nil {
-		s.saveToCache(ip, location)
+		s.saveToCache(ctx, ip, location)
 	}
 
 	return location, nil
 }
 
-// fetchFromIPAPI получает данные от ip-api.com с rate limiting
-func (s *GeoIPService) fetchFromIPAPI(ip string) *IPAPIResponse {
-	// Rate limiting
-	s.mu.Lock()
-	<-s.rateLimiter.C
-	s.mu.Unlock()
+// fetchFromIPAPI получает данные от ip-api.com с rate limiting без глобального мьютекса.
+// Тикер-канал потоко-безопасен: каждый <-s.rateLimiter.C забирает ровно один тик,
+// поэтому параллельные горутины ожидают свой тик независимо друг от друга.
+func (s *GeoIPService) fetchFromIPAPI(ctx context.Context, ip string) *IPAPIResponse {
+	select {
+	case <-s.rateLimiter.C:
+	case <-ctx.Done():
+		log.Printf("[GeoIP] rate-limit wait cancelled for %s: %v", ip, ctx.Err())
+		return nil
+	}
 
 	url := fmt.Sprintf("http://ip-api.com/json/%s?fields=status,message,country,countryCode,region,regionName,city,lat,lon,isp,as", ip)
 
-	resp, err := s.httpClient.Get(url)
+	reqCtx, cancel := context.WithTimeout(ctx, s.timeout)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, url, nil)
+	if err != nil {
+		log.Printf("[GeoIP] request creation failed for %s: %v", ip, err)
+		return nil
+	}
+
+	resp, err := s.httpClient.Do(req)
 	if err != nil {
 		log.Printf("[GeoIP] ip-api.com request failed for %s: %v", ip, err)
 		return nil
@@ -151,35 +157,26 @@ func (s *GeoIPService) fetchFromIPAPI(ip string) *IPAPIResponse {
 	return &apiResp
 }
 
-// getFromCache получает данные из Redis кэша
-func (s *GeoIPService) getFromCache(ip string) (*GeoLocation, error) {
-	ctx := context.Background()
+func (s *GeoIPService) getFromCache(ctx context.Context, ip string) (*GeoLocation, error) {
 	key := fmt.Sprintf("geoip:%s", ip)
-
 	data, err := s.redisClient.Get(ctx, key).Result()
 	if err != nil {
 		return nil, err
 	}
-
 	var location GeoLocation
 	if err := json.Unmarshal([]byte(data), &location); err != nil {
 		return nil, err
 	}
-
 	return &location, nil
 }
 
-// saveToCache сохраняет данные в Redis кэш
-func (s *GeoIPService) saveToCache(ip string, location *GeoLocation) {
-	ctx := context.Background()
+func (s *GeoIPService) saveToCache(ctx context.Context, ip string, location *GeoLocation) {
 	key := fmt.Sprintf("geoip:%s", ip)
-
 	data, err := json.Marshal(location)
 	if err != nil {
 		log.Printf("[GeoIP] Failed to marshal location for cache: %v", err)
 		return
 	}
-
 	if err := s.redisClient.Set(ctx, key, data, s.cacheTTL).Err(); err != nil {
 		log.Printf("[GeoIP] Failed to save to cache: %v", err)
 	}

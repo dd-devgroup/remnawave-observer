@@ -1,43 +1,49 @@
 package processor
 
 import (
+	"blocker-worker/internal/firewall"
 	"blocker-worker/internal/logger"
+	"blocker-worker/internal/metrics"
 	"blocker-worker/internal/models"
-	"blocker-worker/internal/services/command"
+	"blocker-worker/internal/validation"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
-	"net"
 	"regexp"
-	"strings"
 	"sync"
+	"time"
 )
 
 var validDurationPattern = regexp.MustCompile(`^\d+[smhd]$`)
 
 // MessageProcessor инкапсулирует логику обработки одного сообщения RabbitMQ.
 type MessageProcessor struct {
-	logger   *logger.Logger
-	executor *command.Executor
+	logger     *logger.Logger
+	backend    firewall.FirewallBackend
+	pool       *WorkerPool
+	nftTimeout time.Duration
 }
 
 // NewMessageProcessor создает новый обработчик сообщений.
-func NewMessageProcessor(l *logger.Logger, exec *command.Executor) *MessageProcessor {
+func NewMessageProcessor(l *logger.Logger, backend firewall.FirewallBackend, pool *WorkerPool, nftTimeout time.Duration) *MessageProcessor {
 	return &MessageProcessor{
-		logger:   l,
-		executor: exec,
+		logger:     l,
+		backend:    backend,
+		pool:       pool,
+		nftTimeout: nftTimeout,
 	}
 }
 
-// isValidIPOrCIDR проверяет, является ли строка валидным IP-адресом или CIDR.
-func isValidIPOrCIDR(s string) bool {
-	// Проверяем CIDR (например, 192.168.1.0/24)
-	if strings.Contains(s, "/") {
-		_, _, err := net.ParseCIDR(s)
-		return err == nil
+// logEventContext формирует контекстную строку для логов с EventID/ChunkIndex если они есть.
+func logEventContext(payload *models.BlockingPayload) string {
+	if payload.EventID != "" {
+		if payload.ChunkTotal > 1 {
+			return fmt.Sprintf("[EventID=%s, Chunk=%d/%d]", payload.EventID, payload.ChunkIndex+1, payload.ChunkTotal)
+		}
+		return fmt.Sprintf("[EventID=%s]", payload.EventID)
 	}
-	// Проверяем обычный IP-адрес
-	return net.ParseIP(s) != nil
+	return ""
 }
 
 // Process принимает тело сообщения и выполняет действие по блокировке.
@@ -45,11 +51,14 @@ func (p *MessageProcessor) Process(ctx context.Context, body []byte) error {
 	var payload models.BlockingPayload
 	if err := json.Unmarshal(body, &payload); err != nil {
 		p.logger.Error(fmt.Sprintf("Не удалось декодировать JSON из сообщения: %s", string(body)))
+		// Невалидный JSON — ack сообщение, чтобы не зациклить очередь
 		return err
 	}
 
+	eventCtx := logEventContext(&payload)
+
 	if len(payload.IPs) == 0 {
-		p.logger.Info("Сообщение не содержит IP-адресов для блокировки, пропускаем.")
+		p.logger.Info(fmt.Sprintf("Сообщение не содержит IP-адресов для блокировки, пропускаем. %s", eventCtx))
 		return nil
 	}
 
@@ -59,31 +68,81 @@ func (p *MessageProcessor) Process(ctx context.Context, body []byte) error {
 	}
 
 	if !validDurationPattern.MatchString(duration) {
-		err := fmt.Errorf("недопустимый формат duration, сообщение отклонено: '%s'", duration)
+		err := fmt.Errorf("недопустимый формат duration, сообщение отклонено: '%s' %s", duration, eventCtx)
 		p.logger.Error(err.Error())
+		// Невалидный duration — ack сообщение (poison message)
 		return err
 	}
 
-	var wg sync.WaitGroup
+	// Валидируем все IP до начала обработки
+	validIPs := make([]string, 0, len(payload.IPs))
 	for _, ip := range payload.IPs {
+		result := validation.ValidateIPOrCIDR(ip)
+		if !result.Valid {
+			p.logger.Warning(fmt.Sprintf("Невалидный IP/CIDR пропущен: %s (причина: %s) %s", ip, result.Error, eventCtx))
+			metrics.Get().InvalidIPsCount.Add(1)
+			continue
+		}
+		validIPs = append(validIPs, ip)
+	}
+
+	if len(validIPs) == 0 {
+		p.logger.Warning(fmt.Sprintf("Все IP/CIDR в сообщении невалидны, нечего блокировать. %s", eventCtx))
+		// Ack сообщение — это poison message с неправильными данными
+		return nil
+	}
+
+	p.logger.Info(fmt.Sprintf("Обработка %d валидных IP/CIDR из %d. %s", len(validIPs), len(payload.IPs), eventCtx))
+
+	// Отправляем задачи в worker pool вместо создания неограниченных goroutines
+	var wg sync.WaitGroup
+	for _, ip := range validIPs {
 		wg.Add(1)
-		go func(ipAddress string) {
+		ipAddress := ip // Захватываем переменную для closure
+
+		task := func(taskCtx context.Context) {
 			defer wg.Done()
 
-			// Баг #3: Валидация IP/CIDR перед выполнением nft команды
-			if !isValidIPOrCIDR(ipAddress) {
-				p.logger.Error(fmt.Sprintf("Невалидный IP/CIDR пропущен: %s", ipAddress))
-				return
-			}
+			// Создаем child context с timeout для конкретной nft операции
+			nftCtx, cancel := context.WithTimeout(taskCtx, p.nftTimeout)
+			defer cancel()
 
-			// Баг #1: Объединяем set expression в один аргумент для корректной работы nft
-			setExpr := fmt.Sprintf("{ %s timeout %s }", ipAddress, duration)
-			err := p.executor.RunNftCommand(ctx, "add", "element", "inet", "firewall", "user_blacklist", setExpr)
+			// Используем firewall backend для добавления IP в blacklist
+			metrics.Get().NftCommandsTotal.Add(1)
+			err := p.backend.Add(nftCtx, ipAddress, duration)
 			if err != nil {
-				p.logger.Error(fmt.Sprintf("Ошибка при обработке IP %s: %v", ipAddress, err))
+				// Проверяем, была ли это timeout ошибка
+				if errors.Is(err, context.DeadlineExceeded) {
+					p.logger.Error(fmt.Sprintf("TIMEOUT при обработке IP %s (превышен лимит %v). %s", ipAddress, p.nftTimeout, eventCtx))
+					metrics.Get().NftCommandsTimeout.Add(1)
+					metrics.Get().NftCommandsFail.Add(1)
+				} else if errors.Is(err, context.Canceled) {
+					p.logger.Warning(fmt.Sprintf("Операция отменена для IP %s (shutdown). %s", ipAddress, eventCtx))
+					metrics.Get().NftCommandsFail.Add(1)
+				} else {
+					p.logger.Error(fmt.Sprintf("Ошибка при обработке IP %s: %v %s", ipAddress, err, eventCtx))
+					metrics.Get().NftCommandsFail.Add(1)
+				}
+			} else {
+				metrics.Get().NftCommandsSuccess.Add(1)
 			}
-		}(ip)
+		}
+
+		// Пытаемся отправить задачу в pool
+		if !p.pool.Submit(task) {
+			// Pool остановлен (shutdown) — уменьшаем счетчик и прерываем
+			wg.Done()
+			p.logger.Warning(fmt.Sprintf("Worker pool остановлен, прерываем обработку. %s", eventCtx))
+			break
+		}
+
+		// Проверяем, не заполнена ли очередь (для логирования backpressure)
+		if p.pool.QueueLen() > p.pool.QueueCap()*9/10 {
+			p.logger.Warning(fmt.Sprintf("Очередь worker pool почти заполнена: %d/%d. %s", p.pool.QueueLen(), p.pool.QueueCap(), eventCtx))
+			metrics.Get().PoolQueueFullWarnings.Add(1)
+		}
 	}
+
 	wg.Wait()
 	return nil
 }

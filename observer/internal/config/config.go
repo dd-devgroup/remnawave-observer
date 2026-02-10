@@ -12,6 +12,9 @@ import (
 type Config struct {
 	Port                        string
 	RedisURL                    string
+	ScanMaxKeys                 int    // Макс. количество ключей при SCAN (default: 10000)
+	ScanCount                   int    // Hint COUNT для Redis SCAN (default: 100)
+	ScanTimeBudgetSeconds       int    // Макс. время одной SCAN операции в секундах (default: 30)
 	RabbitMQURL                 string
 	MaxIPsPerUser               int
 	AlertWebhookURL             string
@@ -29,6 +32,7 @@ type Config struct {
 	LogChannelBufferSize        int
 	SideEffectWorkerPoolSize    int
 	SideEffectChannelBufferSize int
+	SideEffectTimeout          time.Duration // Таймаут на одну побочную задачу (default: 10s)
 
 	// --- ПАРАМЕТРЫ ДЛЯ РЕЖИМА ПОДСЕТЕЙ ---
 	DetectBySubnet    bool          // Включить режим детекции по подсетям
@@ -46,15 +50,30 @@ type Config struct {
 	ExcludedASNs         map[string]bool // ASN которые не считаются (например Cloudflare, Google)
 
 	// --- ПАРАМЕТРЫ GEOIP ---
-	GeoIPEnabled     bool          // Включить GeoIP анализ
-	GeoIPCacheTTL    time.Duration // TTL для кэша GeoIP (default: 24 часа)
-	GeoDataConfigDir string        // Директория с конфигами (agglomerations.yaml, providers.yaml)
-	GeoDataDataDir   string        // Директория для записываемых данных (unknown_providers.json, backups)
+	GeoIPEnabled        bool          // Включить GeoIP анализ
+	GeoIPCacheTTL       time.Duration // TTL для кэша GeoIP (default: 24 часа)
+	GeoIPTimeout        time.Duration // Таймаут на один HTTP-запрос к ip-api.com (default: 3s)
+	GeoIPRateIntervalMs         int // Минимальный интервал между запросами к ip-api.com в ms (default: 1350)
+	GeoIPMonitorMaxChecksPerRun int // Макс. количество GeoIP lookup за один цикл мониторинга (default: 50)
+	GeoDataConfigDir    string        // Директория с конфигами (agglomerations.yaml, providers.yaml)
+	GeoDataDataDir      string        // Директория для записываемых данных (unknown_providers.json, backups)
 
 	// --- ПАРАМЕТРЫ СКОРИНГА ---
 	ScoringEnabled      bool    // Включить систему скоринга
 	ScoreThresholdWarn  float64 // Порог для предупреждения (default: 50)
 	ScoreThresholdBlock float64 // Порог для блокировки (default: 85)
+
+	// --- ПАРАМЕТРЫ ВХОДЯЩИХ ЗАПРОСОВ ---
+	MaxRequestBytes         int64 // Максимальный размер body POST /log-entry (default: 2MB)
+	MaxLogEntriesPerRequest int   // Максимальное количество записей в одном запросе (default: 1000)
+
+	// --- ПАРАМЕТРЫ PUBLISHER ---
+	PublisherPoolSize          int // Размер пула каналов RabbitMQ (default: 5)
+	RabbitPublishMaxRetries    int // Макс. количество повторов публикации (default: 5)
+	RabbitPublishBackoffBaseMs int // Базовый интервал backoff в ms (default: 500)
+	RabbitPublishBackoffMaxMs  int // Макс. интервал backoff в ms (default: 30000)
+	MaxIPsPerBlockEvent        int // Макс. количество IP в одном block-event сообщении (default: 500)
+	PublishConfirmTimeoutMs    int // Таймаут ожидания подтверждения от брокера в ms (default: 3000)
 
 	// --- ПАРАМЕТРЫ АВТООБУЧЕНИЯ ---
 	UnknownProvidersLogEnabled bool // Включить логирование неизвестных провайдеров (default: false)
@@ -64,6 +83,23 @@ type Config struct {
 	AutoLearningInterval      time.Duration // Интервал проверки (default: 24 часа)
 	AutoLearningMinCount      int           // Минимальное количество встреч для автодобавления (default: 10)
 	AutoLearningMinConfidence string        // Минимальный уровень уверенности: high, medium (default: high)
+	AutoLearningMaxAddsPerRun int           // Макс. добавлений за один цикл (default: 20)
+	AutoLearningOutputFile    string        // Имя overlay файла в dataDir (default: providers.learned.yaml)
+
+	// --- ПАРАМЕТРЫ CAIDA AS2Org ---
+	CAIDAEnabled      bool   // Включить загрузку CAIDA AS-Organizations (default: true)
+	CAIDADownloadURL  string // URL файла CAIDA (default: из as2org.go)
+	CAIDARefreshHours int    // Интервал обновления в часах (default: 168 = 7 дней)
+
+	// --- ПАРАМЕТРЫ HTTP SERVER ---
+	HTTPReadHeaderTimeoutSeconds int // Таймаут чтения заголовков (default: 5)
+	HTTPReadTimeoutSeconds       int // Таймаут полного чтения запроса (default: 15)
+	HTTPWriteTimeoutSeconds      int // Таймаут записи ответа (default: 15)
+	HTTPIdleTimeoutSeconds       int // Таймаут keep-alive соединений (default: 60)
+	HTTPMaxHeaderBytes           int // Макс. размер заголовков в байтах (default: 1MB)
+
+	// --- ПАРАМЕТРЫ JSON ДЕКОДИРОВАНИЯ ---
+	StrictJSONDecode bool // Отклонять unknown fields в JSON (default: false для backward compatibility)
 }
 
 // New загружает конфигурацию из переменных окружения.
@@ -71,6 +107,9 @@ func New() *Config {
 	cfg := &Config{
 		Port:                        getEnv("PORT", "9000"),
 		RedisURL:                    getEnv("REDIS_URL", "redis://localhost:6379/0"),
+		ScanMaxKeys:                 getEnvInt("SCAN_MAX_KEYS", 10000),
+		ScanCount:                   getEnvInt("SCAN_COUNT", 100),
+		ScanTimeBudgetSeconds:       getEnvInt("SCAN_TIME_BUDGET_SECONDS", 30),
 		RabbitMQURL:                 getEnv("RABBITMQ_URL", "amqp://guest:guest@localhost/"),
 		MaxIPsPerUser:               getEnvInt("MAX_IPS_PER_USER", 3),
 		AlertWebhookURL:             getEnv("ALERT_WEBHOOK_URL", ""),
@@ -88,6 +127,19 @@ func New() *Config {
 		LogChannelBufferSize:        getEnvInt("LOG_CHANNEL_BUFFER_SIZE", 100),
 		SideEffectWorkerPoolSize:    getEnvInt("SIDE_EFFECT_WORKER_POOL_SIZE", 10),
 		SideEffectChannelBufferSize: getEnvInt("SIDE_EFFECT_CHANNEL_BUFFER_SIZE", 50),
+		SideEffectTimeout:          time.Duration(getEnvInt("SIDE_EFFECT_TIMEOUT_SECONDS", 10)) * time.Second,
+
+		// --- Загрузка параметров входящих запросов ---
+		MaxRequestBytes:         int64(getEnvInt("MAX_REQUEST_BYTES", 2*1024*1024)),
+		MaxLogEntriesPerRequest: getEnvInt("MAX_LOG_ENTRIES_PER_REQUEST", 1000),
+
+		// --- Загрузка параметров publisher ---
+		PublisherPoolSize:          getEnvInt("PUBLISHER_POOL_SIZE", 5),
+		RabbitPublishMaxRetries:    getEnvInt("RABBIT_PUBLISH_MAX_RETRIES", 5),
+		RabbitPublishBackoffBaseMs: getEnvInt("RABBIT_PUBLISH_BACKOFF_BASE_MS", 500),
+		RabbitPublishBackoffMaxMs:  getEnvInt("RABBIT_PUBLISH_BACKOFF_MAX_MS", 30000),
+		MaxIPsPerBlockEvent:        getEnvInt("MAX_IPS_PER_BLOCK_EVENT", 500),
+		PublishConfirmTimeoutMs:    getEnvInt("PUBLISH_CONFIRM_TIMEOUT_MS", 3000),
 
 		// --- Загрузка параметров подсетей ---
 		DetectBySubnet:    getEnvBool("DETECT_BY_SUBNET", false),
@@ -105,10 +157,13 @@ func New() *Config {
 		ExcludedASNs:          parseSet(getEnv("EXCLUDED_ASNS", "")),
 
 		// --- Загрузка параметров GeoIP ---
-		GeoIPEnabled:     getEnvBool("GEOIP_ENABLED", false),
-		GeoIPCacheTTL:    time.Duration(getEnvInt("GEOIP_CACHE_TTL_HOURS", 24)) * time.Hour,
-		GeoDataConfigDir: getEnv("GEODATA_CONFIG_DIR", "/app/config"),
-		GeoDataDataDir:   getEnv("GEODATA_DATA_DIR", "/app/data"),
+		GeoIPEnabled:        getEnvBool("GEOIP_ENABLED", false),
+		GeoIPCacheTTL:       time.Duration(getEnvInt("GEOIP_CACHE_TTL_HOURS", 24)) * time.Hour,
+		GeoIPTimeout:        time.Duration(getEnvInt("GEOIP_TIMEOUT_SECONDS", 3)) * time.Second,
+		GeoIPRateIntervalMs:         getEnvInt("GEOIP_RATE_INTERVAL_MS", 1350),
+		GeoIPMonitorMaxChecksPerRun: getEnvInt("GEOIP_MONITOR_MAX_CHECKS_PER_RUN", 50),
+		GeoDataConfigDir:    getEnv("GEODATA_CONFIG_DIR", "/app/config"),
+		GeoDataDataDir:      getEnv("GEODATA_DATA_DIR", "/app/data"),
 
 		// --- Загрузка параметров скоринга ---
 		ScoringEnabled:      getEnvBool("SCORING_ENABLED", false),
@@ -121,6 +176,23 @@ func New() *Config {
 		AutoLearningInterval:       time.Duration(getEnvInt("AUTO_LEARNING_INTERVAL_HOURS", 24)) * time.Hour,
 		AutoLearningMinCount:       getEnvInt("AUTO_LEARNING_MIN_COUNT", 10),
 		AutoLearningMinConfidence:  getEnv("AUTO_LEARNING_MIN_CONFIDENCE", "high"),
+		AutoLearningMaxAddsPerRun:  getEnvInt("AUTO_LEARNING_MAX_ADDS_PER_RUN", 20),
+		AutoLearningOutputFile:     getEnv("AUTO_LEARNING_OUTPUT_FILE", "providers.learned.yaml"),
+
+		// --- CAIDA AS2Org ---
+		CAIDAEnabled:      getEnvBool("CAIDA_ENABLED", true),
+		CAIDADownloadURL:  getEnv("CAIDA_DOWNLOAD_URL", ""),
+		CAIDARefreshHours: getEnvInt("CAIDA_REFRESH_HOURS", 168),
+
+		// --- HTTP Server ---
+		HTTPReadHeaderTimeoutSeconds: getEnvInt("HTTP_READ_HEADER_TIMEOUT_SECONDS", 5),
+		HTTPReadTimeoutSeconds:       getEnvInt("HTTP_READ_TIMEOUT_SECONDS", 15),
+		HTTPWriteTimeoutSeconds:      getEnvInt("HTTP_WRITE_TIMEOUT_SECONDS", 15),
+		HTTPIdleTimeoutSeconds:       getEnvInt("HTTP_IDLE_TIMEOUT_SECONDS", 60),
+		HTTPMaxHeaderBytes:           getEnvInt("HTTP_MAX_HEADER_BYTES", 1<<20),
+
+		// --- JSON Decoding ---
+		StrictJSONDecode: getEnvBool("STRICT_JSON_DECODE", false),
 	}
 
 	log.Printf("Конфигурация загружена. Порт: %s", cfg.Port)
@@ -159,8 +231,35 @@ func New() *Config {
 		log.Printf("Логирование неизвестных провайдеров включено")
 	}
 	if cfg.AutoLearningEnabled {
-		log.Printf("Автоматическое обучение включено. Интервал: %v, Min count: %d, Min confidence: %s",
-			cfg.AutoLearningInterval, cfg.AutoLearningMinCount, cfg.AutoLearningMinConfidence)
+		log.Printf("Автоматическое обучение включено. Интервал: %v, Min count: %d, Min confidence: %s, Max adds/цикл: %d, Output: %s",
+			cfg.AutoLearningInterval, cfg.AutoLearningMinCount, cfg.AutoLearningMinConfidence, cfg.AutoLearningMaxAddsPerRun, cfg.AutoLearningOutputFile)
+	}
+	if cfg.CAIDAEnabled {
+		log.Printf("CAIDA AS2Org включен. Обновление каждые %dh", cfg.CAIDARefreshHours)
+	}
+
+	// Валидация и логирование HTTP таймаутов
+	if cfg.HTTPReadHeaderTimeoutSeconds <= 0 {
+		cfg.HTTPReadHeaderTimeoutSeconds = 5
+	}
+	if cfg.HTTPReadTimeoutSeconds <= 0 {
+		cfg.HTTPReadTimeoutSeconds = 15
+	}
+	if cfg.HTTPWriteTimeoutSeconds <= 0 {
+		cfg.HTTPWriteTimeoutSeconds = 15
+	}
+	if cfg.HTTPIdleTimeoutSeconds <= 0 {
+		cfg.HTTPIdleTimeoutSeconds = 60
+	}
+	if cfg.HTTPMaxHeaderBytes <= 0 {
+		cfg.HTTPMaxHeaderBytes = 1 << 20
+	}
+	log.Printf("HTTP Server таймауты: ReadHeader=%ds Read=%ds Write=%ds Idle=%ds MaxHeaderBytes=%d",
+		cfg.HTTPReadHeaderTimeoutSeconds, cfg.HTTPReadTimeoutSeconds,
+		cfg.HTTPWriteTimeoutSeconds, cfg.HTTPIdleTimeoutSeconds, cfg.HTTPMaxHeaderBytes)
+
+	if cfg.StrictJSONDecode {
+		log.Printf("Строгая валидация JSON включена (unknown fields будут отклонены)")
 	}
 
 	return cfg

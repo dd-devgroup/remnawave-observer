@@ -2,29 +2,41 @@ package geodata
 
 import (
 	"context"
+	"fmt"
 	"log"
+	"os"
+	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"gopkg.in/yaml.v3"
-	"os"
-	"path/filepath"
 )
 
 // AutoLearner автоматическое обучение провайдеров
 type AutoLearner struct {
-	geoDataLoader   *GeoDataLoader
-	configDir       string
-	dataDir         string
-	interval        time.Duration
-	minCount        int
-	minConfidence   string
-	mu              sync.Mutex
+	geoDataLoader *GeoDataLoader
+	configDir     string // read-only: base providers.yaml
+	dataDir       string // writable: overlay + backups
+	interval      time.Duration
+	minCount      int
+	minConfidence string
+	maxAddsPerRun int           // макс. добавлений за один цикл
+	outputFile    string        // имя overlay файла в dataDir
+	as2org        *AS2OrgLoader // CAIDA AS2Org (может быть nil)
+	mu            sync.Mutex
 }
 
-// NewAutoLearner создает новый AutoLearner
-func NewAutoLearner(geoDataLoader *GeoDataLoader, configDir string, dataDir string, interval time.Duration, minCount int, minConfidence string) *AutoLearner {
+// NewAutoLearner создает новый AutoLearner.
+// as2org может быть nil — тогда CAIDA-нормализация не применяется.
+func NewAutoLearner(geoDataLoader *GeoDataLoader, configDir, dataDir string, interval time.Duration, minCount int, minConfidence string, maxAddsPerRun int, outputFile string, as2org *AS2OrgLoader) *AutoLearner {
+	if outputFile == "" {
+		outputFile = "providers.learned.yaml"
+	}
+	if maxAddsPerRun <= 0 {
+		maxAddsPerRun = 20
+	}
 	return &AutoLearner{
 		geoDataLoader: geoDataLoader,
 		configDir:     configDir,
@@ -32,6 +44,9 @@ func NewAutoLearner(geoDataLoader *GeoDataLoader, configDir string, dataDir stri
 		interval:      interval,
 		minCount:      minCount,
 		minConfidence: minConfidence,
+		maxAddsPerRun: maxAddsPerRun,
+		outputFile:    outputFile,
+		as2org:        as2org,
 	}
 }
 
@@ -66,84 +81,100 @@ func (al *AutoLearner) Run(ctx context.Context, wg *sync.WaitGroup) {
 	}
 }
 
-// performLearningCycle выполняет цикл обучения
+// performLearningCycle выполняет цикл обучения.
+// Загружает merged-конфиг (base+overlay) через GeoDataLoader, для каждого unknown-провайдера
+// выполняет CAIDA-lookup по ASN, классифицирует, применяет антиспам и maxAddsPerRun.
 func (al *AutoLearner) performLearningCycle() {
 	al.mu.Lock()
 	defer al.mu.Unlock()
 
-	// Получаем статистику неизвестных провайдеров
 	unknownProviders := GetUnknownProvidersStats()
-	if unknownProviders == nil || len(unknownProviders) == 0 {
+	if len(unknownProviders) == 0 {
 		log.Println("[AutoLearner] Нет неизвестных провайдеров для обучения")
 		return
 	}
 
 	log.Printf("[AutoLearner] Найдено %d неизвестных провайдеров, анализирую...", len(unknownProviders))
 
-	// Загружаем текущий конфиг провайдеров
-	providersFile := filepath.Join(al.configDir, "providers.yaml")
-	providersData, err := os.ReadFile(providersFile)
-	if err != nil {
-		log.Printf("[AutoLearner] Ошибка чтения providers.yaml: %v", err)
+	// Snapshot merged конфиг (base + overlay) — copy-on-write под RLock в GetProviders
+	providersConfig := al.geoDataLoader.GetProviders()
+	if providersConfig == nil {
+		log.Println("[AutoLearner] Конфиг провайдеров не загружен")
 		return
 	}
 
-	providersConfig := &ProvidersConfig{}
-	if err := yaml.Unmarshal(providersData, providersConfig); err != nil {
-		log.Printf("[AutoLearner] Ошибка парсинга providers.yaml: %v", err)
-		return
-	}
-
-	// Анализируем и добавляем новых провайдеров
 	addedCount := 0
 	newKeywords := make(map[string][]string)
 
 	for _, provider := range unknownProviders {
+		if addedCount >= al.maxAddsPerRun {
+			log.Printf("[AutoLearner] Достигнут лимит добавлений за цикл (%d)", al.maxAddsPerRun)
+			break
+		}
+
 		if provider.Count < al.minCount {
 			continue
 		}
 
-		suggestedType, confidence, _ := al.suggestProviderType(provider.Organization, providersConfig)
+		// CAIDA lookup по ASN
+		asnNum := parseASNToInt(provider.ASN)
+		var caidaOrgName, caidaCountry string
+		hasCaida := false
+		if al.as2org != nil && asnNum > 0 {
+			orgName, country, _, ok := al.as2org.LookupOrgByASN(asnNum)
+			if ok {
+				caidaOrgName = orgName
+				caidaCountry = country
+				hasCaida = true
+			}
+		}
 
-		// Проверяем уровень уверенности
+		// Классифицируем: iptoasn org + CAIDA orgName (если доступен)
+		suggestedType, confidence, evidence := al.classifyProvider(provider.Organization, caidaOrgName, providersConfig)
+
+		// Антиспам: без CAIDA и без сильных признаков (keyword/heuristic) — пропускаем
+		if !hasCaida && evidence == "default" {
+			continue
+		}
+
+		// Повышаем уверенность по количеству наблюдений
+		boosted := al.boostConfidenceByCount(confidence, provider.Count)
+		if boosted != confidence {
+			evidence += "+count_boost"
+			confidence = boosted
+		}
+
 		if !al.meetsConfidenceThreshold(confidence) {
 			continue
 		}
 
-		// Извлекаем ключевое слово из названия организации
+		// Keyword — из iptoasn org (именно то, что встречается в трафике)
 		keyword := al.extractKeyword(provider.Organization)
-		if keyword == "" || len(keyword) < 3 {
+		if keyword == "" {
 			continue
 		}
 
-		// Проверяем, не существует ли уже такое ключевое слово
 		if al.keywordExists(keyword, providersConfig) {
 			continue
 		}
 
-		// Добавляем в список новых ключевых слов
-		if newKeywords[suggestedType] == nil {
-			newKeywords[suggestedType] = []string{}
-		}
 		newKeywords[suggestedType] = append(newKeywords[suggestedType], keyword)
 		addedCount++
 
-		log.Printf("[AutoLearner] Добавлен: %s -> %s (тип: %s, уверенность: %s, количество: %d)",
-			provider.Organization, keyword, suggestedType, confidence, provider.Count)
+		log.Printf("[AutoLearner] Добавлен: %s -> %s (тип: %s, уверенность: %s, evidence: %s, count: %d, ASN: %s, CAIDA: %s/%s)",
+			provider.Organization, keyword, suggestedType, confidence, evidence, provider.Count, provider.ASN, caidaOrgName, caidaCountry)
 	}
 
 	if addedCount == 0 {
-		log.Println("[AutoLearner] Нет новых провайдеров для добавления (все ниже порога уверенности)")
+		log.Println("[AutoLearner] Нет новых провайдеров для добавления")
 		return
 	}
 
-	// Обновляем конфиг
-	if err := al.updateProvidersConfig(providersConfig, newKeywords); err != nil {
-		log.Printf("[AutoLearner] Ошибка обновления providers.yaml: %v", err)
+	if err := al.writeOverlay(newKeywords); err != nil {
+		log.Printf("[AutoLearner] Ошибка записи overlay: %v", err)
 		return
 	}
 
-	// Перезагружаем конфиг
 	if err := al.geoDataLoader.ReloadProviders(); err != nil {
 		log.Printf("[AutoLearner] Ошибка перезагрузки конфига провайдеров: %v", err)
 		return
@@ -236,34 +267,133 @@ func (al *AutoLearner) meetsConfidenceThreshold(confidence string) bool {
 	}
 }
 
-// extractKeyword извлекает ключевое слово из названия организации
+// boostConfidenceByCount повышает уверенность на основе количества наблюдений.
+// count >= 1000 → high (провайдер виден ≥1000 раз, достаточно для автодобавления).
+// count >= 100  → не ниже medium.
+func (al *AutoLearner) boostConfidenceByCount(confidence string, count int) string {
+	switch {
+	case count >= 1000:
+		return "high"
+	case count >= 100:
+		if confidence == "very_low" || confidence == "low" {
+			return "medium"
+		}
+		return confidence
+	default:
+		return confidence
+	}
+}
+
+// classifyProvider классифицирует провайдера, используя iptoasn org и (опционально) CAIDA orgName.
+// Если CAIDA даёт более высокую уверенность — используется её тип; keyword всё равно берётся из iptoasn org.
+// Возвращает: тип провайдера, уверенность, evidence ("keyword" | "caida" | "heuristic" | "default").
+func (al *AutoLearner) classifyProvider(org, caidaOrg string, config *ProvidersConfig) (provType, confidence, evidence string) {
+	t1, c1, matched1 := al.suggestProviderType(org, config)
+	ev1 := evidenceFromMatch(matched1)
+
+	if caidaOrg == "" {
+		return t1, c1, ev1
+	}
+
+	t2, c2, matched2 := al.suggestProviderType(caidaOrg, config)
+	ev2 := evidenceFromMatch(matched2)
+	if ev2 != "default" {
+		ev2 = "caida" // весь результат CAIDA-driven
+	}
+
+	if confidenceRank(c2) > confidenceRank(c1) {
+		return t2, c2, ev2
+	}
+	return t1, c1, ev1
+}
+
+// evidenceFromMatch определяет источник доказательства по matched-списку из suggestProviderType.
+func evidenceFromMatch(matched []string) string {
+	if len(matched) == 0 || (len(matched) == 1 && matched[0] == "default") {
+		return "default"
+	}
+	if len(matched) == 1 && strings.HasPrefix(matched[0], "pattern:") {
+		return "heuristic"
+	}
+	return "keyword"
+}
+
+// confidenceRank возвращает численный ранг уверенности для сравнения.
+func confidenceRank(c string) int {
+	switch c {
+	case "high":
+		return 3
+	case "medium":
+		return 2
+	case "low":
+		return 1
+	default: // "very_low"
+		return 0
+	}
+}
+
+// parseASNToInt парсит строку вида "AS34533" в число 34533. Возвращает 0 при ошибке или пустой строке.
+func parseASNToInt(asnStr string) int {
+	s := strings.TrimPrefix(asnStr, "AS")
+	n, err := strconv.Atoi(s)
+	if err != nil {
+		return 0
+	}
+	return n
+}
+
+// stopWords слова, которые не подходят в качестве ключевых слов провайдеров
+var stopWords = map[string]bool{
+	"llc": true, "ltd": true, "inc": true,
+	"pjsc": true, "ojsc": true,
+	"company": true, "corp": true, "corporation": true,
+	"network": true, "communications": true,
+	"group": true, "holding": true, "holdings": true,
+}
+
+// asnSuffixes суффиксы для удаления из ключевых слов провайдеров
+var asnSuffixes = []string{"-as", "-net", "-isp"}
+
+// extractKeyword извлекает ключевое слово из названия организации.
+// Пропускает stop-words, убирает AS/ASN-префиксы и суффиксы (-as, -net, -isp).
+// Итерирует по словам org, пока не найдёт подходящее.
 func (al *AutoLearner) extractKeyword(org string) string {
 	orgLower := strings.ToLower(org)
 
-	// Убираем типичные префиксы и суффиксы
-	orgLower = strings.TrimPrefix(orgLower, "as")
+	// Убираем AS/ASN-prefixes из начала ("asn" раньше "as")
 	orgLower = strings.TrimPrefix(orgLower, "asn")
+	orgLower = strings.TrimPrefix(orgLower, "as")
+	orgLower = strings.TrimLeft(orgLower, " -_")
 
-	// Берем первое слово
 	parts := strings.Fields(orgLower)
-	if len(parts) == 0 {
-		return ""
+	for _, part := range parts {
+		word := strings.Trim(part, "-_.,;:!?()[]{}\"'")
+		word = strings.TrimLeft(word, "0123456789")
+
+		if len(word) < 3 || len(word) > 30 {
+			continue
+		}
+
+		if stopWords[word] {
+			continue
+		}
+
+		// Убираем суффиксы -as / -net / -isp если остаток >= 3 символа
+		for _, suffix := range asnSuffixes {
+			if strings.HasSuffix(word, suffix) && len(word)-len(suffix) >= 3 {
+				word = strings.TrimSuffix(word, suffix)
+				break
+			}
+		}
+
+		if len(word) < 3 {
+			continue
+		}
+
+		return word
 	}
 
-	keyword := parts[0]
-
-	// Убираем специальные символы
-	keyword = strings.Trim(keyword, "-_.,;:!?()[]{}\"'")
-
-	// Убираем числа в начале
-	keyword = strings.TrimLeft(keyword, "0123456789")
-
-	// Если слово слишком короткое или слишком длинное - пропускаем
-	if len(keyword) < 3 || len(keyword) > 30 {
-		return ""
-	}
-
-	return keyword
+	return ""
 }
 
 // keywordExists проверяет, существует ли уже ключевое слово
@@ -281,65 +411,59 @@ func (al *AutoLearner) keywordExists(keyword string, config *ProvidersConfig) bo
 	return false
 }
 
-// updateProvidersConfig обновляет конфиг провайдеров
-func (al *AutoLearner) updateProvidersConfig(config *ProvidersConfig, newKeywords map[string][]string) error {
-	// Добавляем новые ключевые слова
-	for provType, keywords := range newKeywords {
-		if config.Keywords[provType] == nil {
-			config.Keywords[provType] = []string{}
-		}
-		config.Keywords[provType] = append(config.Keywords[provType], keywords...)
-	}
-
-	// Сохраняем обновленный конфиг
-	providersFile := filepath.Join(al.configDir, "providers.yaml")
-
-	// Создаем директорию для данных если не существует
+// writeOverlay атомарно записывает новые ключевые слова в overlay файл (dataDir/providers.learned.yaml).
+// Существующий overlay зачитывается и обновляется — base providers.yaml не трогается.
+func (al *AutoLearner) writeOverlay(newKeywords map[string][]string) error {
 	if err := os.MkdirAll(al.dataDir, 0755); err != nil {
-		log.Printf("[AutoLearner] Предупреждение: не удалось создать data директорию: %v", err)
+		return fmt.Errorf("mkdirAll dataDir: %w", err)
 	}
 
-	// Создаем резервную копию в data директории
-	backupFile := filepath.Join(al.dataDir, "providers.yaml.backup")
-	originalData, err := os.ReadFile(providersFile)
+	overlayPath := filepath.Join(al.dataDir, al.outputFile)
+
+	// Зачитываем существующий overlay (может не существовать)
+	existing := &ProvidersConfig{Keywords: make(map[string][]string)}
+	if data, err := os.ReadFile(overlayPath); err == nil {
+		_ = yaml.Unmarshal(data, existing)
+		if existing.Keywords == nil {
+			existing.Keywords = make(map[string][]string)
+		}
+	}
+
+	// Мержим новые ключевые слова
+	for provType, keywords := range newKeywords {
+		existing.Keywords[provType] = append(existing.Keywords[provType], keywords...)
+	}
+
+	data, err := yaml.Marshal(existing)
 	if err != nil {
-		return err
-	}
-	if err := os.WriteFile(backupFile, originalData, 0644); err != nil {
-		log.Printf("[AutoLearner] Предупреждение: не удалось создать резервную копию: %v", err)
+		return fmt.Errorf("marshal overlay: %w", err)
 	}
 
-	// Сохраняем обновленный конфиг
-	data, err := yaml.Marshal(config)
-	if err != nil {
-		return err
+	// Атомарная запись: tmp + rename
+	tmpPath := overlayPath + ".tmp"
+	if err := os.WriteFile(tmpPath, data, 0644); err != nil {
+		return fmt.Errorf("write tmp: %w", err)
+	}
+	if err := os.Rename(tmpPath, overlayPath); err != nil {
+		os.Remove(tmpPath)
+		return fmt.Errorf("rename tmp→overlay: %w", err)
 	}
 
-	if err := os.WriteFile(providersFile, data, 0644); err != nil {
-		return err
-	}
-
-	log.Printf("[AutoLearner] Обновлен providers.yaml (резервная копия сохранена в providers.yaml.backup)")
+	log.Printf("[AutoLearner] Overlay обновлён: %s", overlayPath)
 	return nil
 }
 
-// ReloadProviders перезагружает конфиг провайдеров
+// ReloadProviders перезагружает base providers.yaml + overlay (если есть).
 func (l *GeoDataLoader) ReloadProviders() error {
-	providersFile := filepath.Join(l.configDir, "providers.yaml")
-	providersData, err := os.ReadFile(providersFile)
+	merged, err := l.loadProvidersWithOverlay()
 	if err != nil {
-		return err
-	}
-
-	newProviders := &ProvidersConfig{}
-	if err := yaml.Unmarshal(providersData, newProviders); err != nil {
 		return err
 	}
 
 	l.mu.Lock()
-	l.providers = newProviders
+	l.providers = merged
 	l.mu.Unlock()
 
-	log.Println("[GeoDataLoader] Конфигурация провайдеров успешно перезагружена")
+	log.Println("[GeoDataLoader] Конфигурация провайдеров успешно перезагружена (base + overlay)")
 	return nil
 }

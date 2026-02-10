@@ -12,6 +12,7 @@ import (
 
 	"observer_service/internal/api"
 	"observer_service/internal/config"
+	"observer_service/internal/metrics"
 	"observer_service/internal/monitor"
 	"observer_service/internal/processor"
 	"observer_service/internal/services/alerter"
@@ -38,8 +39,11 @@ func main() {
 		log.Fatalf("Критическая ошибка: не удалось подключиться к Redis: %v", err)
 	}
 	defer redisStore.Close()
+	redisStore.SetScanMaxKeys(cfg.ScanMaxKeys)
+	redisStore.SetScanCount(cfg.ScanCount)
+	redisStore.SetScanTimeBudget(time.Duration(cfg.ScanTimeBudgetSeconds) * time.Second)
 
-	rabbitPublisher, err := publisher.NewRabbitMQPublisher(cfg.RabbitMQURL, cfg.BlockingExchangeName)
+	rabbitPublisher, err := publisher.NewRabbitMQPublisher(cfg.RabbitMQURL, cfg.BlockingExchangeName, cfg.PublisherPoolSize, cfg.RabbitPublishMaxRetries, cfg.RabbitPublishBackoffBaseMs, cfg.RabbitPublishBackoffMaxMs, cfg.PublishConfirmTimeoutMs)
 	if err != nil {
 		log.Fatalf("Критическая ошибка: не удалось подключиться к RabbitMQ: %v", err)
 	}
@@ -70,7 +74,7 @@ func main() {
 		geodata.InitUnknownProvidersLog(cfg.GeoDataDataDir, cfg.UnknownProvidersLogEnabled)
 
 		// Загружаем конфигурации провайдеров и агломераций
-		geoDataLoader, err = geodata.NewGeoDataLoader(cfg.GeoDataConfigDir)
+		geoDataLoader, err = geodata.NewGeoDataLoader(cfg.GeoDataConfigDir, cfg.GeoDataDataDir)
 		if err != nil {
 			log.Fatalf("Критическая ошибка: не удалось загрузить географические данные: %v", err)
 		}
@@ -78,7 +82,7 @@ func main() {
 
 		// Инициализируем GeoIP сервис если ASN lookup доступен
 		if asnLookup != nil {
-			geoService = geoip.NewGeoIPService(asnLookup, redisStore.GetClient(), cfg.GeoIPCacheTTL)
+			geoService = geoip.NewGeoIPService(asnLookup, redisStore.GetClient(), cfg.GeoIPCacheTTL, cfg.GeoIPTimeout, cfg.GeoIPRateIntervalMs)
 			geoAnalyzer = geoip.NewGeoAnalyzer(geoService, geoDataLoader)
 			log.Printf("✅ GeoIP сервис инициализирован (cache TTL: %v)", cfg.GeoIPCacheTTL)
 		}
@@ -119,7 +123,19 @@ func main() {
 	}
 
 	poolMonitor := monitor.NewPoolMonitor(redisStore, cfg, geoService)
-	apiServer := api.NewServer(cfg.Port, logProcessor, redisStore, rabbitPublisher)
+	apiServer := api.NewServer(cfg.Port, logProcessor, redisStore, rabbitPublisher, cfg)
+
+	// Инициализация CAIDA AS2Org (опционально, синхронная начальная загрузка)
+	var as2orgLoader *geodata.AS2OrgLoader
+	if cfg.CAIDAEnabled && cfg.GeoIPEnabled {
+		as2orgLoader = geodata.NewAS2OrgLoader(cfg.GeoDataDataDir, cfg.CAIDADownloadURL, time.Duration(cfg.CAIDARefreshHours)*time.Hour)
+		if err := as2orgLoader.InitialLoad(); err != nil {
+			log.Printf("Warning: CAIDA initial load failed: %v (работаем без CAIDA)", err)
+			as2orgLoader = nil
+		} else {
+			log.Printf("✅ CAIDA AS2Org загружен (%d записей, обновление каждые %dh)", as2orgLoader.Count(), cfg.CAIDARefreshHours)
+		}
+	}
 
 	// Инициализация Auto-Learner (опционально)
 	var autoLearner *geodata.AutoLearner
@@ -131,29 +147,47 @@ func main() {
 			cfg.AutoLearningInterval,
 			cfg.AutoLearningMinCount,
 			cfg.AutoLearningMinConfidence,
+			cfg.AutoLearningMaxAddsPerRun,
+			cfg.AutoLearningOutputFile,
+			as2orgLoader,
 		)
 		log.Printf("✅ Auto-Learner инициализирован")
 	}
 
 	// Сообщаем WaitGroup, сколько горутин будем запускать
-	goroutineCount := 3
+	goroutineCount := 4 // poolMonitor + workerPool + sideEffectPool + metricsDumper
 	if autoLearner != nil {
 		goroutineCount++
+	}
+	if as2orgLoader != nil {
+		goroutineCount++ // RunRefresh
 	}
 
 	wg.Add(goroutineCount)
 	go poolMonitor.Run(ctx, &wg)
 	go logProcessor.StartWorkerPool(ctx, &wg)
-	go logProcessor.StartSideEffectWorkerPool(ctx, &wg) // Запускаем новый пул воркеров
+	go logProcessor.StartSideEffectWorkerPool(ctx, &wg)
+	go metrics.StartDumper(ctx, &wg, 60*time.Second)
 
 	// Запускаем Auto-Learner если включен
 	if autoLearner != nil {
 		go autoLearner.Run(ctx, &wg)
 	}
 
+	// Фоновое обновление CAIDA
+	if as2orgLoader != nil {
+		go as2orgLoader.RunRefresh(ctx, &wg)
+	}
+
 	srv := &http.Server{
 		Addr:    ":" + cfg.Port,
 		Handler: apiServer.GetRouter(), // Получаем роутер из нашего api.Server
+		// Таймауты для защиты от slowloris и других DoS атак
+		ReadHeaderTimeout: time.Duration(cfg.HTTPReadHeaderTimeoutSeconds) * time.Second,
+		ReadTimeout:       time.Duration(cfg.HTTPReadTimeoutSeconds) * time.Second,
+		WriteTimeout:      time.Duration(cfg.HTTPWriteTimeoutSeconds) * time.Second,
+		IdleTimeout:       time.Duration(cfg.HTTPIdleTimeoutSeconds) * time.Second,
+		MaxHeaderBytes:    cfg.HTTPMaxHeaderBytes,
 	}
 
 	go func() {

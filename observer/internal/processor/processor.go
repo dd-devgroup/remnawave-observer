@@ -2,11 +2,14 @@ package processor
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"log"
 	"net"
 	"observer_service/internal/config"
+	"observer_service/internal/metrics"
 	"observer_service/internal/models"
 	"observer_service/internal/services/alerter"
 	"observer_service/internal/services/asn"
@@ -26,7 +29,7 @@ type LogProcessor struct {
 	cfg               *config.Config
 	asnLookup         *asn.ASNLookup         // Сервис для lookup ASN
 	logChannel        chan []models.LogEntry // Канал для получения пачек логов
-	sideEffectChannel chan func()            // Канал для побочных задач (алерты, очистка)
+	sideEffectChannel chan func(context.Context) // Канал для побочных задач (алерты, очистка)
 
 	// Новые сервисы для Anti-Abuse системы
 	geoService    *geoip.GeoIPService   // Сервис геолокации
@@ -62,7 +65,7 @@ func NewLogProcessor(
 		asnClassifier:     asnClassifier,
 		scorer:            scorer,
 		logChannel:        make(chan []models.LogEntry, cfg.LogChannelBufferSize),
-		sideEffectChannel: make(chan func(), cfg.SideEffectChannelBufferSize),
+		sideEffectChannel: make(chan func(context.Context), cfg.SideEffectChannelBufferSize),
 	}
 
 	// Парсим исключённые подсети один раз при инициализации
@@ -146,7 +149,12 @@ func (p *LogProcessor) StartSideEffectWorkerPool(ctx context.Context, mainWg *sy
 				case <-ctx.Done():
 					log.Printf("Воркер побочных задач %d пропустил задачу из-за отмены контекста.", workerID)
 				default:
-					task()
+					taskCtx, cancel := context.WithTimeout(ctx, p.cfg.SideEffectTimeout)
+					task(taskCtx)
+					if taskCtx.Err() == context.DeadlineExceeded {
+						metrics.SideEffectTimeoutCount.Add(1)
+					}
+					cancel()
 				}
 			}
 			log.Printf("Воркер побочных задач %d останавливается.", workerID)
@@ -177,7 +185,7 @@ func (p *LogProcessor) EnqueueEntries(entries []models.LogEntry) error {
 }
 
 // enqueueSideEffectTask добавляет побочную задачу в очередь на выполнение.
-func (p *LogProcessor) enqueueSideEffectTask(task func()) {
+func (p *LogProcessor) enqueueSideEffectTask(task func(context.Context)) {
 	defer func() {
 		if r := recover(); r != nil {
 			log.Println("Попытка записи в закрытый канал побочных задач. Сервис находится в процессе остановки.")
@@ -245,11 +253,11 @@ func (p *LogProcessor) processEntryByIP(ctx context.Context, entry models.LogEnt
 		ipsToBlock := p.filterExcludedIPs(res.AllUserItems, entry.UserEmail)
 
 		if len(ipsToBlock) > 0 {
-			if err := p.publisher.PublishBlockMessage(ipsToBlock, p.cfg.BlockDuration); err != nil {
+			if err := p.publishBlockEvent(ipsToBlock, p.cfg.BlockDuration); err != nil {
 				log.Printf("Ошибка отправки сообщения о блокировке: %v", err)
 			} else {
 				log.Printf("Сообщение о блокировке %d IP-адресов для %s%s отправлено", len(ipsToBlock), entry.UserEmail, debugMarker)
-				p.enqueueSideEffectTask(func() {
+				p.enqueueSideEffectTask(func(ctx context.Context) {
 					p.scheduleIPsClear(ctx, entry.UserEmail)
 				})
 			}
@@ -264,8 +272,8 @@ func (p *LogProcessor) processEntryByIP(ctx context.Context, entry models.LogEnt
 			BlockDuration:    p.cfg.BlockDuration,
 			ViolationType:    "ip_limit_exceeded",
 		}
-		p.enqueueSideEffectTask(func() {
-			if err := p.alerter.SendAlert(alertPayload); err != nil {
+		p.enqueueSideEffectTask(func(ctx context.Context) {
+			if err := p.alerter.SendAlert(ctx, alertPayload); err != nil {
 				log.Printf("Ошибка отправки вебхук-уведомления: %v", err)
 			}
 		})
@@ -308,11 +316,11 @@ func (p *LogProcessor) processEntryBySubnet(ctx context.Context, entry models.Lo
 		subnetsToBlock := p.filterExcludedSubnets(res.AllUserItems, entry.UserEmail)
 
 		if len(subnetsToBlock) > 0 {
-			if err := p.publisher.PublishBlockMessage(subnetsToBlock, p.cfg.BlockDuration); err != nil {
+			if err := p.publishBlockEvent(subnetsToBlock, p.cfg.BlockDuration); err != nil {
 				log.Printf("Ошибка отправки сообщения о блокировке подсетей: %v", err)
 			} else {
 				log.Printf("Сообщение о блокировке %d подсетей для %s%s отправлено", len(subnetsToBlock), entry.UserEmail, debugMarker)
-				p.enqueueSideEffectTask(func() {
+				p.enqueueSideEffectTask(func(ctx context.Context) {
 					p.scheduleSubnetsClear(ctx, entry.UserEmail)
 				})
 			}
@@ -327,8 +335,8 @@ func (p *LogProcessor) processEntryBySubnet(ctx context.Context, entry models.Lo
 			BlockDuration:    p.cfg.BlockDuration,
 			ViolationType:    "subnet_limit_exceeded",
 		}
-		p.enqueueSideEffectTask(func() {
-			if err := p.alerter.SendAlert(alertPayload); err != nil {
+		p.enqueueSideEffectTask(func(ctx context.Context) {
+			if err := p.alerter.SendAlert(ctx, alertPayload); err != nil {
 				log.Printf("Ошибка отправки вебхук-уведомления: %v", err)
 			}
 		})
@@ -423,10 +431,11 @@ func (p *LogProcessor) processEntryByASN(ctx context.Context, entry models.LogEn
 	var identifierType string
 	var orgName string
 
-	redisStore := p.storage.(*storage.RedisStore)
+	var redisStore *storage.RedisStore
 
 	// Пытаемся получить ASN для IP
 	if p.asnLookup != nil {
+		redisStore = p.storage.(*storage.RedisStore)
 		asnStr, org, err := p.asnLookup.LookupWithOrg(entry.SourceIP)
 		if err == nil && asnStr != "" {
 			// Проверяем, не в списке ли исключённых ASN
@@ -502,7 +511,15 @@ func (p *LogProcessor) processEntryByASN(ctx context.Context, entry models.LogEn
 			var countryCode string
 			var geoLoc *geoip.GeoLocation
 			if p.geoService != nil && p.cfg.GeoIPEnabled {
-				if loc, err := p.geoService.Lookup(entry.SourceIP); err == nil && loc != nil {
+				loc, lookupErr := p.geoService.Lookup(ctx, entry.SourceIP)
+				if lookupErr != nil {
+					if errors.Is(lookupErr, context.DeadlineExceeded) {
+						metrics.GeoIPLookupTimeout.Add(1)
+					} else {
+						metrics.GeoIPLookupFail.Add(1)
+					}
+				} else if loc != nil {
+					metrics.GeoIPLookupSuccess.Add(1)
 					geoLoc = loc
 					countryCode = loc.CountryCode
 				}
@@ -545,12 +562,12 @@ func (p *LogProcessor) processEntryByASN(ctx context.Context, entry models.LogEn
 		}
 
 		if len(ipsToBlock) > 0 {
-			if err := p.publisher.PublishBlockMessage(ipsToBlock, p.cfg.BlockDuration); err != nil {
+			if err := p.publishBlockEvent(ipsToBlock, p.cfg.BlockDuration); err != nil {
 				log.Printf("Ошибка отправки сообщения о блокировке: %v", err)
 			} else {
 				log.Printf("✅ Сообщение о блокировке %d элементов для %s%s отправлено (тип: %s)",
 					len(ipsToBlock), entry.UserEmail, debugMarker, identifierType)
-				p.enqueueSideEffectTask(func() {
+				p.enqueueSideEffectTask(func(ctx context.Context) {
 					p.scheduleASNClear(ctx, entry.UserEmail)
 				})
 			}
@@ -616,8 +633,8 @@ func (p *LogProcessor) processEntryByASN(ctx context.Context, entry models.LogEn
 			alertPayload.AllUserIPs = res.AllUserItems
 		}
 
-		p.enqueueSideEffectTask(func() {
-			if err := p.alerter.SendAlert(alertPayload); err != nil {
+		p.enqueueSideEffectTask(func(ctx context.Context) {
+			if err := p.alerter.SendAlert(ctx, alertPayload); err != nil {
 				log.Printf("Ошибка отправки вебхук-уведомления: %v", err)
 			}
 		})
@@ -754,6 +771,59 @@ func (p *LogProcessor) collectIPsForASNBlock(ctx context.Context, email string, 
 	return result
 }
 
+// generateEventID возвращает 16-байтовый hex-идентификатор события из crypto/rand.
+func generateEventID() string {
+	var b [16]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		// crypto/rand failure — крайне редкий случай, fallback на timestamp
+		return fmt.Sprintf("fallback-%d", time.Now().UnixNano())
+	}
+	return hex.EncodeToString(b[:])
+}
+
+// publishBlockEvent разбивает список IP на чанки по cfg.MaxIPsPerBlockEvent и
+// публикует каждый чанок как отдельное BlockMessage.  Если IP помещаются в один
+// чанок — поля EventID/Chunk* не добавляются (wire-совместимость со старым форматом).
+func (p *LogProcessor) publishBlockEvent(ips []string, duration string) error {
+	chunkSize := p.cfg.MaxIPsPerBlockEvent
+	if chunkSize <= 0 {
+		chunkSize = 500
+	}
+
+	// Один чанок — старый формат без обёртки
+	if len(ips) <= chunkSize {
+		return p.publisher.PublishBlockMessage(models.BlockMessage{
+			IPs:      ips,
+			Duration: duration,
+		})
+	}
+
+	// Несколько чанков — добавляем event envelope
+	eventID := generateEventID()
+	total := (len(ips) + chunkSize - 1) / chunkSize
+
+	for i := 0; i < total; i++ {
+		start := i * chunkSize
+		end := start + chunkSize
+		if end > len(ips) {
+			end = len(ips)
+		}
+		idx := i
+		msg := models.BlockMessage{
+			IPs:           ips[start:end],
+			Duration:      duration,
+			EventID:       eventID,
+			ChunkIndex:    &idx,
+			ChunkTotal:    &total,
+			SchemaVersion: 2,
+		}
+		if err := p.publisher.PublishBlockMessage(msg); err != nil {
+			return fmt.Errorf("chunk %d/%d (event %s): %w", i+1, total, eventID, err)
+		}
+	}
+	return nil
+}
+
 // scheduleASNClear планирует отложенную очистку ASN данных
 func (p *LogProcessor) scheduleASNClear(ctx context.Context, userEmail string) {
 	log.Printf("Планирование отложенной очистки ASN данных для %s через %v.", userEmail, p.cfg.ClearIPsDelay)
@@ -862,7 +932,7 @@ func (p *LogProcessor) performEnhancedAnalytics(
 	}
 
 	// 2. Выполняем географический анализ
-	geoResultInternal := p.geoAnalyzer.AnalyzeUserIPs(allIPs)
+	geoResultInternal := p.geoAnalyzer.AnalyzeUserIPs(ctx, allIPs)
 
 	// Конвертируем в models.GeoAnalysisResult
 	geoResult := &models.GeoAnalysisResult{

@@ -13,6 +13,7 @@ import (
 // UnknownProvider информация о неизвестном провайдере
 type UnknownProvider struct {
 	Organization string    `json:"organization"`
+	ASN          string    `json:"asn,omitempty"` // "AS34533" — заполняется из ClassifyWithCountry
 	FirstSeen    time.Time `json:"first_seen"`
 	LastSeen     time.Time `json:"last_seen"`
 	Count        int       `json:"count"`
@@ -141,6 +142,23 @@ func GetUnknownProvidersStats() map[string]*UnknownProvider {
 		result[k] = v
 	}
 	return result
+}
+
+// UpdateUnknownProviderASN обновляет ASN поле для уже залогированного unknown provider.
+// Если провайдер не найден в логе — no-op. Вызывается из ClassifyWithCountry.
+func UpdateUnknownProviderASN(asn, organization string) {
+	if unknownLog == nil || !unknownLog.enabled {
+		return
+	}
+	unknownLog.mu.Lock()
+	defer unknownLog.mu.Unlock()
+
+	orgLower := strings.ToLower(organization)
+	if provider, exists := unknownLog.providers[orgLower]; exists {
+		if provider.ASN == "" {
+			provider.ASN = asn
+		}
+	}
 }
 
 func contains(slice []string, item string) bool {
