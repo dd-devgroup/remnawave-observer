@@ -35,6 +35,11 @@ func NewExecutor(l *logger.Logger) *Executor {
 	}
 }
 
+// SetRunner заменяет runner (для тестов с моками).
+func (e *Executor) SetRunner(r CommandRunner) {
+	e.runner = r
+}
+
 // BuildSetExpression формирует nftables set expression безопасно.
 // Возвращает строку вида: "{ <ip> timeout <duration> }"
 // Примечание: ip и duration уже должны быть провалидированы перед вызовом.
