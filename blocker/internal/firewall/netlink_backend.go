@@ -123,13 +123,9 @@ func (n *NetlinkBackend) Add(ctx context.Context, ipOrPrefix, timeout string) er
 		return n.fallbackExec.Add(ctx, ipOrPrefix, timeout)
 	}
 
-	// Для CIDR используем fallback на exec (упрощение для MVP)
-	// Причина: nftables set может требовать тип ipv4_prefix вместо ipv4_addr для CIDR
+	// Для CIDR используем netlink с interval range (KeyEnd)
 	if strings.Contains(ipOrPrefix, "/") {
-		if n.logger != nil {
-			n.logger.Info(fmt.Sprintf("CIDR %s требует exec fallback (MVP ограничение)", ipOrPrefix))
-		}
-		return n.fallbackExec.Add(ctx, ipOrPrefix, timeout)
+		return n.addCIDR(ctx, ipOrPrefix, timeout)
 	}
 
 	// Парсим timeout в time.Duration (формат nftables: "5m", "1h", "30s")
@@ -157,6 +153,73 @@ func (n *NetlinkBackend) Add(ctx context.Context, ipOrPrefix, timeout string) er
 	// Применяем изменения
 	if err := n.conn.Flush(); err != nil {
 		return fmt.Errorf("netlink Flush failed: %w", err)
+	}
+
+	return nil
+}
+
+// addCIDR добавляет CIDR в nftables set через netlink API с interval range.
+func (n *NetlinkBackend) addCIDR(ctx context.Context, cidr, timeout string) error {
+	// Парсим timeout
+	duration, err := parseNftTimeout(timeout)
+	if err != nil {
+		return fmt.Errorf("invalid timeout '%s': %w", timeout, err)
+	}
+
+	// Парсим CIDR
+	_, ipNet, err := net.ParseCIDR(cidr)
+	if err != nil {
+		return fmt.Errorf("invalid CIDR '%s': %w", cidr, err)
+	}
+
+	// Вычисляем первый и последний IP в диапазоне
+	firstIP := ipNet.IP
+	lastIP := make(net.IP, len(firstIP))
+	copy(lastIP, firstIP)
+
+	// Вычисляем последний IP: first | ^mask
+	for i := range lastIP {
+		lastIP[i] = firstIP[i] | ^ipNet.Mask[i]
+	}
+
+	// Для interval sets в netlink нужно добавить ДВА элемента:
+	// 1. Начало диапазона (IntervalEnd=false)
+	// 2. Конец диапазона + 1 (IntervalEnd=true)
+	lastIPPlusOne := incrementIP(lastIP)
+
+	// Конвертируем в []byte для nftables
+	var keyStart, keyEnd []byte
+	if ip4 := firstIP.To4(); ip4 != nil {
+		// IPv4
+		keyStart = []byte(firstIP.To4())
+		keyEnd = []byte(lastIPPlusOne.To4())
+	} else {
+		// IPv6
+		keyStart = []byte(firstIP.To16())
+		keyEnd = []byte(lastIPPlusOne.To16())
+	}
+
+	// Элемент 1: начало диапазона
+	elemStart := nftables.SetElement{
+		Key:         keyStart,
+		IntervalEnd: false,
+		Timeout:     duration,
+	}
+
+	// Элемент 2: конец диапазона + 1 (маркер окончания interval)
+	elemEnd := nftables.SetElement{
+		Key:         keyEnd,
+		IntervalEnd: true,
+	}
+
+	// Добавляем оба элемента одновременно
+	if err := n.conn.SetAddElements(n.set, []nftables.SetElement{elemStart, elemEnd}); err != nil {
+		return fmt.Errorf("netlink SetAddElements (CIDR) failed: %w", err)
+	}
+
+	// Применяем изменения
+	if err := n.conn.Flush(); err != nil {
+		return fmt.Errorf("netlink Flush (CIDR) failed: %w", err)
 	}
 
 	return nil
@@ -215,6 +278,25 @@ func parseIP(ipAddr string) ([]byte, error) {
 
 	// IPv6: 16 байт
 	return []byte(ip.To16()), nil
+}
+
+// incrementIP увеличивает IP адрес на 1 (для interval end marker).
+func incrementIP(ip net.IP) net.IP {
+	// Копируем IP чтобы не изменять оригинал
+	result := make(net.IP, len(ip))
+	copy(result, ip)
+
+	// Увеличиваем с конца (little-endian для IP адресов)
+	for i := len(result) - 1; i >= 0; i-- {
+		result[i]++
+		if result[i] != 0 {
+			// Нет переноса, выходим
+			break
+		}
+		// Перенос в следующий байт
+	}
+
+	return result
 }
 
 // Close закрывает netlink соединение (вызывается при shutdown).
