@@ -1,10 +1,10 @@
 package processor
 
 import (
+	"blocker-worker/internal/firewall"
 	"blocker-worker/internal/logger"
 	"blocker-worker/internal/metrics"
 	"blocker-worker/internal/models"
-	"blocker-worker/internal/services/command"
 	"blocker-worker/internal/validation"
 	"context"
 	"encoding/json"
@@ -20,16 +20,16 @@ var validDurationPattern = regexp.MustCompile(`^\d+[smhd]$`)
 // MessageProcessor инкапсулирует логику обработки одного сообщения RabbitMQ.
 type MessageProcessor struct {
 	logger     *logger.Logger
-	executor   *command.Executor
+	backend    firewall.FirewallBackend
 	pool       *WorkerPool
 	nftTimeout time.Duration
 }
 
 // NewMessageProcessor создает новый обработчик сообщений.
-func NewMessageProcessor(l *logger.Logger, exec *command.Executor, pool *WorkerPool, nftTimeout time.Duration) *MessageProcessor {
+func NewMessageProcessor(l *logger.Logger, backend firewall.FirewallBackend, pool *WorkerPool, nftTimeout time.Duration) *MessageProcessor {
 	return &MessageProcessor{
 		logger:     l,
-		executor:   exec,
+		backend:    backend,
 		pool:       pool,
 		nftTimeout: nftTimeout,
 	}
@@ -107,10 +107,9 @@ func (p *MessageProcessor) Process(ctx context.Context, body []byte) error {
 			nftCtx, cancel := context.WithTimeout(taskCtx, p.nftTimeout)
 			defer cancel()
 
-			// Используем безопасную функцию формирования set expression
-			setExpr := command.BuildSetExpression(ipAddress, duration)
+			// Используем firewall backend для добавления IP в blacklist
 			metrics.Get().NftCommandsTotal.Add(1)
-			err := p.executor.RunNftCommand(nftCtx, "add", "element", "inet", "firewall", "user_blacklist", setExpr)
+			err := p.backend.Add(nftCtx, ipAddress, duration)
 			if err != nil {
 				// Проверяем, была ли это timeout ошибка
 				if errors.Is(err, context.DeadlineExceeded) {

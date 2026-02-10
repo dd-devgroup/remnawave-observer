@@ -2,6 +2,7 @@ package main
 
 import (
 	"blocker-worker/internal/config"
+	"blocker-worker/internal/firewall"
 	"blocker-worker/internal/logger"
 	"blocker-worker/internal/metrics"
 	"blocker-worker/internal/processor"
@@ -26,12 +27,16 @@ func main() {
 	pool.Start()
 	l.Info(fmt.Sprintf("Worker pool запущен: %d воркеров, очередь %d", cfg.BlockerWorkers, cfg.QueueSize))
 
-	// 4. Инициализация процессора с pool и nftTimeout
-	msgProcessor := processor.NewMessageProcessor(l, cmdExecutor, pool, cfg.NftTimeout)
+	// 4. Создание firewall backend (exec по умолчанию)
+	fwBackend := firewall.NewExecBackend(l, cmdExecutor)
+	l.Info(fmt.Sprintf("Firewall backend: %s", fwBackend.Name()))
 
-	// 5. Инициализация главного воркера
+	// 5. Инициализация процессора с pool и nftTimeout
+	msgProcessor := processor.NewMessageProcessor(l, fwBackend, pool, cfg.NftTimeout)
+
+	// 6. Инициализация главного воркера
 	appWorker := worker.New(l, cfg, msgProcessor, pool)
 
-	// 6. Запуск приложения
+	// 7. Запуск приложения
 	appWorker.Run()
 }
