@@ -1,6 +1,6 @@
-# Netlink Migration Summary (N1–N6)
+# Netlink Migration Summary (N1–N7)
 
-Blocker успешно мигрирован с `exec nft` на **netlink API** через серию 6 коммитов (N1–N6).
+Blocker успешно мигрирован с `exec nft` на **netlink API** через серию 7 коммитов (N1–N7).
 
 ---
 
@@ -14,8 +14,9 @@ Blocker успешно мигрирован с `exec nft` на **netlink API** �
 | N4 | `47960e8` | Unit tests на backend с моками | +21 tests (+16 Linux) |
 | N5 | `7fc0130` | Integration smoke test (Linux + CAP_NET_ADMIN) | +2 tests (опционально) |
 | N6 | `f1c4804` | NETLINK-MIGRATION.md и rollback план | Документация |
+| N7 | `97e4474` | Полная поддержка CIDR через netlink | +3 tests (Linux) |
 
-**Итого**: 6 коммитов, +26 unit tests (+18 на Linux), 500+ строк документации.
+**Итого**: 7 коммитов, +29 unit tests (+21 на Linux), 500+ строк документации.
 
 ---
 
@@ -59,9 +60,11 @@ NetlinkBackend автоматически переключается на ExecBa
 2. **Права**: нет CAP_NET_ADMIN → exec fallback
 3. **Table**: `inet firewall` не найдена → exec fallback
 4. **Set**: `user_blacklist` не найден → exec fallback
-5. **CIDR**: `10.0.0.0/8` (MVP ограничение) → exec fallback
+5. **Interval flag**: set без `flags interval` → exec fallback для CIDR
 
 **Логи**: `Firewall backend: netlink(fallback:exec)` или `netlink(not-supported:fallback-exec)`
+
+**Важно**: Для CIDR через netlink требуется `flags interval` в set декларации (см. раздел Требования).
 
 ---
 
@@ -74,8 +77,9 @@ NetlinkBackend автоматически переключается на ExecBa
 3. **Nftables table/set**:
    ```bash
    nft add table inet firewall
-   nft add set inet firewall user_blacklist { type ipv4_addr\; flags timeout\; }
+   nft add set inet firewall user_blacklist { type ipv4_addr\; flags interval, timeout\; }
    ```
+   **Важно**: `flags interval` обязателен для поддержки CIDR (N7). Без него CIDR будет fallback на exec.
 
 ### Для exec fallback
 
@@ -99,6 +103,7 @@ blocker/
 │   ├── netlink_backend_stub.go           # Заглушка (Windows/macOS)
 │   ├── netlink_backend_test.go           # 2 unit tests
 │   ├── netlink_helpers_test.go           # 16 unit tests (Linux)
+│   ├── netlink_cidr_test.go              # 3 unit tests (N7, Linux)
 │   └── netlink_integration_test.go       # 2 integration tests (Linux)
 └── docs/
     ├── NETLINK-MIGRATION.md              # Полная документация (500+ строк)
@@ -126,8 +131,9 @@ blocker/
 |---------|-------|----------|
 | internal/firewall | 7 | Name, Add (success/error/IPv6/CIDR) |
 | internal/firewall (Linux) | +16 | parseNftTimeout, parseIP |
+| internal/firewall (Linux, N7) | +3 | CIDR calculation, incrementIP, invalid CIDR |
 | internal/services/command | 10 | Executor с моками |
-| **Итого** | **33** | **Все зелёные** |
+| **Итого** | **36** | **Все зелёные** |
 
 ### Integration tests (go test -tags=integration)
 
@@ -146,10 +152,11 @@ sudo go test -tags=integration ./internal/firewall
 ### 1. Git revert (рекомендуется)
 
 ```bash
-# Откат всех 6 коммитов
-git revert f1c4804^..bbbc806
+# Откат всех 7 коммитов
+git revert 97e4474^..bbbc806
 
 # Или по одному (в обратном порядке)
+git revert 97e4474  # N7
 git revert f1c4804  # N6
 git revert 7fc0130  # N5
 git revert 47960e8  # N4
@@ -187,11 +194,13 @@ nft delete table inet firewall
 - [x] N4: Unit tests (26 tests, +16 на Linux)
 - [x] N5: Integration smoke test (опционально)
 - [x] N6: Документация и rollback план
-- [x] Все тесты: go test -count=1 ./... — зелёные
+- [x] N7: Полная поддержка CIDR через netlink (interval sets)
+- [x] Все тесты: go test -count=1 ./... — зелёные (36 tests)
 - [x] Код компилируется: go build ./... — успешно
 - [x] Кросс-платформенность: build tags (linux/!linux)
 - [x] Безопасность: нет breaking changes, автоматический fallback
 - [x] Документация: NETLINK-MIGRATION.md (500+ строк)
+- [x] Production: CIDR протестирован и работает через netlink
 
 ---
 
@@ -218,10 +227,10 @@ nft delete table inet firewall
 
 ### Дальнейшие улучшения
 
-1. **Полная поддержка CIDR через netlink** (сейчас fallback на exec)
-2. **Batch операции** (несколько IP в один netlink flush)
-3. **Метрики разделения** (NetlinkOpsTotal vs ExecFallbackOpsTotal)
-4. **Бенчмарк в CI** (автоматическая проверка производительности)
+1. **Batch операции** (несколько IP в один netlink flush)
+2. **Метрики разделения** (NetlinkOpsTotal vs ExecFallbackOpsTotal)
+3. **Бенчмарк в CI** (автоматическая проверка производительности)
+4. **IPv6 interval sets** (аналогично IPv4 CIDR)
 
 ---
 
