@@ -27,8 +27,21 @@ func main() {
 	pool.Start()
 	l.Info(fmt.Sprintf("Worker pool запущен: %d воркеров, очередь %d", cfg.BlockerWorkers, cfg.QueueSize))
 
-	// 4. Создание firewall backend (exec по умолчанию)
-	fwBackend := firewall.NewExecBackend(l, cmdExecutor)
+	// 4. Создание firewall backend (netlink с автоматическим fallback на exec)
+	execBackend := firewall.NewExecBackend(l, cmdExecutor)
+	netlinkBackend, err := firewall.NewNetlinkBackend(l, execBackend)
+	if err != nil {
+		// Критическая ошибка - не должно происходить, т.к. NetlinkBackend всегда создаётся
+		l.Error(fmt.Sprintf("КРИТИЧЕСКАЯ ОШИБКА: не удалось создать NetlinkBackend: %v", err))
+		netlinkBackend = nil
+	}
+
+	var fwBackend firewall.FirewallBackend
+	if netlinkBackend != nil {
+		fwBackend = netlinkBackend
+	} else {
+		fwBackend = execBackend // Последний resort - чистый exec
+	}
 	l.Info(fmt.Sprintf("Firewall backend: %s", fwBackend.Name()))
 
 	// 5. Инициализация процессора с pool и nftTimeout
