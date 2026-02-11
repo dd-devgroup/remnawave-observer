@@ -10,17 +10,3 @@ services:
       interval: 2s
       timeout: 3s
       retries: 10
-
-  rabbitmq-test:
-    image: rabbitmq:3.13-management-alpine
-    ports:
-      - "5672:5672"
-      - "15672:15672"
-    environment:
-      RABBITMQ_DEFAULT_USER: guest
-      RABBITMQ_DEFAULT_PASS: guest
-    healthcheck:
-      test: ["CMD", "rabbitmq-diagnostics", "ping"]
-      interval: 5s
-      timeout: 10s
-      retries: 10

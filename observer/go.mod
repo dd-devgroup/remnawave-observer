@@ -4,7 +4,6 @@ go 1.24.4
 
 require (
 	github.com/gin-gonic/gin v1.10.1
-	github.com/rabbitmq/amqp091-go v1.10.0
 	github.com/redis/go-redis/v9 v9.11.0
 	github.com/stretchr/testify v1.9.0
 	gopkg.in/yaml.v3 v3.0.1
