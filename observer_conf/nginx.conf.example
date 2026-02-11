@@ -1,10 +1,10 @@
 server {
     listen 443 ssl;
-    http2 on;	
-    server_name HEAD_DOMAIN; 
+    http2 on;
+    server_name YOUR_DOMAIN_HERE; # Замените на ваш домен (например: observer.example.com)
 
-    ssl_certificate /etc/letsencrypt/live/HEAD_DOMAIN/fullchain.pem;
-    ssl_certificate_key /etc/letsencrypt/live/HEAD_DOMAIN/privkey.pem;
+    ssl_certificate /etc/letsencrypt/live/YOUR_DOMAIN_HERE/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/YOUR_DOMAIN_HERE/privkey.pem;
 
     ssl_protocols TLSv1.2 TLSv1.3;
     ssl_ciphers 'TLS_AES_128_GCM_SHA256:TLS_AES_256_GCM_SHA384:TLS_CHACHA20_POLY1305_SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-RSA-AES256-GCM-SHA384';
@@ -21,4 +21,3 @@ server {
         proxy_set_header X-Forwarded-Proto $scheme;
     }
 }
-
