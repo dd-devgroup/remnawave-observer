@@ -4,7 +4,6 @@ import (
 	"context"
 	"observer_service/internal/config"
 	"observer_service/internal/models"
-	"observer_service/internal/services/enforcement"
 	"sync"
 	"testing"
 	"time"
@@ -39,7 +38,7 @@ func (s *subnetMockStorage) CheckAndAddSubnet(_ context.Context, _, _ string, _ 
 	return s.result, nil
 }
 
-// capturingPublisher records every BlockMessage it receives (thread-safe).
+// capturingPublisher records every BlockMessage it receives (thread-safe) - DEPRECATED (MIG-7).
 type capturingPublisher struct {
 	mu   sync.Mutex
 	msgs []models.BlockMessage
@@ -64,6 +63,42 @@ func (p *capturingPublisher) get(i int) models.BlockMessage {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return p.msgs[i]
+}
+
+// capturingEnforcer captures disable calls for testing (MIG-7).
+type capturingEnforcer struct {
+	mu       sync.Mutex
+	disables []disableCall
+}
+
+type disableCall struct {
+	internalID int64
+	duration   time.Duration
+	reason     string
+	score      int
+}
+
+func (e *capturingEnforcer) DisableTempByInternalID(ctx context.Context, internalID int64, duration time.Duration, reason string, score int) error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.disables = append(e.disables, disableCall{internalID, duration, reason, score})
+	return nil
+}
+
+func (e *capturingEnforcer) Ping(ctx context.Context) error {
+	return nil
+}
+
+func (e *capturingEnforcer) count() int {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return len(e.disables)
+}
+
+func (e *capturingEnforcer) get(i int) disableCall {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.disables[i]
 }
 
 // capturingAlerter records every AlertPayload.
@@ -162,7 +197,8 @@ func TestIntegration_IPMode_LimitExceeded_Publishes(t *testing.T) {
 	alrt := &capturingAlerter{}
 	cfg := ipCfg(3, 500)
 
-	proc := NewLogProcessor(stor, pub, enforcement.NewNoopEnforcer(), alrt, cfg, nil, nil, nil, nil, nil)
+	enf := &capturingEnforcer{}
+	proc := NewLogProcessor(stor, pub, enf, alrt, cfg, nil, nil, nil, nil, nil)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -173,26 +209,29 @@ func TestIntegration_IPMode_LimitExceeded_Publishes(t *testing.T) {
 	go proc.StartSideEffectWorkerPool(ctx, &wg)
 
 	proc.ProcessEntries(ctx, []models.LogEntry{
-		{UserEmail: "alice@test.com", SourceIP: "10.0.0.4"},
+		{UserEmail: "12345", SourceIP: "10.0.0.4"}, // MIG-7: numeric ID
 	})
 
 	// Give side-effect worker a tick to pick up the alert task.
 	time.Sleep(50 * time.Millisecond)
 
-	// Exactly one block message with all 4 IPs (no chunking needed).
-	if pub.count() != 1 {
-		t.Fatalf("expected 1 published message, got %d", pub.count())
+	// Exactly one disable call for the user.
+	if enf.count() != 1 {
+		t.Fatalf("expected 1 disable call, got %d", enf.count())
 	}
-	msg := pub.get(0)
-	if len(msg.IPs) != 4 {
-		t.Errorf("expected 4 IPs in block message, got %d", len(msg.IPs))
+	call := enf.get(0)
+	if call.internalID != 12345 {
+		t.Errorf("expected internalID 12345, got %d", call.internalID)
 	}
-	if msg.Duration != "3600" {
-		t.Errorf("expected duration 3600, got %q", msg.Duration)
+	// BlockDuration "3600" is invalid (no unit), so disableUser falls back to 5m
+	if call.duration != 5*time.Minute {
+		t.Errorf("expected duration 5m0s, got %v", call.duration)
 	}
-	// Single-chunk messages must NOT have chunking envelope.
-	if msg.EventID != "" || msg.ChunkIndex != nil || msg.ChunkTotal != nil || msg.SchemaVersion != 0 {
-		t.Errorf("single-chunk message must not have chunking fields; got %+v", msg)
+	if call.reason != "ip_limit_exceeded: 4/3 IPs" {
+		t.Errorf("expected reason 'ip_limit_exceeded: 4/3 IPs', got %q", call.reason)
+	}
+	if call.score != 85 {
+		t.Errorf("expected score 85, got %d", call.score)
 	}
 
 	// Alert must have been delivered via side-effect.
@@ -200,8 +239,8 @@ func TestIntegration_IPMode_LimitExceeded_Publishes(t *testing.T) {
 		t.Fatalf("expected 1 alert, got %d", alrt.count())
 	}
 	alert := alrt.get(0)
-	if alert.UserIdentifier != "alice@test.com" {
-		t.Errorf("alert user = %q, want alice@test.com", alert.UserIdentifier)
+	if alert.UserIdentifier != "12345" {
+		t.Errorf("alert user = %q, want 12345", alert.UserIdentifier)
 	}
 	if alert.ViolationType != "ip_limit_exceeded" {
 		t.Errorf("violation_type = %q, want ip_limit_exceeded", alert.ViolationType)
@@ -224,47 +263,26 @@ func TestIntegration_IPMode_Chunking_600IPs(t *testing.T) {
 	alrt := &capturingAlerter{}
 	cfg := ipCfg(5, 500) // chunkSize = 500
 
-	proc := NewLogProcessor(stor, pub, enforcement.NewNoopEnforcer(), alrt, cfg, nil, nil, nil, nil, nil)
+	enf := &capturingEnforcer{}
+	proc := NewLogProcessor(stor, pub, enf, alrt, cfg, nil, nil, nil, nil, nil)
 	ctx := context.Background()
 
 	proc.ProcessEntries(ctx, []models.LogEntry{
-		{UserEmail: "bob@test.com", SourceIP: "10.0.0.1"},
+		{UserEmail: "67890", SourceIP: "10.0.0.1"},
 	})
 
-	if pub.count() != 2 {
-		t.Fatalf("expected 2 chunks, got %d", pub.count())
+	// MIG-7: No chunking anymore (user-level enforcement, not IP-level)
+	// Single disable call regardless of IP count
+	if enf.count() != 1 {
+		t.Fatalf("expected 1 disable call, got %d", enf.count())
 	}
 
-	// Chunk 0
-	c0 := pub.get(0)
-	if len(c0.IPs) != 500 {
-		t.Errorf("chunk 0: expected 500 IPs, got %d", len(c0.IPs))
+	call := enf.get(0)
+	if call.internalID != 67890 {
+		t.Errorf("expected internalID 67890, got %d", call.internalID)
 	}
-	if c0.ChunkIndex == nil || *c0.ChunkIndex != 0 {
-		t.Errorf("chunk 0: ChunkIndex should be 0, got %v", c0.ChunkIndex)
-	}
-	if c0.ChunkTotal == nil || *c0.ChunkTotal != 2 {
-		t.Errorf("chunk 0: ChunkTotal should be 2, got %v", c0.ChunkTotal)
-	}
-	if c0.SchemaVersion != 2 {
-		t.Errorf("chunk 0: SchemaVersion should be 2, got %d", c0.SchemaVersion)
-	}
-	if c0.EventID == "" {
-		t.Error("chunk 0: EventID must not be empty")
-	}
-
-	// Chunk 1
-	c1 := pub.get(1)
-	if len(c1.IPs) != 100 {
-		t.Errorf("chunk 1: expected 100 IPs, got %d", len(c1.IPs))
-	}
-	if c1.ChunkIndex == nil || *c1.ChunkIndex != 1 {
-		t.Errorf("chunk 1: ChunkIndex should be 1, got %v", c1.ChunkIndex)
-	}
-
-	// Both chunks share the same EventID.
-	if c0.EventID != c1.EventID {
-		t.Errorf("EventID mismatch between chunks: %q vs %q", c0.EventID, c1.EventID)
+	if call.reason != "ip_limit_exceeded: 600/5 IPs" {
+		t.Errorf("expected reason 'ip_limit_exceeded: 600/5 IPs', got %q", call.reason)
 	}
 }
 
@@ -284,7 +302,8 @@ func TestIntegration_SubnetMode_LimitExceeded_Publishes(t *testing.T) {
 	alrt := &capturingAlerter{}
 	cfg := subnetCfg(2)
 
-	proc := NewLogProcessor(stor, pub, enforcement.NewNoopEnforcer(), alrt, cfg, nil, nil, nil, nil, nil)
+	enf := &capturingEnforcer{}
+	proc := NewLogProcessor(stor, pub, enf, alrt, cfg, nil, nil, nil, nil, nil)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -295,17 +314,21 @@ func TestIntegration_SubnetMode_LimitExceeded_Publishes(t *testing.T) {
 
 	// Use an IPv4 address so subnet derivation works.
 	proc.ProcessEntries(ctx, []models.LogEntry{
-		{UserEmail: "charlie@test.com", SourceIP: "192.168.1.5"},
+		{UserEmail: "11111", SourceIP: "192.168.1.5"},
 	})
 
 	time.Sleep(50 * time.Millisecond)
 
-	if pub.count() != 1 {
-		t.Fatalf("expected 1 published message, got %d", pub.count())
+	// MIG-7: Check enforcer instead of publisher
+	if enf.count() != 1 {
+		t.Fatalf("expected 1 disable call, got %d", enf.count())
 	}
-	msg := pub.get(0)
-	if len(msg.IPs) != 3 {
-		t.Errorf("expected 3 subnets in block message, got %d: %v", len(msg.IPs), msg.IPs)
+	call := enf.get(0)
+	if call.internalID != 11111 {
+		t.Errorf("expected internalID 11111, got %d", call.internalID)
+	}
+	if call.reason != "subnet_limit_exceeded: 3/2 subnets" {
+		t.Errorf("expected reason 'subnet_limit_exceeded: 3/2 subnets', got %q", call.reason)
 	}
 
 	if alrt.count() != 1 {
@@ -335,25 +358,24 @@ func TestIntegration_IPMode_ExcludedIPs_Filtered(t *testing.T) {
 		"192.168.1.100": true,
 	}
 
-	proc := NewLogProcessor(stor, pub, enforcement.NewNoopEnforcer(), alrt, cfg, nil, nil, nil, nil, nil)
+	enf := &capturingEnforcer{}
+	proc := NewLogProcessor(stor, pub, enf, alrt, cfg, nil, nil, nil, nil, nil)
 	ctx := context.Background()
 
 	proc.ProcessEntries(ctx, []models.LogEntry{
-		{UserEmail: "dave@test.com", SourceIP: "10.0.0.2"},
+		{UserEmail: "22222", SourceIP: "10.0.0.2"},
 	})
 
-	if pub.count() != 1 {
-		t.Fatalf("expected 1 published message, got %d", pub.count())
+	// MIG-7: User-level enforcement - user gets disabled regardless of excluded IPs
+	if enf.count() != 1 {
+		t.Fatalf("expected 1 disable call, got %d", enf.count())
 	}
-	msg := pub.get(0)
-	// 192.168.1.100 should have been stripped.
-	if len(msg.IPs) != 2 {
-		t.Errorf("expected 2 IPs after exclusion, got %d: %v", len(msg.IPs), msg.IPs)
+	call := enf.get(0)
+	if call.internalID != 22222 {
+		t.Errorf("expected internalID 22222, got %d", call.internalID)
 	}
-	for _, ip := range msg.IPs {
-		if ip == "192.168.1.100" {
-			t.Error("excluded IP 192.168.1.100 must not appear in block message")
-		}
+	if call.reason != "ip_limit_exceeded: 3/2 IPs" {
+		t.Errorf("expected reason 'ip_limit_exceeded: 3/2 IPs', got %q", call.reason)
 	}
 }
 
@@ -366,17 +388,18 @@ func TestIntegration_ExcludedUser_NoPublish(t *testing.T) {
 	pub := &capturingPublisher{}
 	alrt := &capturingAlerter{}
 	cfg := ipCfg(2, 500)
-	cfg.ExcludedUsers = map[string]bool{"skip@test.com": true}
+	cfg.ExcludedUsers = map[string]bool{"33333": true}
 
-	proc := NewLogProcessor(stor, pub, enforcement.NewNoopEnforcer(), alrt, cfg, nil, nil, nil, nil, nil)
+	enf := &capturingEnforcer{}
+	proc := NewLogProcessor(stor, pub, enf, alrt, cfg, nil, nil, nil, nil, nil)
 	ctx := context.Background()
 
 	proc.ProcessEntries(ctx, []models.LogEntry{
-		{UserEmail: "skip@test.com", SourceIP: "1.2.3.4"},
+		{UserEmail: "33333", SourceIP: "1.2.3.4"},
 	})
 
-	if pub.count() != 0 {
-		t.Errorf("excluded user must not trigger publish, got %d messages", pub.count())
+	if enf.count() != 0 {
+		t.Errorf("excluded user must not trigger disable, got %d calls", enf.count())
 	}
 }
 
@@ -390,7 +413,8 @@ func TestIntegration_ContextCancellation_StopsProcessing(t *testing.T) {
 	alrt := &capturingAlerter{}
 	cfg := ipCfg(10, 500)
 
-	proc := NewLogProcessor(stor, pub, enforcement.NewNoopEnforcer(), alrt, cfg, nil, nil, nil, nil, nil)
+	enf := &capturingEnforcer{}
+	proc := NewLogProcessor(stor, pub, enf, alrt, cfg, nil, nil, nil, nil, nil)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel() // already cancelled
@@ -398,7 +422,7 @@ func TestIntegration_ContextCancellation_StopsProcessing(t *testing.T) {
 	// Feed 5 entries — none should be processed past the ctx check.
 	entries := make([]models.LogEntry, 5)
 	for i := range entries {
-		entries[i] = models.LogEntry{UserEmail: "x@test.com", SourceIP: "1.2.3.4"}
+		entries[i] = models.LogEntry{UserEmail: "99999", SourceIP: "1.2.3.4"}
 	}
 	proc.ProcessEntries(ctx, entries)
 

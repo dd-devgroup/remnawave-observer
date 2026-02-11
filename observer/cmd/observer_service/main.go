@@ -21,6 +21,7 @@ import (
 	"observer_service/internal/services/geodata"
 	"observer_service/internal/services/geoip"
 	"observer_service/internal/services/publisher"
+	"observer_service/internal/services/remnawave"
 	"observer_service/internal/services/scoring"
 	"observer_service/internal/services/storage"
 )
@@ -50,9 +51,22 @@ func main() {
 	}
 	defer rabbitPublisher.Close()
 
-	// Временный noop enforcer (будет заменён RemnawaveEnforcer в MIG-5)
-	enforcer := enforcement.NewNoopEnforcer()
-	log.Printf("⚠️  Используется noop enforcer (миграция в процессе)")
+	// MIG-7: Инициализация Remnawave Enforcer
+	var enforcer enforcement.Enforcer
+	if cfg.RemnawaveBaseURL != "" && cfg.RemnawaveAPIToken != "" {
+		remnawaveClient := remnawave.NewClient(
+			cfg.RemnawaveBaseURL,
+			cfg.RemnawaveAPIToken,
+			cfg.RemnawaveTimeoutSeconds,
+			cfg.UserIDUUIDCacheTTLHours,
+			redisStore.GetClient(),
+		)
+		enforcer = enforcement.NewRemnawaveEnforcer(remnawaveClient, redisStore)
+		log.Printf("✅ Remnawave Enforcer инициализирован (URL: %s)", cfg.RemnawaveBaseURL)
+	} else {
+		enforcer = enforcement.NewNoopEnforcer()
+		log.Printf("⚠️  Remnawave не настроен, используется noop enforcer")
+	}
 
 	webhookAlerter := alerter.NewWebhookAlerter(cfg.AlertWebhookURL)
 
@@ -160,12 +174,25 @@ func main() {
 		log.Printf("✅ Auto-Learner инициализирован")
 	}
 
-	// Инициализация Re-enable Scheduler (пока noop enforcer, scheduler не запустится)
-	// TODO(MIG-6): Когда enforcer станет RemnawaveEnforcer, scheduler будет активен
+	// MIG-7: Инициализация Re-enable Scheduler
 	var reenableScheduler *enforcement.Scheduler
 	if cfg.RemnawaveBaseURL != "" && cfg.RemnawaveAPIToken != "" {
-		// Real Remnawave client будет создан в MIG-7 при замене noop enforcer
-		log.Println("⚠️  Remnawave scheduler skipped: noop enforcer active (MIG-6)")
+		// Создаём scheduler с тем же Remnawave client
+		remnawaveClient := remnawave.NewClient(
+			cfg.RemnawaveBaseURL,
+			cfg.RemnawaveAPIToken,
+			cfg.RemnawaveTimeoutSeconds,
+			cfg.UserIDUUIDCacheTTLHours,
+			redisStore.GetClient(),
+		)
+		reenableScheduler = enforcement.NewScheduler(
+			remnawaveClient,
+			redisStore,
+			time.Duration(cfg.ReenableTickSeconds)*time.Second,
+			cfg.ReenableBatchSize,
+		)
+		log.Printf("✅ Re-enable Scheduler инициализирован (tick: %ds, batch: %d)",
+			cfg.ReenableTickSeconds, cfg.ReenableBatchSize)
 	}
 
 	// Сообщаем WaitGroup, сколько горутин будем запускать

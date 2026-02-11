@@ -2,8 +2,6 @@ package processor
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"log"
@@ -18,6 +16,7 @@ import (
 	"observer_service/internal/services/publisher"
 	"observer_service/internal/services/scoring"
 	"observer_service/internal/services/storage"
+	"strconv"
 	"sync"
 	"time"
 )
@@ -250,23 +249,19 @@ func (p *LogProcessor) processEntryByIP(ctx context.Context, entry models.LogEnt
 			entry.UserEmail, debugMarker, entry.SourceIP, res.CurrentCount, userIPLimit)
 	}
 
-	if res.StatusCode == 1 { // Лимит превышен, нужна блокировка
+	if res.StatusCode == 1 { // Лимит превышен, enforcement
 		log.Printf("ПРЕВЫШЕНИЕ ЛИМИТА IP%s: Пользователь %s, IP-адресов: %d/%d",
 			debugMarker, entry.UserEmail, res.CurrentCount, userIPLimit)
 
-		ipsToBlock := p.filterExcludedIPs(res.AllUserItems, entry.UserEmail)
+		// MIG-7: User-level enforcement вместо IP-blocking
+		reason := fmt.Sprintf("ip_limit_exceeded: %d/%d IPs", res.CurrentCount, userIPLimit)
+		score := 85 // default score для IP limit
 
-		if len(ipsToBlock) > 0 {
-			if err := p.publishBlockEvent(ipsToBlock, p.cfg.BlockDuration); err != nil {
-				log.Printf("Ошибка отправки сообщения о блокировке: %v", err)
-			} else {
-				log.Printf("Сообщение о блокировке %d IP-адресов для %s%s отправлено", len(ipsToBlock), entry.UserEmail, debugMarker)
-				p.enqueueSideEffectTask(func(ctx context.Context) {
-					p.scheduleIPsClear(ctx, entry.UserEmail)
-				})
-			}
+		if err := p.disableUser(ctx, entry.UserEmail, reason, score); err != nil {
+			log.Printf("Ошибка enforcement для %s: %v", entry.UserEmail, err)
 		}
 
+		// Webhook alert как side-effect
 		ipCount := int(res.CurrentCount)
 		alertPayload := models.AlertPayload{
 			UserIdentifier:   entry.UserEmail,
@@ -312,30 +307,25 @@ func (p *LogProcessor) processEntryBySubnet(ctx context.Context, entry models.Lo
 			entry.UserEmail, debugMarker, subnetStr, res.CurrentCount, userSubnetLimit)
 	}
 
-	if res.StatusCode == 1 { // Лимит превышен, нужна блокировка
+	if res.StatusCode == 1 { // Лимит превышен, enforcement
 		log.Printf("ПРЕВЫШЕНИЕ ЛИМИТА ПОДСЕТЕЙ%s: Пользователь %s, подсетей: %d/%d",
 			debugMarker, entry.UserEmail, res.CurrentCount, userSubnetLimit)
 
-		// Фильтруем подсети из белого списка перед блокировкой
-		subnetsToBlock := p.filterExcludedSubnets(res.AllUserItems, entry.UserEmail)
+		// MIG-7: User-level enforcement
+		reason := fmt.Sprintf("subnet_limit_exceeded: %d/%d subnets", res.CurrentCount, userSubnetLimit)
+		score := 85
 
-		if len(subnetsToBlock) > 0 {
-			if err := p.publishBlockEvent(subnetsToBlock, p.cfg.BlockDuration); err != nil {
-				log.Printf("Ошибка отправки сообщения о блокировке подсетей: %v", err)
-			} else {
-				log.Printf("Сообщение о блокировке %d подсетей для %s%s отправлено", len(subnetsToBlock), entry.UserEmail, debugMarker)
-				p.enqueueSideEffectTask(func(ctx context.Context) {
-					p.scheduleSubnetsClear(ctx, entry.UserEmail)
-				})
-			}
+		if err := p.disableUser(ctx, entry.UserEmail, reason, score); err != nil {
+			log.Printf("Ошибка enforcement для %s: %v", entry.UserEmail, err)
 		}
 
+		// Webhook alert
 		subnetCount := int(res.CurrentCount)
 		alertPayload := models.AlertPayload{
 			UserIdentifier:   entry.UserEmail,
 			DetectedIPsCount: &subnetCount,
 			Limit:            userSubnetLimit,
-			AllUserIPs:       res.AllUserItems, // В алерт отправляем все подсети, даже исключенные
+			AllUserIPs:       res.AllUserItems,
 			BlockDuration:    p.cfg.BlockDuration,
 			ViolationType:    "subnet_limit_exceeded",
 		}
@@ -550,34 +540,9 @@ func (p *LogProcessor) processEntryByASN(ctx context.Context, entry models.LogEn
 		}
 	}
 
-	if res.StatusCode == 1 { // Лимит превышен, нужна блокировка
+	if res.StatusCode == 1 { // Лимит превышен, enforcement
 		log.Printf("⚠️  ПРЕВЫШЕНИЕ ЛИМИТА %s%s: Пользователь %s, кол-во: %d/%d",
 			identifierType, debugMarker, entry.UserEmail, res.CurrentCount, userASNLimit)
-
-		// Собираем все IP-адреса для блокировки
-		// Передаём текущий IP чтобы гарантировать его включение даже если Redis ещё не обновился
-		ipsToBlock := p.collectIPsForASNBlock(ctx, entry.UserEmail, res.AllUserItems, entry.SourceIP)
-
-		// Фильтруем исключенные подсети/IP
-		if identifierType == "Subnet" {
-			ipsToBlock = p.filterExcludedSubnets(ipsToBlock, entry.UserEmail)
-		} else {
-			ipsToBlock = p.filterExcludedIPs(ipsToBlock, entry.UserEmail)
-		}
-
-		if len(ipsToBlock) > 0 {
-			if err := p.publishBlockEvent(ipsToBlock, p.cfg.BlockDuration); err != nil {
-				log.Printf("Ошибка отправки сообщения о блокировке: %v", err)
-			} else {
-				log.Printf("✅ Сообщение о блокировке %d элементов для %s%s отправлено (тип: %s)",
-					len(ipsToBlock), entry.UserEmail, debugMarker, identifierType)
-				p.enqueueSideEffectTask(func(ctx context.Context) {
-					p.scheduleASNClear(ctx, entry.UserEmail)
-				})
-			}
-		} else {
-			log.Printf("⚠️  Все элементы для %s находятся в белом списке, блокировка не требуется", entry.UserEmail)
-		}
 
 		// Формируем алерт
 		violationType := "asn_limit_exceeded"
@@ -635,6 +600,27 @@ func (p *LogProcessor) processEntryByASN(ctx context.Context, entry models.LogEn
 			subnetCount := int(res.CurrentCount)
 			alertPayload.DetectedIPsCount = &subnetCount
 			alertPayload.AllUserIPs = res.AllUserItems
+		}
+
+		// MIG-7: User-level enforcement (до отправки alert)
+		var enfScore int
+		var enfReason string
+
+		if identifierType == "ASN" {
+			enfReason = fmt.Sprintf("asn_limit_exceeded: %d/%d ASNs", res.CurrentCount, userASNLimit)
+			// Используем violationScore если есть
+			if alertPayload.Score != nil {
+				enfScore = int(*alertPayload.Score)
+			} else {
+				enfScore = 85
+			}
+		} else {
+			enfReason = fmt.Sprintf("subnet_limit_exceeded_fallback: %d/%d", res.CurrentCount, userASNLimit)
+			enfScore = 85
+		}
+
+		if err := p.disableUser(ctx, entry.UserEmail, enfReason, enfScore); err != nil {
+			log.Printf("Ошибка enforcement для %s: %v", entry.UserEmail, err)
 		}
 
 		p.enqueueSideEffectTask(func(ctx context.Context) {
@@ -776,55 +762,52 @@ func (p *LogProcessor) collectIPsForASNBlock(ctx context.Context, email string, 
 }
 
 // generateEventID возвращает 16-байтовый hex-идентификатор события из crypto/rand.
-func generateEventID() string {
-	var b [16]byte
-	if _, err := rand.Read(b[:]); err != nil {
-		// crypto/rand failure — крайне редкий случай, fallback на timestamp
-		return fmt.Sprintf("fallback-%d", time.Now().UnixNano())
+// --- MIG-7: User-level enforcement helpers ---
+
+// parseInternalID парсит LogEntry.UserEmail как internal numeric ID.
+func parseInternalID(userEmail string) (int64, error) {
+	id, err := strconv.ParseInt(userEmail, 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("invalid user_email (not numeric): %q", userEmail)
 	}
-	return hex.EncodeToString(b[:])
+	return id, nil
 }
 
-// publishBlockEvent разбивает список IP на чанки по cfg.MaxIPsPerBlockEvent и
-// публикует каждый чанок как отдельное BlockMessage.  Если IP помещаются в один
-// чанок — поля EventID/Chunk* не добавляются (wire-совместимость со старым форматом).
-func (p *LogProcessor) publishBlockEvent(ips []string, duration string) error {
-	chunkSize := p.cfg.MaxIPsPerBlockEvent
-	if chunkSize <= 0 {
-		chunkSize = 500
+// parseBlockDuration парсит строку duration (например "5m") в time.Duration.
+func parseBlockDuration(durationStr string) (time.Duration, error) {
+	dur, err := time.ParseDuration(durationStr)
+	if err != nil {
+		return 0, fmt.Errorf("invalid block duration %q: %w", durationStr, err)
+	}
+	return dur, nil
+}
+
+// disableUser выполняет user-level enforcement через Remnawave API.
+// Парсит internal ID, вызывает enforcer, логирует результат.
+func (p *LogProcessor) disableUser(ctx context.Context, userEmail string, reason string, score int) error {
+	// Парсим internal ID
+	internalID, err := parseInternalID(userEmail)
+	if err != nil {
+		metrics.RejectedRequestsTotal.Add(1)
+		return err
 	}
 
-	// Один чанок — старый формат без обёртки
-	if len(ips) <= chunkSize {
-		return p.publisher.PublishBlockMessage(models.BlockMessage{
-			IPs:      ips,
-			Duration: duration,
-		})
+	// Парсим duration
+	duration, err := parseBlockDuration(p.cfg.BlockDuration)
+	if err != nil {
+		log.Printf("Warning: invalid BlockDuration config %q, using default 5m", p.cfg.BlockDuration)
+		duration = 5 * time.Minute
 	}
 
-	// Несколько чанков — добавляем event envelope
-	eventID := generateEventID()
-	total := (len(ips) + chunkSize - 1) / chunkSize
+	// Вызываем enforcer (с таймаутом)
+	enfCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
 
-	for i := 0; i < total; i++ {
-		start := i * chunkSize
-		end := start + chunkSize
-		if end > len(ips) {
-			end = len(ips)
-		}
-		idx := i
-		msg := models.BlockMessage{
-			IPs:           ips[start:end],
-			Duration:      duration,
-			EventID:       eventID,
-			ChunkIndex:    &idx,
-			ChunkTotal:    &total,
-			SchemaVersion: 2,
-		}
-		if err := p.publisher.PublishBlockMessage(msg); err != nil {
-			return fmt.Errorf("chunk %d/%d (event %s): %w", i+1, total, eventID, err)
-		}
+	if err := p.enforcer.DisableTempByInternalID(enfCtx, internalID, duration, reason, score); err != nil {
+		return fmt.Errorf("disable user %d: %w", internalID, err)
 	}
+
+	log.Printf("✅ User %d disabled for %v (reason: %s, score: %d)", internalID, duration, reason, score)
 	return nil
 }
 
