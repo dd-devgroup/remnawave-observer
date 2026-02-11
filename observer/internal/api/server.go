@@ -12,7 +12,6 @@ import (
 	"observer_service/internal/config"
 	"observer_service/internal/metrics"
 	"observer_service/internal/models"
-	"observer_service/internal/services/publisher"
 	"observer_service/internal/services/storage"
 	"time"
 
@@ -25,27 +24,25 @@ type EntryEnqueuer interface {
 }
 
 type Server struct {
-	router    *gin.Engine
-	enqueuer  EntryEnqueuer
-	storage   storage.IPStorage
-	publisher publisher.EventPublisher
-	port      string
-	cfg       *config.Config
+	router   *gin.Engine
+	enqueuer EntryEnqueuer
+	storage  storage.IPStorage
+	port     string
+	cfg      *config.Config
 }
 
-func NewServer(port string, enqueuer EntryEnqueuer, storage storage.IPStorage, pub publisher.EventPublisher, cfg *config.Config) *Server {
+func NewServer(port string, enqueuer EntryEnqueuer, storage storage.IPStorage, cfg *config.Config) *Server {
 	gin.SetMode(gin.ReleaseMode)
 	router := gin.Default()
 	router.Use(gin.Logger())
 	router.Use(gin.Recovery())
 
 	s := &Server{
-		router:    router,
-		enqueuer:  enqueuer,
-		storage:   storage,
-		publisher: pub,
-		port:      port,
-		cfg:       cfg,
+		router:   router,
+		enqueuer: enqueuer,
+		storage:  storage,
+		port:     port,
+		cfg:      cfg,
 	}
 
 	s.setupRoutes()
@@ -157,18 +154,12 @@ func (s *Server) handleHealthCheck(c *gin.Context) {
 
 	status := http.StatusOK
 	response := gin.H{
-		"redis_connection":    "ok",
-		"rabbitmq_connection": "ok",
+		"redis_connection": "ok",
 	}
 
 	if err := s.storage.Ping(ctx); err != nil {
 		status = http.StatusServiceUnavailable
 		response["redis_connection"] = "failed"
-	}
-
-	if err := s.publisher.Ping(); err != nil {
-		status = http.StatusServiceUnavailable
-		response["rabbitmq_connection"] = "failed"
 	}
 
 	if status == http.StatusOK {

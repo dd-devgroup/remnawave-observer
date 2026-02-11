@@ -143,7 +143,7 @@ func main() {
 	}
 
 	poolMonitor := monitor.NewPoolMonitor(redisStore, cfg, geoService)
-	apiServer := api.NewServer(cfg.Port, logProcessor, redisStore, rabbitPublisher, cfg)
+	apiServer := api.NewServer(cfg.Port, logProcessor, redisStore, cfg)
 
 	// Инициализация CAIDA AS2Org (опционально, синхронная начальная загрузка)
 	var as2orgLoader *geodata.AS2OrgLoader
