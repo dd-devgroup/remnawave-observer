@@ -8,7 +8,6 @@ services:
     volumes:
       - ./data:/app/data # Данные для записи (unknown_providers.json, backups) - read-write
       - ./config:/app/config:ro # Конфиги Anti-Abuse (agglomerations.yaml, providers.yaml) - read-only
-      - ./geodata:/app/geodata # Geodata для n8n updater (caida_as2org, geoip, iptoasn)
     env_file:
       - .env
       - .env.antiabuse # Переменные для GeoIP и Scoring (опционально)
