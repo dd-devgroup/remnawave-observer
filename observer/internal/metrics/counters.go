@@ -21,6 +21,14 @@ var (
 	GeoIPLookupTimeout     atomic.Int64
 	SideEffectTimeoutCount atomic.Int64
 	ScanPartialRunsCount   atomic.Int64
+
+	// Remnawave Enforcement метрики (MIG-5)
+	RemnawaveDisableOk   atomic.Int64
+	RemnawaveDisableFail atomic.Int64
+	RemnawaveEnableOk    atomic.Int64
+	RemnawaveEnableFail  atomic.Int64
+	UUIDCacheHit         atomic.Int64
+	UUIDCacheMiss        atomic.Int64
 )
 
 // StartDumper запускает периодический сброс счётчиков в лог.
@@ -32,11 +40,14 @@ func StartDumper(ctx context.Context, wg *sync.WaitGroup, interval time.Duration
 	for {
 		select {
 		case <-ticker.C:
-			log.Printf("[metrics] requests_total=%d rejected=%d rabbit_pub_ok=%d rabbit_pub_fail=%d rabbit_pub_retry=%d geoip_ok=%d geoip_fail=%d geoip_timeout=%d sideeffect_timeout=%d scan_partial=%d",
+			log.Printf("[metrics] requests_total=%d rejected=%d rabbit_pub_ok=%d rabbit_pub_fail=%d rabbit_pub_retry=%d geoip_ok=%d geoip_fail=%d geoip_timeout=%d sideeffect_timeout=%d scan_partial=%d rw_disable_ok=%d rw_disable_fail=%d rw_enable_ok=%d rw_enable_fail=%d uuid_cache_hit=%d uuid_cache_miss=%d",
 				RequestsTotal.Load(), RejectedRequestsTotal.Load(),
 				RabbitPublishSuccess.Load(), RabbitPublishFail.Load(), RabbitPublishRetry.Load(),
 				GeoIPLookupSuccess.Load(), GeoIPLookupFail.Load(), GeoIPLookupTimeout.Load(),
-				SideEffectTimeoutCount.Load(), ScanPartialRunsCount.Load())
+				SideEffectTimeoutCount.Load(), ScanPartialRunsCount.Load(),
+				RemnawaveDisableOk.Load(), RemnawaveDisableFail.Load(),
+				RemnawaveEnableOk.Load(), RemnawaveEnableFail.Load(),
+				UUIDCacheHit.Load(), UUIDCacheMiss.Load())
 		case <-ctx.Done():
 			return
 		}
