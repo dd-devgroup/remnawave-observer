@@ -1,0 +1,356 @@
+# Provider types and their risk modifiers
+# Higher modifier = more suspicious
+provider_types:
+  mobile:
+    modifier: 0.3
+    description: 'Mobile pools (CGNAT, LTE)'
+  mobile_isp:
+    modifier: 0.5
+    description: 'Mobile operators'
+  fixed:
+    modifier: 0.8
+    description: 'Fixed broadband'
+  isp:
+    modifier: 1.0
+    description: 'Major ISPs'
+  regional_isp:
+    modifier: 1.0
+    description: 'Regional providers'
+  business:
+    modifier: 1.2
+    description: 'Corporate networks'
+  infrastructure:
+    modifier: 1.3
+    description: 'Backbone infrastructure'
+  hosting:
+    modifier: 1.5
+    description: 'Hosting and data centers'
+  vpn_proxy:
+    modifier: 1.8
+    description: 'VPN and proxy services'
+
+# Keywords for classification (checked in organization name)
+# Order matters - first match determines the type
+keywords:
+  mobile:
+    - cgnat
+    - cg-nat
+    - lte pool
+    - 4g pool
+    - 5g pool
+    - 6g pool
+    - gprs
+    - mobile pool
+    - mobile network
+    - cellular
+
+  mobile_isp:
+    # Russia
+    - megafon
+    - mts
+    - beeline
+    - tele2
+    - yota
+    - motiv
+    - smarts
+    - baykal westcom
+    - kuban gsm
+    # Ukraine
+    - kyivstar
+    - vodafone ua
+    - lifecell
+    - ukrtelecom mobile
+    - intertelecom
+    - 3mob
+    # Kazakhstan
+    - kcell
+    - beeline kz
+    - altel
+    - activ
+    - tele2 kz
+    # Belarus
+    - a1 belarus
+    - velcom
+    - mts belarus
+    - life belarus
+    # Uzbekistan
+    - ucell
+    - beeline uz
+    - uzmobile
+    - humans
+    - perfectum mobile
+    # Azerbaijan
+    - azercell
+    - bakcell
+    - nar mobile
+    # Georgia
+    - magticom
+    - geocell
+    - silknet mobile
+    - veon georgia
+    # Armenia
+    - ucom
+    - viva-mts
+    - team telecom armenia
+    # Moldova
+    - orange moldova
+    - moldcell
+    - unite
+    # Kyrgyzstan
+    - megacom
+    - beeline kg
+    - o! kyrgyzstan
+    - fonex
+    # Tajikistan
+    - tcell
+    - megafon tajikistan
+    - beeline tj
+    - babilon-mobile
+
+  isp:
+    # Russia
+    - rostelecom
+    - ttk
+    - transtelecom
+    - er-telecom
+    - dom.ru
+    - akado
+    - netbynet
+    - lanport
+    - enforta
+    - convex
+    - sumtel
+    - cortex
+    - zhivoe tv
+    - intersvyaz
+    - svaytelecom
+    - telenet
+    - deltalink
+    - sibseti
+    - comstar
+    - flex
+    - quantum
+    # Ukraine
+    - ukrtelecom
+    - triolan
+    - volia
+    - datagroup
+    - lanet
+    - fregat
+    - wnet
+    - kyivnet
+    - uanet
+    - flynet
+    - omega
+    # Kazakhstan
+    - kazakhtelecom
+    - kcell fixed
+    - transtelecom kz
+    - almatvkabel
+    - astel
+    # Belarus
+    - beltelecom
+    - atlant telecom
+    - cosmos tv
+    # Uzbekistan
+    - uzbektelecom
+    - turontelecom
+    - sarkor telecom
+    - easttelekom
+    - sharq telecom
+    # Azerbaijan
+    - aztelekom
+    - azeronline
+    - delta telecom
+    # Georgia
+    - silknet
+    - caucasus online
+    - globalnet
+    # Armenia
+    - rostelecom armenia
+    - ucom fixed
+    - arminco
+    # Moldova
+    - moldtelecom
+    - starnet
+    - sun communications
+
+  regional_isp:
+    - regional
+    - municipal
+    - city net
+    - town network
+    - local isp
+    - oblast telecom
+    - krai telecom
+
+  hosting:
+    # Global
+    - digitalocean
+    - amazon
+    - aws
+    - google cloud
+    - gcp
+    - azure
+    - microsoft corporation
+    - hetzner
+    - ovh
+    - linode
+    - vultr
+    - cloudflare
+    - akamai
+    - leaseweb
+    - contabo
+    - scaleway
+    - rackspace
+    - choopa
+    - serverius
+    - hostkey
+    - quadranet
+    - psychz
+    - colocrossing
+    # Russia
+    - selectel
+    - timeweb
+    - beget
+    - vdsina
+    - firstvds
+    - reg.ru
+    - nic.ru
+    - masterhost
+    - ruvds
+    - vscale
+    - infobox
+    - dataline
+    - linxdatacenter
+    - marosnet
+    - severen telecom
+    - hostland
+    - adminvps
+    - vpsville
+    # Ukraine
+    - ukraine.com.ua
+    - hosting ukraine
+    - cityhost
+    - tuthost
+    - freehost
+    - hostpro
+    # Kazakhstan
+    - ps.kz
+    - hoster.kz
+    - vps.kz
+    - hosting.kz
+    # Other CIS
+    - hosted.by
+    - hoster.by
+    - hoster.uz
+
+  vpn_proxy:
+    - vpn
+    - proxy
+    - tunnel
+    - anonymizer
+    - nordvpn
+    - expressvpn
+    - surfshark
+    - mullvad
+    - protonvpn
+    - private internet access
+    - cyberghost
+    - ipvanish
+    - purevpn
+    - windscribe
+    - tunnelbear
+    - hide.me
+    - tor exit
+    - tor relay
+    - tor node
+    - exitnode
+    - relay node
+    - vpngate
+    - opera vpn
+    - m247
+    - m247 ltd
+    - datacamp limited
+    - shinjiru
+    - securedragon
+    - privacy services
+    - anonymous proxy
+    - residential proxy
+    - datacenter proxy
+
+  business:
+    # Tech companies
+    - yandex
+    - mail.ru
+    - vk company
+    - vkontakte
+    - odnoklassniki
+    - rambler
+    - kaspersky
+    - dr.web
+    - eset
+    - abbyy
+    # Banks
+    - sberbank
+    - vtb
+    - alfabank
+    - raiffeisen
+    - gazprombank
+    - tinkoff
+    - rosbank
+    - sovcombank
+    # Energy
+    - gazprom
+    - rosneft
+    - lukoil
+    - tatneft
+    - surgutneftegaz
+    - transneft
+    # Retail
+    - magnit
+    - x5 retail
+    - metro
+    - auchan
+    - leroy merlin
+    - ozon
+    - wildberries
+    # Government
+    - government
+    - ministry
+    - administration
+    - municipal
+    - state institution
+    # Corporate
+    - corporate
+    - enterprise
+    - closed joint
+    - pjsc
+    - ojsc
+    - limited liability
+
+  infrastructure:
+    - backbone
+    - transit
+    - ix
+    - internet exchange
+    - peering
+    - tier-1
+    - tier-2
+    - tier1
+    - tier2
+    - uplink
+    - core network
+    - bgp
+    - route server
+    - msk-ix
+    - dataix
+    - eurasia peering
+    - hurricane electric
+    - cogent
+    - ntt communications
+    - telia carrier
+    - telecom italia sparkle
+    - level 3
+    - centurylink
+    - gtt communications

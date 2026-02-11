@@ -12,11 +12,15 @@ import (
 
 	"observer_service/internal/api"
 	"observer_service/internal/config"
+	"observer_service/internal/metrics"
 	"observer_service/internal/monitor"
 	"observer_service/internal/processor"
 	"observer_service/internal/services/alerter"
 	"observer_service/internal/services/asn"
+	"observer_service/internal/services/geodata"
+	"observer_service/internal/services/geoip"
 	"observer_service/internal/services/publisher"
+	"observer_service/internal/services/scoring"
 	"observer_service/internal/services/storage"
 )
 
@@ -35,8 +39,11 @@ func main() {
 		log.Fatalf("Критическая ошибка: не удалось подключиться к Redis: %v", err)
 	}
 	defer redisStore.Close()
+	redisStore.SetScanMaxKeys(cfg.ScanMaxKeys)
+	redisStore.SetScanCount(cfg.ScanCount)
+	redisStore.SetScanTimeBudget(time.Duration(cfg.ScanTimeBudgetSeconds) * time.Second)
 
-	rabbitPublisher, err := publisher.NewRabbitMQPublisher(cfg.RabbitMQURL, cfg.BlockingExchangeName)
+	rabbitPublisher, err := publisher.NewRabbitMQPublisher(cfg.RabbitMQURL, cfg.BlockingExchangeName, cfg.PublisherPoolSize, cfg.RabbitPublishMaxRetries, cfg.RabbitPublishBackoffBaseMs, cfg.RabbitPublishBackoffMaxMs, cfg.PublishConfirmTimeoutMs)
 	if err != nil {
 		log.Fatalf("Критическая ошибка: не удалось подключиться к RabbitMQ: %v", err)
 	}
@@ -47,27 +54,140 @@ func main() {
 	// Инициализация ASN lookup сервиса (опционально)
 	var asnLookup *asn.ASNLookup
 	if cfg.DetectByASN {
-		asnLookup, err = asn.NewASNLookup(cfg.ASNDatabasePath)
+		asnLookup, err = asn.NewASNLookup(cfg.IPtoASNDownloadURL, cfg.IPtoASNUpdateInterval)
 		if err != nil {
 			log.Fatalf("Критическая ошибка: не удалось загрузить ASN базу: %v", err)
 		}
 		defer asnLookup.Close()
-		log.Println("✅ ASN режим активирован и готов к работе")
+		log.Printf("✅ ASN режим активирован (записей: %d)", asnLookup.Count())
 	}
 
-	logProcessor := processor.NewLogProcessor(redisStore, rabbitPublisher, webhookAlerter, cfg, asnLookup)
-	poolMonitor := monitor.NewPoolMonitor(redisStore, cfg)
-	apiServer := api.NewServer(cfg.Port, logProcessor, redisStore, rabbitPublisher)
+	// Инициализация GeoData загрузчика (опционально)
+	var geoDataLoader *geodata.GeoDataLoader
+	var geoService *geoip.GeoIPService
+	var geoAnalyzer *geoip.GeoAnalyzer
+	var asnClassifier *asn.ASNClassifier
+	var scorer *scoring.Scorer
 
-	// Сообщаем WaitGroup, что будем ждать три горутины
-	wg.Add(3)
+	if cfg.GeoIPEnabled || cfg.ScoringEnabled {
+		// Инициализируем логирование неизвестных провайдеров
+		geodata.InitUnknownProvidersLog(cfg.GeoDataDataDir, cfg.UnknownProvidersLogEnabled)
+
+		// Загружаем конфигурации провайдеров и агломераций
+		geoDataLoader, err = geodata.NewGeoDataLoader(cfg.GeoDataConfigDir, cfg.GeoDataDataDir)
+		if err != nil {
+			log.Fatalf("Критическая ошибка: не удалось загрузить географические данные: %v", err)
+		}
+		log.Printf("✅ GeoData загружен (агломерации: %d)", len(geoDataLoader.GetAgglomerations()))
+
+		// Инициализируем GeoIP сервис если ASN lookup доступен
+		if asnLookup != nil {
+			geoService = geoip.NewGeoIPService(asnLookup, redisStore.GetClient(), cfg.GeoIPCacheTTL, cfg.GeoIPTimeout, cfg.GeoIPRateIntervalMs)
+			geoAnalyzer = geoip.NewGeoAnalyzer(geoService, geoDataLoader)
+			log.Printf("✅ GeoIP сервис инициализирован (cache TTL: %v)", cfg.GeoIPCacheTTL)
+		}
+
+		// Инициализируем классификатор провайдеров
+		asnClassifier = asn.NewASNClassifier(geoDataLoader)
+		log.Printf("✅ ASN классификатор инициализирован")
+
+		// Инициализируем систему скоринга
+		if cfg.ScoringEnabled {
+			thresholds := scoring.ScoreThresholds{
+				MonitorThreshold:   30,
+				WarnThreshold:      cfg.ScoreThresholdWarn,
+				SoftBlockThreshold: 70,
+				BlockThreshold:     cfg.ScoreThresholdBlock,
+			}
+			scorer = scoring.NewScorer(thresholds)
+			log.Printf("✅ Система скоринга инициализирована (warn: %.1f, block: %.1f)",
+				cfg.ScoreThresholdWarn, cfg.ScoreThresholdBlock)
+		}
+	}
+
+	logProcessor := processor.NewLogProcessor(
+		redisStore,
+		rabbitPublisher,
+		webhookAlerter,
+		cfg,
+		asnLookup,
+		geoService,
+		geoAnalyzer,
+		asnClassifier,
+		scorer,
+	)
+
+	// Cleanup для GeoIP сервиса
+	if geoService != nil {
+		defer geoService.Close()
+	}
+
+	poolMonitor := monitor.NewPoolMonitor(redisStore, cfg, geoService)
+	apiServer := api.NewServer(cfg.Port, logProcessor, redisStore, rabbitPublisher, cfg)
+
+	// Инициализация CAIDA AS2Org (опционально, синхронная начальная загрузка)
+	var as2orgLoader *geodata.AS2OrgLoader
+	if cfg.CAIDAEnabled && cfg.GeoIPEnabled {
+		as2orgLoader = geodata.NewAS2OrgLoader(cfg.GeoDataDataDir, cfg.CAIDADownloadURL, time.Duration(cfg.CAIDARefreshHours)*time.Hour)
+		if err := as2orgLoader.InitialLoad(); err != nil {
+			log.Printf("Warning: CAIDA initial load failed: %v (работаем без CAIDA)", err)
+			as2orgLoader = nil
+		} else {
+			log.Printf("✅ CAIDA AS2Org загружен (%d записей, обновление каждые %dh)", as2orgLoader.Count(), cfg.CAIDARefreshHours)
+		}
+	}
+
+	// Инициализация Auto-Learner (опционально)
+	var autoLearner *geodata.AutoLearner
+	if cfg.AutoLearningEnabled && geoDataLoader != nil {
+		autoLearner = geodata.NewAutoLearner(
+			geoDataLoader,
+			cfg.GeoDataConfigDir,
+			cfg.GeoDataDataDir,
+			cfg.AutoLearningInterval,
+			cfg.AutoLearningMinCount,
+			cfg.AutoLearningMinConfidence,
+			cfg.AutoLearningMaxAddsPerRun,
+			cfg.AutoLearningOutputFile,
+			as2orgLoader,
+		)
+		log.Printf("✅ Auto-Learner инициализирован")
+	}
+
+	// Сообщаем WaitGroup, сколько горутин будем запускать
+	goroutineCount := 4 // poolMonitor + workerPool + sideEffectPool + metricsDumper
+	if autoLearner != nil {
+		goroutineCount++
+	}
+	if as2orgLoader != nil {
+		goroutineCount++ // RunRefresh
+	}
+
+	wg.Add(goroutineCount)
 	go poolMonitor.Run(ctx, &wg)
 	go logProcessor.StartWorkerPool(ctx, &wg)
-	go logProcessor.StartSideEffectWorkerPool(ctx, &wg) // Запускаем новый пул воркеров
+	go logProcessor.StartSideEffectWorkerPool(ctx, &wg)
+	go metrics.StartDumper(ctx, &wg, 60*time.Second)
+
+	// Запускаем Auto-Learner если включен
+	if autoLearner != nil {
+		go autoLearner.Run(ctx, &wg)
+	}
+
+	// Фоновое обновление CAIDA
+	if as2orgLoader != nil {
+		go as2orgLoader.RunRefresh(ctx, &wg)
+	}
 
 	srv := &http.Server{
 		Addr:    ":" + cfg.Port,
 		Handler: apiServer.GetRouter(), // Получаем роутер из нашего api.Server
+		// Таймауты для защиты от slowloris и других DoS атак
+		ReadHeaderTimeout: time.Duration(cfg.HTTPReadHeaderTimeoutSeconds) * time.Second,
+		ReadTimeout:       time.Duration(cfg.HTTPReadTimeoutSeconds) * time.Second,
+		WriteTimeout:      time.Duration(cfg.HTTPWriteTimeoutSeconds) * time.Second,
+		IdleTimeout:       time.Duration(cfg.HTTPIdleTimeoutSeconds) * time.Second,
+		MaxHeaderBytes:    cfg.HTTPMaxHeaderBytes,
 	}
 
 	go func() {
@@ -96,6 +216,12 @@ func main() {
 
 	log.Println("Ожидание завершения фоновых процессов...")
 	wg.Wait()
+
+	// Сохраняем лог неизвестных провайдеров перед выходом
+	if cfg.UnknownProvidersLogEnabled {
+		log.Println("Сохранение лога неизвестных провайдеров...")
+		geodata.FlushUnknownProvidersLog()
+	}
 
 	log.Println("Все фоновые процессы остановлены. Сервис успешно остановлен.")
 }

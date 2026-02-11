@@ -13,7 +13,12 @@ local userEmail = string.sub(KEYS[1], 14)
 local subnetTtlKey = 'subnet_ttl:' .. userEmail .. ':' .. ARGV[1]
 redis.call('SETEX', subnetTtlKey, ARGV[2], '1')
 
-redis.call('EXPIRE', KEYS[1], ARGV[2])
+-- Устанавливаем TTL множества только при первом создании.
+-- Последующие добавления подсетей НЕ сбрасывают TTL.
+local currentSetTTL = redis.call('TTL', KEYS[1])
+if currentSetTTL < 0 then
+    redis.call('EXPIRE', KEYS[1], ARGV[2])
+end
 
 local currentSubnetCount = redis.call('SCARD', KEYS[1])
 local subnetLimit = tonumber(ARGV[3])

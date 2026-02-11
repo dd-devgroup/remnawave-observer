@@ -7,6 +7,7 @@ import (
 	"math"
 	"observer_service/internal/config"
 	"observer_service/internal/models"
+	"observer_service/internal/services/geoip"
 	"observer_service/internal/services/storage"
 	"sort"
 	"strings"
@@ -14,17 +15,27 @@ import (
 	"time"
 )
 
+type geoCacheEntry struct {
+	loc *geoip.GeoLocation
+	err error
+}
+
 // PoolMonitor выполняет периодический мониторинг пулов IP.
 type PoolMonitor struct {
-	storage storage.IPStorage
-	cfg     *config.Config
+	storage       storage.IPStorage
+	cfg           *config.Config
+	geoService    *geoip.GeoIPService
+	geoCache      map[string]*geoCacheEntry
+	geoCacheMu    sync.Mutex
+	geoChecksLeft int
 }
 
 // NewPoolMonitor создает новый экземпляр PoolMonitor.
-func NewPoolMonitor(s storage.IPStorage, cfg *config.Config) *PoolMonitor {
+func NewPoolMonitor(s storage.IPStorage, cfg *config.Config, geoService *geoip.GeoIPService) *PoolMonitor {
 	return &PoolMonitor{
-		storage: s,
-		cfg:     cfg,
+		storage:     s,
+		cfg:         cfg,
+		geoService:  geoService,
 	}
 }
 
@@ -47,6 +58,12 @@ func (m *PoolMonitor) Run(ctx context.Context, wg *sync.WaitGroup) {
 }
 
 func (m *PoolMonitor) performMonitoring(ctx context.Context) {
+	// Сброс кэша и бюджета GeoIP проверок на этот цикл мониторинга
+	m.geoCacheMu.Lock()
+	m.geoCache = make(map[string]*geoCacheEntry)
+	m.geoChecksLeft = m.cfg.GeoIPMonitorMaxChecksPerRun
+	m.geoCacheMu.Unlock()
+
 	userEmails, err := m.storage.GetAllUserEmails(ctx)
 	if err != nil {
 		log.Printf("Ошибка мониторинга (GetAllUserEmails): %v", err)
@@ -75,8 +92,8 @@ func (m *PoolMonitor) performMonitoring(ctx context.Context) {
 		return allStats[i].IPCount > allStats[j].IPCount
 	})
 	m.printSummary(allStats)
-	m.printTopUsers(allStats)
-	m.printOverLimitUsers(allStats)
+	m.printTopUsers(ctx, allStats)
+	m.printOverLimitUsers(ctx, allStats)
 }
 
 func (m *PoolMonitor) getMonitoringModeName() string {
@@ -273,7 +290,241 @@ func (m *PoolMonitor) printSummary(stats []models.UserIPStats) {
 	}
 }
 
-func (m *PoolMonitor) printTopUsers(stats []models.UserIPStats) {
+func (m *PoolMonitor) printUserGeo(ctx context.Context, user models.UserIPStats, indent string) {
+	if !m.cfg.GeoIPEnabled || m.geoService == nil {
+		return
+	}
+
+	ips := m.collectUserIPs(user)
+	if len(ips) == 0 {
+		fmt.Printf("%s🌍 Гео: нет данных\n", indent)
+		return
+	}
+
+	countriesMap := make(map[string]bool)
+	citiesMap := make(map[string]bool)
+	locations := make([]*geoip.GeoLocation, 0, len(ips))
+	type ipGeo struct {
+		ip  string
+		loc *geoip.GeoLocation
+	}
+	ipRows := make([]ipGeo, 0, len(ips))
+
+	for _, ip := range ips {
+		loc, err := m.cachedLookup(ctx, ip)
+		if err != nil || loc == nil {
+			ipRows = append(ipRows, ipGeo{ip: ip, loc: nil})
+			continue
+		}
+		ipRows = append(ipRows, ipGeo{ip: ip, loc: loc})
+		locations = append(locations, loc)
+		if loc.CountryCode != "" {
+			countriesMap[loc.CountryCode] = true
+		}
+		if loc.City != "" {
+			citiesMap[loc.City] = true
+		}
+	}
+
+	if len(locations) == 0 {
+		fmt.Printf("%s🌍 Гео: нет данных\n", indent)
+		return
+	}
+
+	countries := formatGeoList(mapKeysToSlice(countriesMap), 3)
+	cities := formatGeoList(mapKeysToSlice(citiesMap), 3)
+	maxDistance := maxDistanceKM(locations)
+
+	fmt.Printf("%s🌍 Гео: страны: %s, города: %s, max: %.0fкм\n",
+		indent, countries, cities, maxDistance)
+	fmt.Printf("%s   â””â”€ IP Ð³ÐµÐ¾:\n", indent)
+	for _, row := range ipRows {
+		if row.loc == nil {
+			fmt.Printf("%s      â€¢ %s -> Ð½ÐµÑ‚ Ð´Ð°Ð½Ð½Ñ‹Ñ…\n", indent, row.ip)
+			continue
+		}
+		country := row.loc.CountryCode
+		if country == "" {
+			country = "??"
+		}
+		city := row.loc.City
+		if city == "" {
+			city = "-"
+		}
+		fmt.Printf("%s      â€¢ %s -> %s, %s (%.2f, %.2f)\n",
+			indent, row.ip, country, city, row.loc.Latitude, row.loc.Longitude)
+	}
+}
+
+func (m *PoolMonitor) collectUserIPs(user models.UserIPStats) []string {
+	unique := make(map[string]struct{})
+	switch {
+	case m.cfg.DetectByASN:
+		for _, info := range user.ASNDetails {
+			for _, ip := range info.IPs {
+				if ip != "" {
+					unique[ip] = struct{}{}
+				}
+			}
+		}
+	case m.cfg.DetectBySubnet:
+		return []string{}
+	default:
+		for _, ip := range user.IPs {
+			if ip != "" {
+				unique[ip] = struct{}{}
+			}
+		}
+	}
+
+	ips := make([]string, 0, len(unique))
+	for ip := range unique {
+		ips = append(ips, ip)
+	}
+	sort.Strings(ips)
+	return ips
+}
+
+// cachedLookup выполняет GeoIP lookup с мемоизацией в рамках текущего цикла мониторинга.
+// Возвращает nil, nil когда бюджет проверок исчерпан.
+func (m *PoolMonitor) cachedLookup(ctx context.Context, ip string) (*geoip.GeoLocation, error) {
+	m.geoCacheMu.Lock()
+	if entry, ok := m.geoCache[ip]; ok {
+		m.geoCacheMu.Unlock()
+		return entry.loc, entry.err
+	}
+	if m.geoChecksLeft <= 0 {
+		m.geoCacheMu.Unlock()
+		return nil, nil
+	}
+	m.geoChecksLeft--
+	m.geoCacheMu.Unlock()
+
+	loc, err := m.geoService.Lookup(ctx, ip)
+
+	m.geoCacheMu.Lock()
+	m.geoCache[ip] = &geoCacheEntry{loc: loc, err: err}
+	m.geoCacheMu.Unlock()
+
+	return loc, err
+}
+
+type geoSummary struct {
+	countries   []string
+	cities      []string
+	maxDistance float64
+}
+
+func (m *PoolMonitor) buildUserGeo(ctx context.Context, user models.UserIPStats) (*geoSummary, map[string]*geoip.GeoLocation) {
+	if !m.cfg.GeoIPEnabled || m.geoService == nil {
+		return nil, nil
+	}
+
+	ips := m.collectUserIPs(user)
+	if len(ips) == 0 {
+		return nil, map[string]*geoip.GeoLocation{}
+	}
+
+	geoByIP := make(map[string]*geoip.GeoLocation, len(ips))
+	countriesMap := make(map[string]bool)
+	citiesMap := make(map[string]bool)
+	locations := make([]*geoip.GeoLocation, 0, len(ips))
+
+	for _, ip := range ips {
+		loc, err := m.cachedLookup(ctx, ip)
+		if err != nil || loc == nil {
+			geoByIP[ip] = nil
+			continue
+		}
+		geoByIP[ip] = loc
+		locations = append(locations, loc)
+		if loc.CountryCode != "" {
+			countriesMap[loc.CountryCode] = true
+		}
+		if loc.City != "" {
+			citiesMap[loc.City] = true
+		}
+	}
+
+	if len(locations) == 0 {
+		return nil, geoByIP
+	}
+
+	return &geoSummary{
+		countries:   mapKeysToSlice(countriesMap),
+		cities:      mapKeysToSlice(citiesMap),
+		maxDistance: maxDistanceKM(locations),
+	}, geoByIP
+}
+
+func formatIPWithGeo(ip string, loc *geoip.GeoLocation) string {
+	if loc == nil {
+		return fmt.Sprintf("%s -> нет данных", ip)
+	}
+	country := loc.CountryCode
+	if country == "" {
+		country = "??"
+	}
+	city := loc.City
+	if city == "" {
+		city = "-"
+	}
+	return fmt.Sprintf("%s -> %s, %s (%.2f, %.2f)", ip, country, city, loc.Latitude, loc.Longitude)
+}
+
+func formatIPsWithGeo(ips []string, geoByIP map[string]*geoip.GeoLocation) string {
+	if geoByIP == nil {
+		return strings.Join(ips, ", ")
+	}
+	formatted := make([]string, 0, len(ips))
+	for _, ip := range ips {
+		formatted = append(formatted, formatIPWithGeo(ip, geoByIP[ip]))
+	}
+	return strings.Join(formatted, ", ")
+}
+
+func formatGeoList(values []string, limit int) string {
+	if len(values) == 0 {
+		return "нет"
+	}
+	sort.Strings(values)
+	if len(values) <= limit {
+		return strings.Join(values, ", ")
+	}
+	return fmt.Sprintf("%s, +%d", strings.Join(values[:limit], ", "), len(values)-limit)
+}
+
+func mapKeysToSlice(m map[string]bool) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	return keys
+}
+
+func maxDistanceKM(locations []*geoip.GeoLocation) float64 {
+	if len(locations) < 2 {
+		return 0
+	}
+
+	maxDist := 0.0
+	for i := 0; i < len(locations); i++ {
+		for j := i + 1; j < len(locations); j++ {
+			loc1 := locations[i]
+			loc2 := locations[j]
+			if (loc1.Latitude == 0 && loc1.Longitude == 0) || (loc2.Latitude == 0 && loc2.Longitude == 0) {
+				continue
+			}
+			dist := geoip.HaversineDistance(loc1.Latitude, loc1.Longitude, loc2.Latitude, loc2.Longitude)
+			if dist > maxDist {
+				maxDist = dist
+			}
+		}
+	}
+	return maxDist
+}
+
+func (m *PoolMonitor) printTopUsers(ctx context.Context, stats []models.UserIPStats) {
 	var title, itemLabel, itemsLabel string
 	if m.cfg.DetectByASN {
 		title = "📈 ТОП ПОЛЬЗОВАТЕЛИ ПО КОЛИЧЕСТВУ ПРОВАЙДЕРОВ (ASN):"
@@ -298,10 +549,22 @@ func (m *PoolMonitor) printTopUsers(stats []models.UserIPStats) {
 		fmt.Printf("   %2d. %s %s%s\n", i+1, getStatusEmoji(user.Status), user.Email, getMarkers(user))
 		fmt.Printf("       %s: %d/%d | TTL: %.1f-%.1fh\n", itemLabel, user.IPCount, user.Limit, user.MinTTLHours, user.MaxTTLHours)
 		fmt.Printf("       %s: %s\n", itemsLabel, strings.Join(user.IPsWithTTL, ", "))
+		var geoSummary *geoSummary
+		var geoByIP map[string]*geoip.GeoLocation
+		if m.cfg.GeoIPEnabled && m.geoService != nil {
+			geoSummary, geoByIP = m.buildUserGeo(ctx, user)
+			if geoSummary != nil {
+				countries := formatGeoList(geoSummary.countries, 3)
+				cities := formatGeoList(geoSummary.cities, 3)
+				fmt.Printf("       🌍 Гео: страны: %s, города: %s\n", countries, cities)
+			} else {
+				fmt.Printf("       🌍 Гео: нет данных\n")
+			}
+		}
 
 		// Для ASN режима показываем детали IP под каждым провайдером
 		if m.cfg.DetectByASN && user.ASNDetails != nil && len(user.ASNDetails) > 0 {
-			fmt.Println("       └─ Детали IP по провайдерам:")
+			fmt.Println("       └─ Детали:")
 			asnKeys := make([]string, 0, len(user.ASNDetails))
 			for asn := range user.ASNDetails {
 				asnKeys = append(asnKeys, asn)
@@ -309,13 +572,13 @@ func (m *PoolMonitor) printTopUsers(stats []models.UserIPStats) {
 			sort.Strings(asnKeys)
 			for _, asn := range asnKeys {
 				info := user.ASNDetails[asn]
-				fmt.Printf("          • %s: %d IP -> %s\n", asn, len(info.IPs), strings.Join(info.IPs, ", "))
+				fmt.Printf("          • %s: %d IP -> %s\n", asn, len(info.IPs), formatIPsWithGeo(info.IPs, geoByIP))
 			}
 		}
 	}
 }
 
-func (m *PoolMonitor) printOverLimitUsers(stats []models.UserIPStats) {
+func (m *PoolMonitor) printOverLimitUsers(ctx context.Context, stats []models.UserIPStats) {
 	var overLimitUsers []models.UserIPStats
 	for _, user := range stats {
 		if user.Status == "OVER_LIMIT" {
@@ -339,10 +602,22 @@ func (m *PoolMonitor) printOverLimitUsers(stats []models.UserIPStats) {
 			fmt.Printf("   • %s%s\n", user.Email, getMarkers(user))
 			fmt.Printf("     %s: %d/%d | TTL: %.1f-%.1fh\n", itemLabel, user.IPCount, user.Limit, user.MinTTLHours, user.MaxTTLHours)
 			fmt.Printf("     %s: %s\n", itemsLabel, strings.Join(user.IPsWithTTL, ", "))
+			var geoSummary *geoSummary
+			var geoByIP map[string]*geoip.GeoLocation
+			if m.cfg.GeoIPEnabled && m.geoService != nil {
+				geoSummary, geoByIP = m.buildUserGeo(ctx, user)
+				if geoSummary != nil {
+					countries := formatGeoList(geoSummary.countries, 3)
+					cities := formatGeoList(geoSummary.cities, 3)
+					fmt.Printf("     🌍 Гео: страны: %s, города: %s\n", countries, cities)
+				} else {
+					fmt.Printf("     🌍 Гео: нет данных\n")
+				}
+			}
 
 			// Для ASN режима показываем детали IP
 			if m.cfg.DetectByASN && user.ASNDetails != nil && len(user.ASNDetails) > 0 {
-				fmt.Println("     └─ Детали IP по провайдерам:")
+				fmt.Println("     └─ Детали:")
 				asnKeys := make([]string, 0, len(user.ASNDetails))
 				for asn := range user.ASNDetails {
 					asnKeys = append(asnKeys, asn)
@@ -350,7 +625,7 @@ func (m *PoolMonitor) printOverLimitUsers(stats []models.UserIPStats) {
 				sort.Strings(asnKeys)
 				for _, asn := range asnKeys {
 					info := user.ASNDetails[asn]
-					fmt.Printf("        • %s: %d IP -> %s\n", asn, len(info.IPs), strings.Join(info.IPs, ", "))
+					fmt.Printf("        • %s: %d IP -> %s\n", asn, len(info.IPs), formatIPsWithGeo(info.IPs, geoByIP))
 				}
 			}
 		}

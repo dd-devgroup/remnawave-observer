@@ -1,0 +1,653 @@
+# Агломерации СНГ
+# Города внутри одной агломерации считаются одной локацией
+agglomerations:
+  # ===== РОССИЯ =====
+  moscow:
+    country: RU
+    center:
+      lat: 55.7558
+      lon: 37.6173
+    radius_km: 70
+    cities:
+      - москва
+      - moscow
+      - зеленоград
+      - балашиха
+      - химки
+      - подольск
+      - королёв
+      - мытищи
+      - люберцы
+      - красногорск
+      - одинцово
+      - долгопрудный
+      - реутов
+      - домодедово
+      - щёлково
+      - раменское
+      - жуковский
+      - пушкино
+      - ногинск
+      - электросталь
+      - коломна
+      - серпухов
+      - клин
+      - дмитров
+      - видное
+      - лобня
+
+  spb:
+    country: RU
+    center:
+      lat: 59.9343
+      lon: 30.3351
+    radius_km: 50
+    cities:
+      - санкт-петербург
+      - saint petersburg
+      - петербург
+      - спб
+      - пушкин
+      - колпино
+      - кронштадт
+      - петергоф
+      - сестрорецк
+      - гатчина
+      - всеволожск
+      - выборг
+      - тосно
+      - кириши
+      - сосновый бор
+
+  kazan:
+    country: RU
+    center:
+      lat: 55.8304
+      lon: 49.0661
+    radius_km: 30
+    cities:
+      - казань
+      - kazan
+      - зеленодольск
+      - высокая гора
+      - лаишево
+
+  novosibirsk:
+    country: RU
+    center:
+      lat: 55.0084
+      lon: 82.9357
+    radius_km: 30
+    cities:
+      - новосибирск
+      - novosibirsk
+      - бердск
+      - обь
+      - искитим
+
+  yekaterinburg:
+    country: RU
+    center:
+      lat: 56.8389
+      lon: 60.6057
+    radius_km: 35
+    cities:
+      - екатеринбург
+      - yekaterinburg
+      - верхняя пышма
+      - берёзовский
+      - среднеуральск
+      - арамиль
+
+  nizhny_novgorod:
+    country: RU
+    center:
+      lat: 56.2965
+      lon: 43.9361
+    radius_km: 25
+    cities:
+      - нижний новгород
+      - nizhny novgorod
+      - дзержинск
+      - бор
+      - кстово
+
+  samara:
+    country: RU
+    center:
+      lat: 53.1959
+      lon: 50.1002
+    radius_km: 30
+    cities:
+      - самара
+      - samara
+      - тольятти
+      - сызрань
+      - новокуйбышевск
+
+  rostov:
+    country: RU
+    center:
+      lat: 47.2357
+      lon: 39.7015
+    radius_km: 30
+    cities:
+      - ростов-на-дону
+      - rostov
+      - таганрог
+      - шахты
+      - новочеркасск
+      - батайск
+      - аксай
+
+  ufa:
+    country: RU
+    center:
+      lat: 54.7388
+      lon: 55.9721
+    radius_km: 25
+    cities:
+      - уфа
+      - ufa
+      - стерлитамак
+      - салават
+
+  krasnoyarsk:
+    country: RU
+    center:
+      lat: 56.0153
+      lon: 92.8932
+    radius_km: 25
+    cities:
+      - красноярск
+      - krasnoyarsk
+      - железногорск
+      - дивногорск
+
+  krasnodar:
+    country: RU
+    center:
+      lat: 45.0355
+      lon: 38.9753
+    radius_km: 30
+    cities:
+      - краснодар
+      - krasnodar
+      - сочи
+      - новороссийск
+      - армавир
+
+  voronezh:
+    country: RU
+    center:
+      lat: 51.6720
+      lon: 39.1843
+    radius_km: 20
+    cities:
+      - воронеж
+      - voronezh
+      - нововоронеж
+
+  perm:
+    country: RU
+    center:
+      lat: 58.0105
+      lon: 56.2502
+    radius_km: 20
+    cities:
+      - пермь
+      - perm
+      - краснокамск
+      - березники
+
+  volgograd:
+    country: RU
+    center:
+      lat: 48.7080
+      lon: 44.5133
+    radius_km: 25
+    cities:
+      - волгоград
+      - volgograd
+      - волжский
+      - камышин
+
+  chelyabinsk:
+    country: RU
+    center:
+      lat: 55.1644
+      lon: 61.4368
+    radius_km: 30
+    cities:
+      - челябинск
+      - chelyabinsk
+      - магнитогорск
+      - копейск
+      - миасс
+
+  omsk:
+    country: RU
+    center:
+      lat: 54.9885
+      lon: 73.3242
+    radius_km: 20
+    cities:
+      - омск
+      - omsk
+
+  # ===== УКРАИНА =====
+  kyiv:
+    country: UA
+    center:
+      lat: 50.4501
+      lon: 30.5234
+    radius_km: 40
+    cities:
+      - киев
+      - київ
+      - kyiv
+      - kiev
+      - бровары
+      - борисполь
+      - ирпень
+      - буча
+      - вишнёвое
+      - фастов
+      - обухов
+      - васильков
+
+  kharkiv:
+    country: UA
+    center:
+      lat: 49.9935
+      lon: 36.2304
+    radius_km: 25
+    cities:
+      - харьков
+      - харків
+      - kharkiv
+      - чугуев
+      - мерефа
+      - люботин
+
+  odesa:
+    country: UA
+    center:
+      lat: 46.4825
+      lon: 30.7233
+    radius_km: 25
+    cities:
+      - одесса
+      - одеса
+      - odesa
+      - ильичёвск
+      - черноморск
+      - южный
+
+  dnipro:
+    country: UA
+    center:
+      lat: 48.4647
+      lon: 35.0462
+    radius_km: 25
+    cities:
+      - днепр
+      - дніпро
+      - dnipro
+      - днепропетровск
+      - кривой рог
+      - никополь
+      - новомосковск
+
+  lviv:
+    country: UA
+    center:
+      lat: 49.8397
+      lon: 24.0297
+    radius_km: 20
+    cities:
+      - львов
+      - львів
+      - lviv
+      - дрогобыч
+      - червоноград
+
+  zaporizhzhia:
+    country: UA
+    center:
+      lat: 47.8388
+      lon: 35.1396
+    radius_km: 20
+    cities:
+      - запорожье
+      - запоріжжя
+      - zaporizhzhia
+      - мелитополь
+      - энергодар
+
+  # ===== КАЗАХСТАН =====
+  almaty:
+    country: KZ
+    center:
+      lat: 43.2220
+      lon: 76.8512
+    radius_km: 30
+    cities:
+      - алматы
+      - almaty
+      - алма-ата
+      - талгар
+      - капчагай
+      - каскелен
+      - есик
+
+  astana:
+    country: KZ
+    center:
+      lat: 51.1694
+      lon: 71.4491
+    radius_km: 25
+    cities:
+      - астана
+      - astana
+      - нур-султан
+      - nur-sultan
+
+  shymkent:
+    country: KZ
+    center:
+      lat: 42.3417
+      lon: 69.5901
+    radius_km: 20
+    cities:
+      - шымкент
+      - shymkent
+      - чимкент
+
+  karaganda:
+    country: KZ
+    center:
+      lat: 49.8047
+      lon: 73.1094
+    radius_km: 20
+    cities:
+      - караганда
+      - karaganda
+      - темиртау
+
+  aktobe:
+    country: KZ
+    center:
+      lat: 50.2839
+      lon: 57.1670
+    radius_km: 15
+    cities:
+      - актобе
+      - aktobe
+      - актюбинск
+
+  # ===== БЕЛАРУСЬ =====
+  minsk:
+    country: BY
+    center:
+      lat: 53.9006
+      lon: 27.5590
+    radius_km: 35
+    cities:
+      - минск
+      - minsk
+      - заславль
+      - молодечно
+      - борисов
+      - жодино
+      - смолевичи
+      - дзержинск
+      - фаниполь
+
+  gomel:
+    country: BY
+    center:
+      lat: 52.4345
+      lon: 30.9754
+    radius_km: 15
+    cities:
+      - гомель
+      - gomel
+      - светлогорск
+
+  mogilev:
+    country: BY
+    center:
+      lat: 53.9045
+      lon: 30.3449
+    radius_km: 15
+    cities:
+      - могилёв
+      - mogilev
+
+  vitebsk:
+    country: BY
+    center:
+      lat: 55.1904
+      lon: 30.2049
+    radius_km: 15
+    cities:
+      - витебск
+      - vitebsk
+
+  grodno:
+    country: BY
+    center:
+      lat: 53.6779
+      lon: 23.8293
+    radius_km: 15
+    cities:
+      - гродно
+      - grodno
+
+  brest:
+    country: BY
+    center:
+      lat: 52.0976
+      lon: 23.7341
+    radius_km: 15
+    cities:
+      - брест
+      - brest
+      - барановичи
+
+  # ===== УЗБЕКИСТАН =====
+  tashkent:
+    country: UZ
+    center:
+      lat: 41.2995
+      lon: 69.2401
+    radius_km: 30
+    cities:
+      - ташкент
+      - tashkent
+      - алмалык
+      - ангрен
+      - чирчик
+
+  samarkand:
+    country: UZ
+    center:
+      lat: 39.6542
+      lon: 66.9597
+    radius_km: 15
+    cities:
+      - самарканд
+      - samarkand
+
+  namangan:
+    country: UZ
+    center:
+      lat: 40.9983
+      lon: 71.6726
+    radius_km: 15
+    cities:
+      - наманган
+      - namangan
+
+  # ===== АЗЕРБАЙДЖАН =====
+  baku:
+    country: AZ
+    center:
+      lat: 40.4093
+      lon: 49.8671
+    radius_km: 25
+    cities:
+      - баку
+      - baku
+      - сумгаит
+      - sumqayit
+      - хырдалан
+
+  ganja:
+    country: AZ
+    center:
+      lat: 40.6828
+      lon: 46.3606
+    radius_km: 15
+    cities:
+      - гянджа
+      - ganja
+
+  # ===== ГРУЗИЯ =====
+  tbilisi:
+    country: GE
+    center:
+      lat: 41.7151
+      lon: 44.8271
+    radius_km: 20
+    cities:
+      - тбилиси
+      - tbilisi
+      - рустави
+
+  batumi:
+    country: GE
+    center:
+      lat: 41.6168
+      lon: 41.6367
+    radius_km: 15
+    cities:
+      - батуми
+      - batumi
+
+  # ===== АРМЕНИЯ =====
+  yerevan:
+    country: AM
+    center:
+      lat: 40.1792
+      lon: 44.4991
+    radius_km: 20
+    cities:
+      - ереван
+      - yerevan
+      - эчмиадзин
+      - абовян
+      - раздан
+
+  gyumri:
+    country: AM
+    center:
+      lat: 40.7942
+      lon: 43.8453
+    radius_km: 10
+    cities:
+      - гюмри
+      - gyumri
+      - ленинакан
+
+  # ===== МОЛДОВА =====
+  chisinau:
+    country: MD
+    center:
+      lat: 47.0105
+      lon: 28.8638
+    radius_km: 20
+    cities:
+      - кишинёв
+      - chisinau
+      - kishinev
+
+  tiraspol:
+    country: MD
+    center:
+      lat: 46.8403
+      lon: 29.6433
+    radius_km: 15
+    cities:
+      - тирасполь
+      - tiraspol
+      - бендеры
+
+  # ===== КЫРГЫЗСТАН =====
+  bishkek:
+    country: KG
+    center:
+      lat: 42.8746
+      lon: 74.5698
+    radius_km: 20
+    cities:
+      - бишкек
+      - bishkek
+      - токмок
+      - кант
+
+  osh:
+    country: KG
+    center:
+      lat: 40.5283
+      lon: 72.7985
+    radius_km: 15
+    cities:
+      - ош
+      - osh
+
+  # ===== ТАДЖИКИСТАН =====
+  dushanbe:
+    country: TJ
+    center:
+      lat: 38.5598
+      lon: 68.7870
+    radius_km: 15
+    cities:
+      - душанбе
+      - dushanbe
+
+  khujand:
+    country: TJ
+    center:
+      lat: 40.2826
+      lon: 69.6220
+    radius_km: 10
+    cities:
+      - худжанд
+      - khujand
+
+  # ===== ТУРКМЕНИСТАН =====
+  ashgabat:
+    country: TM
+    center:
+      lat: 37.9601
+      lon: 58.3261
+    radius_km: 15
+    cities:
+      - ашхабад
+      - ashgabat
+
+# Нормализация названий (синонимы → каноническое имя)
+city_aliases:
+  'мск': 'москва'
+  'питер': 'санкт-петербург'
+  'спб': 'санкт-петербург'
+  'екб': 'екатеринбург'
+  'нск': 'новосибирск'
+  'ннов': 'нижний новгород'
+  'рнд': 'ростов-на-дону'
+  'влг': 'волгоград'
+  'члб': 'челябинск'
+  'крд': 'краснодар'

@@ -3,6 +3,7 @@ package worker
 import (
 	"blocker-worker/internal/config"
 	"blocker-worker/internal/logger"
+	"blocker-worker/internal/metrics"
 	"blocker-worker/internal/processor"
 	"blocker-worker/internal/services/rabbitmq"
 	"context"
@@ -20,17 +21,19 @@ type Worker struct {
 	logger    *logger.Logger
 	cfg       *config.Config
 	processor *processor.MessageProcessor
+	pool      *processor.WorkerPool
 	ctx       context.Context
 	cancel    context.CancelFunc
 }
 
 // New создает нового Worker'а.
-func New(l *logger.Logger, cfg *config.Config, proc *processor.MessageProcessor) *Worker {
+func New(l *logger.Logger, cfg *config.Config, proc *processor.MessageProcessor, pool *processor.WorkerPool) *Worker {
 	ctx, cancel := context.WithCancel(context.Background())
 	return &Worker{
 		logger:    l,
 		cfg:       cfg,
 		processor: proc,
+		pool:      pool,
 		ctx:       ctx,
 		cancel:    cancel,
 	}
@@ -38,11 +41,15 @@ func New(l *logger.Logger, cfg *config.Config, proc *processor.MessageProcessor)
 
 // handleMessage является функцией обратного вызова для потребителя RabbitMQ.
 func (w *Worker) handleMessage(ctx context.Context, msg amqp.Delivery) error {
+	metrics.Get().MessagesReceived.Add(1)
+
 	err := w.processor.Process(ctx, msg.Body)
 	if err != nil {
 		w.logger.Error(fmt.Sprintf("Произошла ошибка при обработке сообщения: %v. Сообщение не будет подтверждено.", err))
 		if errNack := msg.Nack(false, false); errNack != nil {
 			w.logger.Error(fmt.Sprintf("Ошибка при Nack сообщения: %v", errNack))
+		} else {
+			metrics.Get().MessagesNack.Add(1)
 		}
 		return nil
 	}
@@ -51,6 +58,7 @@ func (w *Worker) handleMessage(ctx context.Context, msg amqp.Delivery) error {
 		w.logger.Error(fmt.Sprintf("Ошибка при Ack сообщения: %v", errAck))
 		return errAck
 	}
+	metrics.Get().MessagesAck.Add(1)
 	return nil
 }
 
@@ -69,10 +77,12 @@ func (w *Worker) Run() {
 	for {
 		select {
 		case <-w.ctx.Done():
-			w.logger.Info("Воркер остановлен.")
+			w.logger.Info("Получена команда shutdown, останавливаем worker pool...")
+			w.pool.Shutdown()
+			w.logger.Info("Worker pool остановлен. Воркер завершен.")
 			return
 		default:
-			consumer := rabbitmq.NewConsumer(w.logger, w.cfg.RabbitMQURL)
+			consumer := rabbitmq.NewConsumer(w.logger, w.cfg.RabbitMQURL, w.cfg.PrefetchCount)
 			if err := consumer.Connect(); err != nil {
 				w.logger.Warning(fmt.Sprintf("Не удалось подключиться к RabbitMQ: %v. Повторная попытка через %v...", err, w.cfg.ReconnectDelay))
 				w.waitOrExit()

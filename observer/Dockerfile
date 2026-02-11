@@ -15,12 +15,13 @@ RUN apk --no-cache add ca-certificates tzdata
 
 WORKDIR /app
 
-# Создаем директорию для данных (ASN база будет монтироваться через volume)
-RUN mkdir -p /app/data
+# Создаем директории для данных и конфигов
+RUN mkdir -p /app/data /app/config
 
 COPY --from=builder /app/observer_service .
 
 COPY --from=builder /app/internal/scripts/add_and_check_ip.lua ./internal/scripts/add_and_check_ip.lua
 COPY --from=builder /app/internal/scripts/add_and_check_subnet.lua ./internal/scripts/add_and_check_subnet.lua
+COPY --from=builder /app/internal/scripts/add_and_check_asn.lua ./internal/scripts/add_and_check_asn.lua
 
 CMD ["/app/observer_service"]

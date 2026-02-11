@@ -2,14 +2,20 @@ package processor
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
+	"fmt"
 	"log"
 	"net"
 	"observer_service/internal/config"
+	"observer_service/internal/metrics"
 	"observer_service/internal/models"
 	"observer_service/internal/services/alerter"
 	"observer_service/internal/services/asn"
+	"observer_service/internal/services/geoip"
 	"observer_service/internal/services/publisher"
+	"observer_service/internal/services/scoring"
 	"observer_service/internal/services/storage"
 	"sync"
 	"time"
@@ -21,9 +27,15 @@ type LogProcessor struct {
 	publisher         publisher.EventPublisher
 	alerter           alerter.Notifier
 	cfg               *config.Config
-	asnLookup         *asn.ASNLookup // Сервис для lookup ASN
+	asnLookup         *asn.ASNLookup         // Сервис для lookup ASN
 	logChannel        chan []models.LogEntry // Канал для получения пачек логов
-	sideEffectChannel chan func()            // Канал для побочных задач (алерты, очистка)
+	sideEffectChannel chan func(context.Context) // Канал для побочных задач (алерты, очистка)
+
+	// Новые сервисы для Anti-Abuse системы
+	geoService    *geoip.GeoIPService   // Сервис геолокации
+	geoAnalyzer   *geoip.GeoAnalyzer    // Анализатор географии
+	asnClassifier *asn.ASNClassifier    // Классификатор провайдеров
+	scorer        *scoring.Scorer       // Система скоринга
 
 	// Кешированные распарсенные подсети для быстрой проверки вложенности
 	excludedSubnetsParsed []*net.IPNet
@@ -31,15 +43,29 @@ type LogProcessor struct {
 }
 
 // NewLogProcessor создает новый экземпляр LogProcessor.
-func NewLogProcessor(s storage.IPStorage, p publisher.EventPublisher, a alerter.Notifier, cfg *config.Config, asnLookup *asn.ASNLookup) *LogProcessor {
+func NewLogProcessor(
+	s storage.IPStorage,
+	p publisher.EventPublisher,
+	a alerter.Notifier,
+	cfg *config.Config,
+	asnLookup *asn.ASNLookup,
+	geoService *geoip.GeoIPService,
+	geoAnalyzer *geoip.GeoAnalyzer,
+	asnClassifier *asn.ASNClassifier,
+	scorer *scoring.Scorer,
+) *LogProcessor {
 	lp := &LogProcessor{
 		storage:           s,
 		publisher:         p,
 		alerter:           a,
 		cfg:               cfg,
 		asnLookup:         asnLookup,
+		geoService:        geoService,
+		geoAnalyzer:       geoAnalyzer,
+		asnClassifier:     asnClassifier,
+		scorer:            scorer,
 		logChannel:        make(chan []models.LogEntry, cfg.LogChannelBufferSize),
-		sideEffectChannel: make(chan func(), cfg.SideEffectChannelBufferSize),
+		sideEffectChannel: make(chan func(context.Context), cfg.SideEffectChannelBufferSize),
 	}
 
 	// Парсим исключённые подсети один раз при инициализации
@@ -123,7 +149,12 @@ func (p *LogProcessor) StartSideEffectWorkerPool(ctx context.Context, mainWg *sy
 				case <-ctx.Done():
 					log.Printf("Воркер побочных задач %d пропустил задачу из-за отмены контекста.", workerID)
 				default:
-					task()
+					taskCtx, cancel := context.WithTimeout(ctx, p.cfg.SideEffectTimeout)
+					task(taskCtx)
+					if taskCtx.Err() == context.DeadlineExceeded {
+						metrics.SideEffectTimeoutCount.Add(1)
+					}
+					cancel()
 				}
 			}
 			log.Printf("Воркер побочных задач %d останавливается.", workerID)
@@ -154,7 +185,7 @@ func (p *LogProcessor) EnqueueEntries(entries []models.LogEntry) error {
 }
 
 // enqueueSideEffectTask добавляет побочную задачу в очередь на выполнение.
-func (p *LogProcessor) enqueueSideEffectTask(task func()) {
+func (p *LogProcessor) enqueueSideEffectTask(task func(context.Context)) {
 	defer func() {
 		if r := recover(); r != nil {
 			log.Println("Попытка записи в закрытый канал побочных задач. Сервис находится в процессе остановки.")
@@ -222,26 +253,27 @@ func (p *LogProcessor) processEntryByIP(ctx context.Context, entry models.LogEnt
 		ipsToBlock := p.filterExcludedIPs(res.AllUserItems, entry.UserEmail)
 
 		if len(ipsToBlock) > 0 {
-			if err := p.publisher.PublishBlockMessage(ipsToBlock, p.cfg.BlockDuration); err != nil {
+			if err := p.publishBlockEvent(ipsToBlock, p.cfg.BlockDuration); err != nil {
 				log.Printf("Ошибка отправки сообщения о блокировке: %v", err)
 			} else {
 				log.Printf("Сообщение о блокировке %d IP-адресов для %s%s отправлено", len(ipsToBlock), entry.UserEmail, debugMarker)
-				p.enqueueSideEffectTask(func() {
+				p.enqueueSideEffectTask(func(ctx context.Context) {
 					p.scheduleIPsClear(ctx, entry.UserEmail)
 				})
 			}
 		}
 
+		ipCount := int(res.CurrentCount)
 		alertPayload := models.AlertPayload{
 			UserIdentifier:   entry.UserEmail,
-			DetectedIPsCount: int(res.CurrentCount),
+			DetectedIPsCount: &ipCount,
 			Limit:            userIPLimit,
 			AllUserIPs:       res.AllUserItems,
 			BlockDuration:    p.cfg.BlockDuration,
 			ViolationType:    "ip_limit_exceeded",
 		}
-		p.enqueueSideEffectTask(func() {
-			if err := p.alerter.SendAlert(alertPayload); err != nil {
+		p.enqueueSideEffectTask(func(ctx context.Context) {
+			if err := p.alerter.SendAlert(ctx, alertPayload); err != nil {
 				log.Printf("Ошибка отправки вебхук-уведомления: %v", err)
 			}
 		})
@@ -284,26 +316,27 @@ func (p *LogProcessor) processEntryBySubnet(ctx context.Context, entry models.Lo
 		subnetsToBlock := p.filterExcludedSubnets(res.AllUserItems, entry.UserEmail)
 
 		if len(subnetsToBlock) > 0 {
-			if err := p.publisher.PublishBlockMessage(subnetsToBlock, p.cfg.BlockDuration); err != nil {
+			if err := p.publishBlockEvent(subnetsToBlock, p.cfg.BlockDuration); err != nil {
 				log.Printf("Ошибка отправки сообщения о блокировке подсетей: %v", err)
 			} else {
 				log.Printf("Сообщение о блокировке %d подсетей для %s%s отправлено", len(subnetsToBlock), entry.UserEmail, debugMarker)
-				p.enqueueSideEffectTask(func() {
+				p.enqueueSideEffectTask(func(ctx context.Context) {
 					p.scheduleSubnetsClear(ctx, entry.UserEmail)
 				})
 			}
 		}
 
+		subnetCount := int(res.CurrentCount)
 		alertPayload := models.AlertPayload{
 			UserIdentifier:   entry.UserEmail,
-			DetectedIPsCount: int(res.CurrentCount),
+			DetectedIPsCount: &subnetCount,
 			Limit:            userSubnetLimit,
 			AllUserIPs:       res.AllUserItems, // В алерт отправляем все подсети, даже исключенные
 			BlockDuration:    p.cfg.BlockDuration,
 			ViolationType:    "subnet_limit_exceeded",
 		}
-		p.enqueueSideEffectTask(func() {
-			if err := p.alerter.SendAlert(alertPayload); err != nil {
+		p.enqueueSideEffectTask(func(ctx context.Context) {
+			if err := p.alerter.SendAlert(ctx, alertPayload); err != nil {
 				log.Printf("Ошибка отправки вебхук-уведомления: %v", err)
 			}
 		})
@@ -398,8 +431,11 @@ func (p *LogProcessor) processEntryByASN(ctx context.Context, entry models.LogEn
 	var identifierType string
 	var orgName string
 
+	var redisStore *storage.RedisStore
+
 	// Пытаемся получить ASN для IP
 	if p.asnLookup != nil {
+		redisStore = p.storage.(*storage.RedisStore)
 		asnStr, org, err := p.asnLookup.LookupWithOrg(entry.SourceIP)
 		if err == nil && asnStr != "" {
 			// Проверяем, не в списке ли исключённых ASN
@@ -410,10 +446,17 @@ func (p *LogProcessor) processEntryByASN(ctx context.Context, entry models.LogEn
 			identifier = asnStr
 			identifierType = "ASN"
 			orgName = org
+
+			// Кешируем название организации для последующего использования
+			if org != "" {
+				if err := redisStore.SetASNOrgName(ctx, asnStr, org, p.cfg.UserSubnetTTL); err != nil {
+					log.Printf("Ошибка кеширования org для ASN %s: %v", asnStr, err)
+				}
+			}
 		} else {
 			// Логируем для дебага, но продолжаем с fallback
 			if err != nil {
-				log.Printf("Не удалось определить ASN для IP %s (пользователь %s): %v. Используем fallback.", 
+				log.Printf("Не удалось определить ASN для IP %s (пользователь %s): %v. Используем fallback.",
 					entry.SourceIP, entry.UserEmail, err)
 			}
 		}
@@ -435,15 +478,24 @@ func (p *LogProcessor) processEntryByASN(ctx context.Context, entry models.LogEn
 	userASNLimit := p.cfg.MaxASNsPerUser
 	debugMarker := p.getDebugMarker(entry.UserEmail)
 
-	// Сохраняем связь ASN -> IP для последующей блокировки
+	// ВАЖНО: Сохраняем связь ASN -> IP ДО проверки лимита
+	// Это гарантирует что IP будет в Redis когда мы соберём данные для блокировки
 	if identifierType == "ASN" {
-		if err := p.storage.(*storage.RedisStore).AddIPToASNMapping(ctx, entry.UserEmail, identifier, entry.SourceIP, p.cfg.UserSubnetTTL); err != nil {
-			log.Printf("Ошибка сохранения связи ASN->IP для %s: %v", entry.UserEmail, err)
+		if err := redisStore.AddIPToASNMapping(ctx, entry.UserEmail, identifier, entry.SourceIP, p.cfg.UserSubnetTTL); err != nil {
+			log.Printf("Ошибка сохранения связи ASN->IP для %s: %v. Пропускаем обработку.", entry.UserEmail, err)
+			return // Прерываем если не удалось сохранить IP - иначе ASN будет без IP
 		}
 	}
 
-	// Используем тот же механизм CheckAndAddSubnet, так как структура идентична
-	res, err := p.storage.CheckAndAddSubnet(ctx, entry.UserEmail, identifier, userASNLimit, p.cfg.UserSubnetTTL, p.cfg.AlertCooldown)
+	// Для ASN используем специальный метод CheckAndAddASN с фильтрацией "мертвых" ASN
+	// Для Subnet fallback используем стандартный CheckAndAddSubnet
+	var res *models.CheckResult
+	var err error
+	if identifierType == "ASN" {
+		res, err = redisStore.CheckAndAddASN(ctx, entry.UserEmail, identifier, userASNLimit, p.cfg.UserSubnetTTL, p.cfg.AlertCooldown)
+	} else {
+		res, err = p.storage.CheckAndAddSubnet(ctx, entry.UserEmail, identifier, userASNLimit, p.cfg.UserSubnetTTL, p.cfg.AlertCooldown)
+	}
 	if err != nil {
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			log.Printf("Операция CheckAndAdd%s отменена для %s: %v", identifierType, entry.UserEmail, err)
@@ -455,8 +507,39 @@ func (p *LogProcessor) processEntryByASN(ctx context.Context, entry models.LogEn
 
 	if res.StatusCode == 0 && res.IsNew {
 		if identifierType == "ASN" && orgName != "" {
-			log.Printf("Новый %s для пользователя %s%s: %s (%s) | IP: %s. Всего: %d/%d",
-				identifierType, entry.UserEmail, debugMarker, identifier, orgName, entry.SourceIP, res.CurrentCount, userASNLimit)
+			// Получаем GeoIP данные ОДИН раз для классификатора и логирования
+			var countryCode string
+			var geoLoc *geoip.GeoLocation
+			if p.geoService != nil && p.cfg.GeoIPEnabled {
+				loc, lookupErr := p.geoService.Lookup(ctx, entry.SourceIP)
+				if lookupErr != nil {
+					if errors.Is(lookupErr, context.DeadlineExceeded) {
+						metrics.GeoIPLookupTimeout.Add(1)
+					} else {
+						metrics.GeoIPLookupFail.Add(1)
+					}
+				} else if loc != nil {
+					metrics.GeoIPLookupSuccess.Add(1)
+					geoLoc = loc
+					countryCode = loc.CountryCode
+				}
+			}
+
+			// Классифицируем провайдера для логирования с учетом страны
+			var providerInfo string
+			if p.asnClassifier != nil {
+				classification := p.asnClassifier.ClassifyWithCountry(identifier, orgName, countryCode)
+				providerInfo = fmt.Sprintf(" [%s, риск:%.1f]", classification.ProviderType, classification.Modifier)
+			}
+			log.Printf("Новый %s для пользователя %s%s: %s (%s)%s | IP: %s. Всего: %d/%d",
+				identifierType, entry.UserEmail, debugMarker, identifier, orgName, providerInfo, entry.SourceIP, res.CurrentCount, userASNLimit)
+
+			// Логируем GeoIP анализ (используем уже полученные данные)
+			if geoLoc != nil {
+				log.Printf("[GeoIP] %s: %s -> %s, %s (%.2f, %.2f)",
+					entry.UserEmail, entry.SourceIP, geoLoc.CountryCode, geoLoc.City,
+					geoLoc.Latitude, geoLoc.Longitude)
+			}
 		} else {
 			log.Printf("Новый %s для пользователя %s%s: %s | IP: %s. Всего: %d/%d",
 				identifierType, entry.UserEmail, debugMarker, identifier, entry.SourceIP, res.CurrentCount, userASNLimit)
@@ -468,7 +551,8 @@ func (p *LogProcessor) processEntryByASN(ctx context.Context, entry models.LogEn
 			identifierType, debugMarker, entry.UserEmail, res.CurrentCount, userASNLimit)
 
 		// Собираем все IP-адреса для блокировки
-		ipsToBlock := p.collectIPsForASNBlock(ctx, entry.UserEmail, res.AllUserItems)
+		// Передаём текущий IP чтобы гарантировать его включение даже если Redis ещё не обновился
+		ipsToBlock := p.collectIPsForASNBlock(ctx, entry.UserEmail, res.AllUserItems, entry.SourceIP)
 
 		// Фильтруем исключенные подсети/IP
 		if identifierType == "Subnet" {
@@ -478,12 +562,12 @@ func (p *LogProcessor) processEntryByASN(ctx context.Context, entry models.LogEn
 		}
 
 		if len(ipsToBlock) > 0 {
-			if err := p.publisher.PublishBlockMessage(ipsToBlock, p.cfg.BlockDuration); err != nil {
+			if err := p.publishBlockEvent(ipsToBlock, p.cfg.BlockDuration); err != nil {
 				log.Printf("Ошибка отправки сообщения о блокировке: %v", err)
 			} else {
-				log.Printf("✅ Сообщение о блокировке %d элементов для %s%s отправлено (тип: %s)", 
+				log.Printf("✅ Сообщение о блокировке %d элементов для %s%s отправлено (тип: %s)",
 					len(ipsToBlock), entry.UserEmail, debugMarker, identifierType)
-				p.enqueueSideEffectTask(func() {
+				p.enqueueSideEffectTask(func(ctx context.Context) {
 					p.scheduleASNClear(ctx, entry.UserEmail)
 				})
 			}
@@ -498,30 +582,169 @@ func (p *LogProcessor) processEntryByASN(ctx context.Context, entry models.LogEn
 		}
 
 		alertPayload := models.AlertPayload{
-			UserIdentifier:   entry.UserEmail,
-			DetectedIPsCount: int(res.CurrentCount),
-			Limit:            userASNLimit,
-			AllUserIPs:       res.AllUserItems, // Здесь будут ASN или подсети
-			BlockDuration:    p.cfg.BlockDuration,
-			ViolationType:    violationType,
+			UserIdentifier: entry.UserEmail,
+			Limit:          userASNLimit,
+			BlockDuration:  p.cfg.BlockDuration,
+			ViolationType:  violationType,
 		}
-		p.enqueueSideEffectTask(func() {
-			if err := p.alerter.SendAlert(alertPayload); err != nil {
+
+		// Заполняем специфичные поля в зависимости от типа идентификатора
+		if identifierType == "ASN" {
+			// Для ASN режима: только ASN-специфичные поля
+			asnCount := int(res.CurrentCount)
+			alertPayload.DetectedASNCount = &asnCount
+			alertPayload.AllUserASNs = res.AllUserItems
+			// Передаём текущий ASN и IP для гарантированного включения в детали
+			alertPayload.ASNDetails = p.collectASNDetails(ctx, entry.UserEmail, res.AllUserItems, identifier, entry.SourceIP)
+
+			// Выполняем расширенную аналитику если включена
+			if p.cfg.ScoringEnabled || p.cfg.GeoIPEnabled {
+				geoResult, providerTypes, violationScore := p.performEnhancedAnalytics(
+					ctx,
+					entry.UserEmail,
+					res.AllUserItems,
+					alertPayload.ASNDetails,
+				)
+
+				// Добавляем результаты в alert payload
+				if geoResult != nil {
+					alertPayload.GeoAnalysis = geoResult
+				}
+				if providerTypes != nil {
+					alertPayload.ProviderTypes = providerTypes
+				}
+				if violationScore != nil {
+					score := violationScore.FinalScore
+					alertPayload.Score = &score
+					alertPayload.ScoreAction = string(violationScore.Action)
+
+					// Проверяем действие на основе скора
+					if violationScore.Action == scoring.ActionNone {
+						log.Printf("[Anti-Abuse] Скор %.1f < 30 для %s, блокировка отменена",
+							violationScore.FinalScore, entry.UserEmail)
+						return // Не блокируем и не отправляем алерт
+					}
+				}
+			}
+		} else {
+			// Для Subnet fallback: используем IP-поля
+			subnetCount := int(res.CurrentCount)
+			alertPayload.DetectedIPsCount = &subnetCount
+			alertPayload.AllUserIPs = res.AllUserItems
+		}
+
+		p.enqueueSideEffectTask(func(ctx context.Context) {
+			if err := p.alerter.SendAlert(ctx, alertPayload); err != nil {
 				log.Printf("Ошибка отправки вебхук-уведомления: %v", err)
 			}
 		})
 	}
 }
 
+// collectASNDetails собирает детали по каждому ASN (организация, IP, количество)
+// currentASN и currentIP - текущий ASN и IP для гарантированного включения в результат
+func (p *LogProcessor) collectASNDetails(ctx context.Context, email string, asns []string, currentASN, currentIP string) map[string]*models.ASNInfo {
+	result := make(map[string]*models.ASNInfo)
+	redisStore := p.storage.(*storage.RedisStore)
+
+	for _, asn := range asns {
+		// Пропускаем не-ASN идентификаторы (подсети)
+		if len(asn) < 2 || asn[:2] != "AS" {
+			continue
+		}
+
+		// Получаем IP-адреса для этого ASN
+		ips, err := redisStore.GetIPsForUserASN(ctx, email, asn)
+		if err != nil {
+			log.Printf("Ошибка получения IP для ASN %s пользователя %s: %v", asn, email, err)
+			ips = []string{} // Продолжаем с пустым списком вместо пропуска
+		}
+
+		// Если это текущий ASN и текущий IP не в списке - добавляем
+		if asn == currentASN && currentIP != "" {
+			found := false
+			for _, ip := range ips {
+				if ip == currentIP {
+					found = true
+					break
+				}
+			}
+			if !found {
+				ips = append(ips, currentIP)
+			}
+		}
+
+		// Получаем название организации и страну для ASN
+		// Сначала пробуем из кеша Redis
+		org, err := redisStore.GetASNOrgName(ctx, asn)
+		if err != nil {
+			log.Printf("Ошибка получения org из кеша для ASN %s: %v", asn, err)
+		}
+
+		// Получаем код страны через lookup
+		var countryCode string
+		if p.asnLookup != nil && len(ips) > 0 {
+			if org == "" {
+				// Если в кеше нет org - используем LookupFull
+				_, orgName, country, err := p.asnLookup.LookupFull(ips[0])
+				if err == nil {
+					if orgName != "" {
+						org = orgName
+						// Сохраняем в кеш для будущего использования
+						if cacheErr := redisStore.SetASNOrgName(ctx, asn, orgName, p.cfg.UserSubnetTTL); cacheErr != nil {
+							log.Printf("Ошибка кеширования org для ASN %s: %v", asn, cacheErr)
+						}
+					}
+					countryCode = country
+				}
+			} else {
+				// Если org уже есть - получаем только страну
+				_, _, country, err := p.asnLookup.LookupFull(ips[0])
+				if err == nil {
+					countryCode = country
+				}
+			}
+		}
+
+		// Если org всё ещё пустой - ставим fallback
+		if org == "" {
+			org = "Unknown"
+		}
+
+		result[asn] = &models.ASNInfo{
+			ASN:          asn,
+			Organization: org,
+			Country:      countryCode,
+			IPs:          ips,
+			IPCount:      len(ips),
+		}
+	}
+
+	return result
+}
+
 // collectIPsForASNBlock собирает все IP-адреса для блокировки на основе ASN/подсетей
-func (p *LogProcessor) collectIPsForASNBlock(ctx context.Context, email string, identifiers []string) []string {
+// currentIP - текущий IP для гарантированного включения в результат
+func (p *LogProcessor) collectIPsForASNBlock(ctx context.Context, email string, identifiers []string, currentIP string) []string {
 	var result []string
 	seenIPs := make(map[string]struct{})
+	redisStore := p.storage.(*storage.RedisStore)
+
+	// Сначала добавляем текущий IP чтобы гарантировать его блокировку
+	if currentIP != "" {
+		seenIPs[currentIP] = struct{}{}
+		result = append(result, currentIP)
+	}
 
 	for _, item := range identifiers {
-		// Если это ASN (AS12345) - получаем все IP этого ASN
+		// Проверяем не в списке ли исключённых ASN
 		if len(item) > 2 && item[:2] == "AS" {
-			ips, err := p.storage.(*storage.RedisStore).GetIPsForUserASN(ctx, email, item)
+			if p.cfg.ExcludedASNs[item] {
+				log.Printf("ASN %s в списке исключённых, пропускаем при сборе IP для блокировки", item)
+				continue
+			}
+
+			ips, err := redisStore.GetIPsForUserASN(ctx, email, item)
 			if err != nil {
 				log.Printf("Ошибка получения IP для ASN %s пользователя %s: %v", item, email, err)
 				continue
@@ -546,6 +769,59 @@ func (p *LogProcessor) collectIPsForASNBlock(ctx context.Context, email string, 
 	}
 
 	return result
+}
+
+// generateEventID возвращает 16-байтовый hex-идентификатор события из crypto/rand.
+func generateEventID() string {
+	var b [16]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		// crypto/rand failure — крайне редкий случай, fallback на timestamp
+		return fmt.Sprintf("fallback-%d", time.Now().UnixNano())
+	}
+	return hex.EncodeToString(b[:])
+}
+
+// publishBlockEvent разбивает список IP на чанки по cfg.MaxIPsPerBlockEvent и
+// публикует каждый чанок как отдельное BlockMessage.  Если IP помещаются в один
+// чанок — поля EventID/Chunk* не добавляются (wire-совместимость со старым форматом).
+func (p *LogProcessor) publishBlockEvent(ips []string, duration string) error {
+	chunkSize := p.cfg.MaxIPsPerBlockEvent
+	if chunkSize <= 0 {
+		chunkSize = 500
+	}
+
+	// Один чанок — старый формат без обёртки
+	if len(ips) <= chunkSize {
+		return p.publisher.PublishBlockMessage(models.BlockMessage{
+			IPs:      ips,
+			Duration: duration,
+		})
+	}
+
+	// Несколько чанков — добавляем event envelope
+	eventID := generateEventID()
+	total := (len(ips) + chunkSize - 1) / chunkSize
+
+	for i := 0; i < total; i++ {
+		start := i * chunkSize
+		end := start + chunkSize
+		if end > len(ips) {
+			end = len(ips)
+		}
+		idx := i
+		msg := models.BlockMessage{
+			IPs:           ips[start:end],
+			Duration:      duration,
+			EventID:       eventID,
+			ChunkIndex:    &idx,
+			ChunkTotal:    &total,
+			SchemaVersion: 2,
+		}
+		if err := p.publisher.PublishBlockMessage(msg); err != nil {
+			return fmt.Errorf("chunk %d/%d (event %s): %w", i+1, total, eventID, err)
+		}
+	}
+	return nil
 }
 
 // scheduleASNClear планирует отложенную очистку ASN данных
@@ -631,4 +907,78 @@ func (p *LogProcessor) scheduleSubnetsClear(ctx context.Context, userEmail strin
 		log.Printf("Отложенная очистка ПОДСЕТЕЙ для %s%s выполнена. Очищено ключей: %d",
 			userEmail, p.getDebugMarker(userEmail), cleared)
 	})
+}
+
+// performEnhancedAnalytics выполняет расширенную аналитику с GeoIP и скорингом
+func (p *LogProcessor) performEnhancedAnalytics(
+	ctx context.Context,
+	email string,
+	allASNs []string,
+	asnDetails map[string]*models.ASNInfo,
+) (
+	*models.GeoAnalysisResult,
+	map[string]string,
+	*scoring.ViolationScore,
+) {
+	// Если сервисы не настроены - возвращаем nil
+	if p.geoService == nil || p.geoAnalyzer == nil || p.asnClassifier == nil || p.scorer == nil {
+		return nil, nil, nil
+	}
+
+	// 1. Собираем все IP-адреса пользователя
+	allIPs := make([]string, 0)
+	for _, info := range asnDetails {
+		allIPs = append(allIPs, info.IPs...)
+	}
+
+	// 2. Выполняем географический анализ
+	geoResultInternal := p.geoAnalyzer.AnalyzeUserIPs(ctx, allIPs)
+
+	// Конвертируем в models.GeoAnalysisResult
+	geoResult := &models.GeoAnalysisResult{
+		UniqueCountries: geoResultInternal.UniqueCountries,
+		UniqueCities:    geoResultInternal.UniqueCities,
+		Agglomerations:  geoResultInternal.Agglomerations,
+		MaxDistanceKM:   geoResultInternal.MaxDistanceKM,
+		GeoScore:        geoResultInternal.GeoScore,
+		GeoFlags:        geoResultInternal.GeoFlags,
+	}
+
+	// 3. Классифицируем провайдеров и обогащаем ASNInfo
+	asnClassifications := make(map[string]*asn.ASNClassification)
+	providerTypes := make(map[string]string)
+
+	for asnStr, info := range asnDetails {
+		// Используем ClassifyWithCountry для более точной классификации
+		classification := p.asnClassifier.ClassifyWithCountry(asnStr, info.Organization, info.Country)
+		asnClassifications[asnStr] = classification
+		providerTypes[asnStr] = classification.ProviderType
+
+		// Обогащаем ASNInfo
+		info.ProviderType = classification.ProviderType
+		info.Modifier = classification.Modifier
+	}
+
+	// 4. Рассчитываем скор (конвертируем обратно в geoip.GeoAnalysisResult для scorer)
+	geoResultForScorer := &geoip.GeoAnalysisResult{
+		UniqueCountries: geoResult.UniqueCountries,
+		UniqueCities:    geoResult.UniqueCities,
+		Agglomerations:  geoResult.Agglomerations,
+		MaxDistanceKM:   geoResult.MaxDistanceKM,
+		GeoScore:        geoResult.GeoScore,
+		GeoFlags:        geoResult.GeoFlags,
+	}
+
+	violationScore := p.scorer.Calculate(
+		asnClassifications,
+		geoResultForScorer,
+		len(allASNs),
+		p.cfg.MaxASNsPerUser,
+	)
+
+	log.Printf("[Anti-Abuse] Анализ для %s: GeoScore=%d, ASNScore=%.1f, FinalScore=%.1f, Action=%s",
+		email, geoResult.GeoScore, violationScore.Components.ASNScore,
+		violationScore.FinalScore, violationScore.Action)
+
+	return geoResult, providerTypes, violationScore
 }

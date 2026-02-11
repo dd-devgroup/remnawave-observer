@@ -9,9 +9,11 @@ COPY . .
 
 RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-w -s" -o blocker-worker ./cmd/blocker_worker
 
-FROM alpine:3.22
+FROM debian:bookworm-slim
 
-RUN apk --no-cache add nftables
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends nftables ca-certificates && \
+    rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
