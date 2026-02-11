@@ -1,0 +1,66 @@
+# Vector Agent Configuration for Xray Node
+# This config parses Xray access logs and sends them to Observer service
+# Deploy this on each node running Xray/V2Ray
+
+# Source: Read Xray access logs
+[sources.xray_access_logs]
+  type = "file"
+  include = ["/var/log/xray/access.log"]
+  # Alternative paths for different setups:
+  # include = ["/var/log/remnanode/xray.out.log", "/var/log/remnanode/xray.err.log"]
+  read_from = "end"  # Start from end for new deployments
+  # read_from = "beginning"  # Use this for initial data collection
+
+# Transform: Parse log lines and extract user_email + source_ip
+[transforms.parse_xray_logs]
+  type = "remap"
+  inputs = ["xray_access_logs"]
+  source = '''
+    # Example Xray log format:
+    # 2026/02/11 20:00:00 accepted tcp:1.2.3.4:12345 [email >> proxy.example.com:443]
+
+    # Parse log line with regex
+    parsed = parse_regex!(.message, r'accepted tcp:(?P<source_ip>[0-9.]+):[0-9]+ \[email:(?P<user_email>[^\s]+)')
+
+    # Extract fields
+    .user_email = parsed.user_email
+    .source_ip = parsed.source_ip
+
+    # Remove original message to save bandwidth
+    del(.message)
+    del(.file)
+    del(.host)
+  '''
+
+# Sink: Send to Observer service
+[sinks.observer_service]
+  type = "http"
+  inputs = ["parse_xray_logs"]
+  uri = "https://observer.pr-dev.pro:38213/log-entry"
+  method = "post"
+  encoding.codec = "json"
+
+  # Batch configuration for efficiency
+  batch.max_events = 100
+  batch.timeout_secs = 5
+
+  # Retry configuration
+  request.retry_attempts = 3
+  request.retry_initial_backoff_secs = 1
+  request.retry_max_duration_secs = 10
+
+  # Health check
+  healthcheck.enabled = true
+  healthcheck.uri = "https://observer.pr-dev.pro:38213/health"
+
+  # Buffer configuration (prevent memory issues on network problems)
+  buffer.type = "disk"
+  buffer.max_size = 268435488  # 256 MB
+  buffer.when_full = "drop_newest"
+
+# Optional: Add rate limiting to prevent overwhelming Observer
+[transforms.rate_limit]
+  type = "throttle"
+  inputs = ["parse_xray_logs"]
+  threshold = 1000  # Max 1000 events per second
+  window_secs = 1

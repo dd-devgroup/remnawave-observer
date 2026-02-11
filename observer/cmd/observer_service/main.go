@@ -17,9 +17,10 @@ import (
 	"observer_service/internal/processor"
 	"observer_service/internal/services/alerter"
 	"observer_service/internal/services/asn"
+	"observer_service/internal/services/enforcement"
 	"observer_service/internal/services/geodata"
 	"observer_service/internal/services/geoip"
-	"observer_service/internal/services/publisher"
+	"observer_service/internal/services/remnawave"
 	"observer_service/internal/services/scoring"
 	"observer_service/internal/services/storage"
 )
@@ -43,11 +44,22 @@ func main() {
 	redisStore.SetScanCount(cfg.ScanCount)
 	redisStore.SetScanTimeBudget(time.Duration(cfg.ScanTimeBudgetSeconds) * time.Second)
 
-	rabbitPublisher, err := publisher.NewRabbitMQPublisher(cfg.RabbitMQURL, cfg.BlockingExchangeName, cfg.PublisherPoolSize, cfg.RabbitPublishMaxRetries, cfg.RabbitPublishBackoffBaseMs, cfg.RabbitPublishBackoffMaxMs, cfg.PublishConfirmTimeoutMs)
-	if err != nil {
-		log.Fatalf("Критическая ошибка: не удалось подключиться к RabbitMQ: %v", err)
+	// MIG-9: RabbitMQ publisher удалён, используется Remnawave enforcement
+	var enforcer enforcement.Enforcer
+	if cfg.RemnawaveBaseURL != "" && cfg.RemnawaveAPIToken != "" {
+		remnawaveClient := remnawave.NewClient(
+			cfg.RemnawaveBaseURL,
+			cfg.RemnawaveAPIToken,
+			cfg.RemnawaveTimeoutSeconds,
+			cfg.UserIDUUIDCacheTTLHours,
+			redisStore.GetClient(),
+		)
+		enforcer = enforcement.NewRemnawaveEnforcer(remnawaveClient, redisStore)
+		log.Printf("✅ Remnawave Enforcer инициализирован (URL: %s)", cfg.RemnawaveBaseURL)
+	} else {
+		enforcer = enforcement.NewNoopEnforcer()
+		log.Printf("⚠️  Remnawave не настроен, используется noop enforcer")
 	}
-	defer rabbitPublisher.Close()
 
 	webhookAlerter := alerter.NewWebhookAlerter(cfg.AlertWebhookURL)
 
@@ -107,7 +119,7 @@ func main() {
 
 	logProcessor := processor.NewLogProcessor(
 		redisStore,
-		rabbitPublisher,
+		enforcer,
 		webhookAlerter,
 		cfg,
 		asnLookup,
@@ -123,7 +135,7 @@ func main() {
 	}
 
 	poolMonitor := monitor.NewPoolMonitor(redisStore, cfg, geoService)
-	apiServer := api.NewServer(cfg.Port, logProcessor, redisStore, rabbitPublisher, cfg)
+	apiServer := api.NewServer(cfg.Port, logProcessor, redisStore, cfg)
 
 	// Инициализация CAIDA AS2Org (опционально, синхронная начальная загрузка)
 	var as2orgLoader *geodata.AS2OrgLoader
@@ -154,6 +166,27 @@ func main() {
 		log.Printf("✅ Auto-Learner инициализирован")
 	}
 
+	// MIG-7: Инициализация Re-enable Scheduler
+	var reenableScheduler *enforcement.Scheduler
+	if cfg.RemnawaveBaseURL != "" && cfg.RemnawaveAPIToken != "" {
+		// Создаём scheduler с тем же Remnawave client
+		remnawaveClient := remnawave.NewClient(
+			cfg.RemnawaveBaseURL,
+			cfg.RemnawaveAPIToken,
+			cfg.RemnawaveTimeoutSeconds,
+			cfg.UserIDUUIDCacheTTLHours,
+			redisStore.GetClient(),
+		)
+		reenableScheduler = enforcement.NewScheduler(
+			remnawaveClient,
+			redisStore,
+			time.Duration(cfg.ReenableTickSeconds)*time.Second,
+			cfg.ReenableBatchSize,
+		)
+		log.Printf("✅ Re-enable Scheduler инициализирован (tick: %ds, batch: %d)",
+			cfg.ReenableTickSeconds, cfg.ReenableBatchSize)
+	}
+
 	// Сообщаем WaitGroup, сколько горутин будем запускать
 	goroutineCount := 4 // poolMonitor + workerPool + sideEffectPool + metricsDumper
 	if autoLearner != nil {
@@ -161,6 +194,9 @@ func main() {
 	}
 	if as2orgLoader != nil {
 		goroutineCount++ // RunRefresh
+	}
+	if reenableScheduler != nil {
+		goroutineCount++ // Re-enable scheduler
 	}
 
 	wg.Add(goroutineCount)
@@ -177,6 +213,11 @@ func main() {
 	// Фоновое обновление CAIDA
 	if as2orgLoader != nil {
 		go as2orgLoader.RunRefresh(ctx, &wg)
+	}
+
+	// Запускаем Re-enable Scheduler если настроен
+	if reenableScheduler != nil {
+		go reenableScheduler.Run(ctx, &wg)
 	}
 
 	srv := &http.Server{

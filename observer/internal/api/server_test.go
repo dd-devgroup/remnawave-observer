@@ -49,23 +49,16 @@ func (t *testStorage) GetUserActiveASNs(_ context.Context, _ string) (map[string
 	return nil, nil
 }
 
-type testPublisher struct{}
-
-func (t *testPublisher) PublishBlockMessage(_ models.BlockMessage) error { return nil }
-func (t *testPublisher) Close() error                                   { return nil }
-func (t *testPublisher) Ping() error                                    { return nil }
-
 // --- helpers ---
 
 func setupRouter(cfg *config.Config, eq EntryEnqueuer) *gin.Engine {
 	gin.SetMode(gin.TestMode)
 	r := gin.New()
 	s := &Server{
-		router:    r,
-		enqueuer:  eq,
-		storage:   &testStorage{},
-		publisher: &testPublisher{},
-		cfg:       cfg,
+		router:   r,
+		enqueuer: eq,
+		storage:  &testStorage{},
+		cfg:      cfg,
 	}
 	s.setupRoutes()
 	return r

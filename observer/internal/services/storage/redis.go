@@ -2,6 +2,7 @@ package storage
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
 	"observer_service/internal/metrics"
@@ -591,4 +592,136 @@ func (s *RedisStore) GetUserActiveASNs(ctx context.Context, userEmail string) (m
 // GetClient возвращает Redis клиент для использования в других сервисах
 func (s *RedisStore) GetClient() *redis.Client {
 	return s.client
+}
+
+// --- Remnawave Enforcement: Disable Schedule Methods (MIG-4) ---
+
+// GetUserUUIDCache получает кэшированный UUID пользователя по internal ID.
+func (s *RedisStore) GetUserUUIDCache(ctx context.Context, internalID int64) (string, bool) {
+	key := fmt.Sprintf("rw:uid2uuid:%d", internalID)
+	val, err := s.client.Get(ctx, key).Result()
+	if err != nil || val == "" {
+		return "", false
+	}
+	return val, true
+}
+
+// SetUserUUIDCache сохраняет UUID в кэш с TTL.
+func (s *RedisStore) SetUserUUIDCache(ctx context.Context, internalID int64, uuid string, ttl time.Duration) error {
+	key := fmt.Sprintf("rw:uid2uuid:%d", internalID)
+	return s.client.Set(ctx, key, uuid, ttl).Err()
+}
+
+// DisableRecord хранит информацию о disable операции.
+type DisableRecord struct {
+	InternalID int64  `json:"internal_id"`
+	UUID       string `json:"uuid"`
+	UntilUnix  int64  `json:"until_unix"`
+	Reason     string `json:"reason"`
+	Score      int    `json:"score"`
+}
+
+// ScheduleDisable планирует автоматический enable на заданное время.
+// Сохраняет запись в rw:disable:{id} и добавляет в ZSET rw:reenable:zset.
+func (s *RedisStore) ScheduleDisable(ctx context.Context, internalID int64, uuid string, untilUnix int64, reason string, score int) error {
+	recordKey := fmt.Sprintf("rw:disable:%d", internalID)
+	zsetKey := "rw:reenable:zset"
+
+	// Сохраняем детали disable (JSON в Redis string)
+	record := DisableRecord{
+		InternalID: internalID,
+		UUID:       uuid,
+		UntilUnix:  untilUnix,
+		Reason:     reason,
+		Score:      score,
+	}
+	data, err := json.Marshal(record)
+	if err != nil {
+		return fmt.Errorf("marshal disable record: %w", err)
+	}
+
+	// TTL: until + 24h (чтобы можно было посмотреть историю)
+	ttl := time.Until(time.Unix(untilUnix, 0)) + 24*time.Hour
+	if ttl < 0 {
+		ttl = 24 * time.Hour // если untilUnix уже прошёл, минимум 24h
+	}
+
+	if err := s.client.Set(ctx, recordKey, data, ttl).Err(); err != nil {
+		return fmt.Errorf("save disable record: %w", err)
+	}
+
+	// Добавляем в ZSET для планировщика (score = untilUnix)
+	if err := s.client.ZAdd(ctx, zsetKey, redis.Z{
+		Score:  float64(untilUnix),
+		Member: fmt.Sprintf("%d", internalID),
+	}).Err(); err != nil {
+		return fmt.Errorf("add to reenable zset: %w", err)
+	}
+
+	return nil
+}
+
+// PopDueDisables атомарно извлекает ID пользователей у которых наступило время enable.
+// Использует Lua для ZRANGEBYSCORE + ZREM.
+func (s *RedisStore) PopDueDisables(ctx context.Context, nowUnix int64, limit int) ([]int64, error) {
+	zsetKey := "rw:reenable:zset"
+
+	// Lua script: атомарный ZRANGEBYSCORE + ZREM
+	script := `
+		local zset = KEYS[1]
+		local max_score = tonumber(ARGV[1])
+		local limit = tonumber(ARGV[2])
+		local members = redis.call('ZRANGEBYSCORE', zset, '-inf', max_score, 'LIMIT', 0, limit)
+		if #members > 0 then
+			redis.call('ZREM', zset, unpack(members))
+		end
+		return members
+	`
+
+	result, err := s.client.Eval(ctx, script, []string{zsetKey}, nowUnix, limit).Result()
+	if err != nil {
+		return nil, fmt.Errorf("lua pop due disables: %w", err)
+	}
+
+	// Парсим результат (массив строк) в []int64
+	members, ok := result.([]interface{})
+	if !ok {
+		return []int64{}, nil
+	}
+
+	ids := make([]int64, 0, len(members))
+	for _, m := range members {
+		idStr, ok := m.(string)
+		if !ok {
+			continue
+		}
+		var id int64
+		if _, err := fmt.Sscanf(idStr, "%d", &id); err == nil {
+			ids = append(ids, id)
+		}
+	}
+
+	return ids, nil
+}
+
+// GetDisableRecord получает информацию о disable по internal ID.
+func (s *RedisStore) GetDisableRecord(ctx context.Context, internalID int64) (*DisableRecord, bool) {
+	key := fmt.Sprintf("rw:disable:%d", internalID)
+	data, err := s.client.Get(ctx, key).Bytes()
+	if err != nil {
+		return nil, false
+	}
+
+	var record DisableRecord
+	if err := json.Unmarshal(data, &record); err != nil {
+		return nil, false
+	}
+
+	return &record, true
+}
+
+// ClearDisableRecord удаляет запись о disable (после успешного enable).
+func (s *RedisStore) ClearDisableRecord(ctx context.Context, internalID int64) error {
+	key := fmt.Sprintf("rw:disable:%d", internalID)
+	return s.client.Del(ctx, key).Err()
 }
