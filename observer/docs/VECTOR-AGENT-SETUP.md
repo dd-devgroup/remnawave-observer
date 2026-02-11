@@ -176,7 +176,7 @@ docker logs observer | grep "POST /log-entry"
 
 Or query Observer health:
 ```bash
-curl https://observer.pr-dev.pro:38213/health
+curl https://your-observer.example.com:38213/health
 ```
 
 ---
@@ -206,7 +206,7 @@ curl https://observer.pr-dev.pro:38213/health
 Vector checks Observer health every 30s:
 ```toml
 healthcheck.enabled = true
-healthcheck.uri = "https://observer.pr-dev.pro:38213/health"
+healthcheck.uri = "https://your-observer.example.com:38213/health"
 ```
 
 If health check fails, Vector will:
@@ -255,7 +255,7 @@ Events are buffering because Observer is unreachable or slow.
 
 **Check network connectivity:**
 ```bash
-docker exec vector-agent wget -O- https://observer.pr-dev.pro:38213/health
+docker exec vector-agent wget -O- https://your-observer.example.com:38213/health
 ```
 
 **Check buffer size:**
