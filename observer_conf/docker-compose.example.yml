@@ -1,51 +1,30 @@
 services:
   observer:
     container_name: observer
-    image: quay.io/fxfuren/remnawave-observer:0.0.9-dev
+    image: quay.io/fxfuren/remnawave-observer:latest
     restart: unless-stopped
     expose:
       - '9000'
     volumes:
       - ./data:/app/data # Данные для записи (unknown_providers.json, backups) - read-write
       - ./config:/app/config:ro # Конфиги Anti-Abuse (agglomerations.yaml, providers.yaml) - read-only
+      - ./geodata:/app/geodata # Geodata для n8n updater (caida_as2org, geoip, iptoasn)
     env_file:
       - .env
       - .env.antiabuse # Переменные для GeoIP и Scoring (опционально)
     depends_on:
-      rabbitmq:
-        condition: service_healthy
       vector-aggregator:
         condition: service_healthy
       redis:
         condition: service_healthy
     networks:
       - observer-net
+      - remnawave-network # Подключение к панели Remnawave (если в одном Docker)
     logging:
       driver: json-file
       options:
         max-size: '8m'
         max-file: '3'
-
-  rabbitmq:
-    image: rabbitmq:4.1.2-management-alpine
-    container_name: rabbimq-xray
-    restart: unless-stopped
-    ports:
-      - '5672:5672'
-      - '15672:15672'
-    volumes:
-      - rabbitmq-data:/var/lib/rabbitmq
-    environment:
-      - RABBITMQ_DEFAULT_USER=${RABBIT_USER}
-      - RABBITMQ_DEFAULT_PASS=${RABBIT_PASSWD}
-    networks:
-      - observer-net
-    healthcheck:
-      test: ['CMD', 'rabbitmq-diagnostics', 'check_port_connectivity']
-      interval: 5s
-      timeout: 5s
-      retries: 10
-      start_period: 30s
 
   vector-aggregator:
     image: timberio/vector:0.48.0-alpine
@@ -59,7 +38,15 @@ services:
     networks:
       - observer-net
     healthcheck:
-      test: ['CMD', 'wget', '--no-verbose', '--tries=1', '--spider', 'http://localhost:8686/health']
+      test:
+        [
+          'CMD',
+          'wget',
+          '--no-verbose',
+          '--tries=1',
+          '--spider',
+          'http://localhost:8686/health',
+        ]
       interval: 5s
       timeout: 3s
       retries: 5
@@ -84,6 +71,7 @@ services:
         condition: service_healthy
     networks:
       - observer-net
+      - remnawave-network # Подключение к панели Remnawave (если в одном Docker)
     logging:
       driver: json-file
       options:
@@ -115,7 +103,8 @@ services:
 networks:
   observer-net:
     driver: bridge
+  remnawave-network:
+    external: true # Если панель Remnawave в отдельном Docker Compose
 
 volumes:
   redis-data:
-  rabbitmq-data:

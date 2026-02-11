@@ -18,4 +18,3 @@
   # Настройки пакетной отправки
   batch.max_events = 100
   batch.timeout_secs = 5
-
