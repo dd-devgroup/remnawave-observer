@@ -17,6 +17,7 @@ import (
 	"observer_service/internal/processor"
 	"observer_service/internal/services/alerter"
 	"observer_service/internal/services/asn"
+	"observer_service/internal/services/enforcement"
 	"observer_service/internal/services/geodata"
 	"observer_service/internal/services/geoip"
 	"observer_service/internal/services/publisher"
@@ -48,6 +49,10 @@ func main() {
 		log.Fatalf("Критическая ошибка: не удалось подключиться к RabbitMQ: %v", err)
 	}
 	defer rabbitPublisher.Close()
+
+	// Временный noop enforcer (будет заменён RemnawaveEnforcer в MIG-5)
+	enforcer := enforcement.NewNoopEnforcer()
+	log.Printf("⚠️  Используется noop enforcer (миграция в процессе)")
 
 	webhookAlerter := alerter.NewWebhookAlerter(cfg.AlertWebhookURL)
 
@@ -108,6 +113,7 @@ func main() {
 	logProcessor := processor.NewLogProcessor(
 		redisStore,
 		rabbitPublisher,
+		enforcer,
 		webhookAlerter,
 		cfg,
 		asnLookup,

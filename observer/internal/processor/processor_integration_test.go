@@ -4,6 +4,7 @@ import (
 	"context"
 	"observer_service/internal/config"
 	"observer_service/internal/models"
+	"observer_service/internal/services/enforcement"
 	"sync"
 	"testing"
 	"time"
@@ -161,7 +162,7 @@ func TestIntegration_IPMode_LimitExceeded_Publishes(t *testing.T) {
 	alrt := &capturingAlerter{}
 	cfg := ipCfg(3, 500)
 
-	proc := NewLogProcessor(stor, pub, alrt, cfg, nil, nil, nil, nil, nil)
+	proc := NewLogProcessor(stor, pub, enforcement.NewNoopEnforcer(), alrt, cfg, nil, nil, nil, nil, nil)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -223,7 +224,7 @@ func TestIntegration_IPMode_Chunking_600IPs(t *testing.T) {
 	alrt := &capturingAlerter{}
 	cfg := ipCfg(5, 500) // chunkSize = 500
 
-	proc := NewLogProcessor(stor, pub, alrt, cfg, nil, nil, nil, nil, nil)
+	proc := NewLogProcessor(stor, pub, enforcement.NewNoopEnforcer(), alrt, cfg, nil, nil, nil, nil, nil)
 	ctx := context.Background()
 
 	proc.ProcessEntries(ctx, []models.LogEntry{
@@ -283,7 +284,7 @@ func TestIntegration_SubnetMode_LimitExceeded_Publishes(t *testing.T) {
 	alrt := &capturingAlerter{}
 	cfg := subnetCfg(2)
 
-	proc := NewLogProcessor(stor, pub, alrt, cfg, nil, nil, nil, nil, nil)
+	proc := NewLogProcessor(stor, pub, enforcement.NewNoopEnforcer(), alrt, cfg, nil, nil, nil, nil, nil)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -334,7 +335,7 @@ func TestIntegration_IPMode_ExcludedIPs_Filtered(t *testing.T) {
 		"192.168.1.100": true,
 	}
 
-	proc := NewLogProcessor(stor, pub, alrt, cfg, nil, nil, nil, nil, nil)
+	proc := NewLogProcessor(stor, pub, enforcement.NewNoopEnforcer(), alrt, cfg, nil, nil, nil, nil, nil)
 	ctx := context.Background()
 
 	proc.ProcessEntries(ctx, []models.LogEntry{
@@ -367,7 +368,7 @@ func TestIntegration_ExcludedUser_NoPublish(t *testing.T) {
 	cfg := ipCfg(2, 500)
 	cfg.ExcludedUsers = map[string]bool{"skip@test.com": true}
 
-	proc := NewLogProcessor(stor, pub, alrt, cfg, nil, nil, nil, nil, nil)
+	proc := NewLogProcessor(stor, pub, enforcement.NewNoopEnforcer(), alrt, cfg, nil, nil, nil, nil, nil)
 	ctx := context.Background()
 
 	proc.ProcessEntries(ctx, []models.LogEntry{
@@ -389,7 +390,7 @@ func TestIntegration_ContextCancellation_StopsProcessing(t *testing.T) {
 	alrt := &capturingAlerter{}
 	cfg := ipCfg(10, 500)
 
-	proc := NewLogProcessor(stor, pub, alrt, cfg, nil, nil, nil, nil, nil)
+	proc := NewLogProcessor(stor, pub, enforcement.NewNoopEnforcer(), alrt, cfg, nil, nil, nil, nil, nil)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel() // already cancelled

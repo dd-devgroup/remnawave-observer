@@ -13,6 +13,7 @@ import (
 	"observer_service/internal/models"
 	"observer_service/internal/services/alerter"
 	"observer_service/internal/services/asn"
+	"observer_service/internal/services/enforcement"
 	"observer_service/internal/services/geoip"
 	"observer_service/internal/services/publisher"
 	"observer_service/internal/services/scoring"
@@ -24,7 +25,8 @@ import (
 // LogProcessor обрабатывает входящие логи.
 type LogProcessor struct {
 	storage           storage.IPStorage
-	publisher         publisher.EventPublisher
+	publisher         publisher.EventPublisher // deprecated: будет удалён в MIG-9
+	enforcer          enforcement.Enforcer      // новый enforcement механизм
 	alerter           alerter.Notifier
 	cfg               *config.Config
 	asnLookup         *asn.ASNLookup         // Сервис для lookup ASN
@@ -45,7 +47,8 @@ type LogProcessor struct {
 // NewLogProcessor создает новый экземпляр LogProcessor.
 func NewLogProcessor(
 	s storage.IPStorage,
-	p publisher.EventPublisher,
+	p publisher.EventPublisher, // deprecated: будет удалён в MIG-9
+	enf enforcement.Enforcer,    // новый enforcement механизм
 	a alerter.Notifier,
 	cfg *config.Config,
 	asnLookup *asn.ASNLookup,
@@ -57,6 +60,7 @@ func NewLogProcessor(
 	lp := &LogProcessor{
 		storage:           s,
 		publisher:         p,
+		enforcer:          enf,
 		alerter:           a,
 		cfg:               cfg,
 		asnLookup:         asnLookup,
