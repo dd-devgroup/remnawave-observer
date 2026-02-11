@@ -391,9 +391,3 @@ docker logs observer-remna | grep rw_enable_fail
 ## Лицензия
 
 MIT License
-
-## Связь
-
-[![Telegram](https://img.shields.io/badge/Telegram-OFL01-2CA5E0?style=for-the-badge&logo=telegram&logoColor=white)](https://t.me/OFL01)
-
-Вопросы, предложения, баг-репорты, вопросы сотрудничества приветствуются.

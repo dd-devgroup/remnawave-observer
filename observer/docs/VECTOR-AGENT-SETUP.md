@@ -45,12 +45,13 @@ After migration from IP-blocking (RabbitMQ + Blocker) to user-level enforcement 
 ## Prerequisites
 
 1. **Xray/V2Ray** configured to write access logs to file:
+
    ```json
    {
-     "log": {
-       "access": "/var/log/xray/access.log",
-       "loglevel": "info"
-     }
+   	"log": {
+   		"access": "/var/log/xray/access.log",
+   		"loglevel": "info"
+   	}
    }
    ```
 
@@ -65,10 +66,12 @@ After migration from IP-blocking (RabbitMQ + Blocker) to user-level enforcement 
 ### 1. Download Configuration Files
 
 From repository `observer_conf/vector-examples/`:
+
 - `vector-node.toml` — Vector configuration
 - `docker-compose.node.yml` — Docker Compose file
 
 Copy to node (e.g., `/opt/vector-agent/`):
+
 ```bash
 mkdir -p /opt/vector-agent
 cd /opt/vector-agent
@@ -82,19 +85,25 @@ cd /opt/vector-agent
 #### Example Xray Log Formats
 
 **Format 1: Standard Xray (email in metadata)**
+
 ```
 2026/02/11 20:00:00 accepted tcp:1.2.3.4:12345 [email:user@example.com >> proxy.example.com:443]
 ```
+
 Regex:
+
 ```toml
 parsed = parse_regex!(.message, r'accepted tcp:(?P<source_ip>[0-9.]+):[0-9]+ \[email:(?P<user_email>[^\s]+)')
 ```
 
 **Format 2: Remnawave Panel (numeric ID)**
+
 ```
 2026/02/11 20:00:00 accepted tcp:1.2.3.4:12345 [inbound_user:12345 >> proxy.example.com:443]
 ```
+
 Regex:
+
 ```toml
 parsed = parse_regex!(.message, r'accepted tcp:(?P<source_ip>[0-9.]+):[0-9]+ \[inbound_user:(?P<user_email>[0-9]+)')
 ```
@@ -104,6 +113,7 @@ parsed = parse_regex!(.message, r'accepted tcp:(?P<source_ip>[0-9.]+):[0-9]+ \[i
 #### Update Log Path
 
 Change `include` path to match your setup:
+
 ```toml
 [sources.xray_access_logs]
   include = ["/var/log/xray/access.log"]
@@ -114,6 +124,7 @@ Change `include` path to match your setup:
 #### Update Observer URL
 
 If using a different Observer endpoint:
+
 ```toml
 [sinks.observer_service]
   uri = "https://your-observer.example.com:38213/log-entry"
@@ -122,17 +133,19 @@ If using a different Observer endpoint:
 ### 3. Adjust docker-compose.node.yml
 
 Mount the correct log directory:
+
 ```yaml
 volumes:
-  - /var/log/xray:/var/log/xray:ro  # Adjust path
+  - /var/log/xray:/var/log/xray:ro # Adjust path
 ```
 
 Optional: Set resource limits based on node capacity:
+
 ```yaml
 deploy:
   resources:
     limits:
-      cpus: '0.5'      # 50% of one core
+      cpus: '0.5' # 50% of one core
       memory: 512M
 ```
 
@@ -144,6 +157,7 @@ docker-compose -f docker-compose.node.yml up -d
 ```
 
 Verify it's running:
+
 ```bash
 docker ps | grep vector-agent
 docker logs vector-agent --tail 50
@@ -152,16 +166,19 @@ docker logs vector-agent --tail 50
 ### 5. Test Configuration
 
 Validate Vector config:
+
 ```bash
 docker exec vector-agent vector validate /etc/vector/vector.toml
 ```
 
 Check if logs are being parsed:
+
 ```bash
 docker logs -f vector-agent
 ```
 
 You should see:
+
 ```
 2026-02-11T20:00:00.000Z  INFO vector: Healthcheck passed.
 2026-02-11T20:00:05.000Z  INFO sink{name=observer_service}: Sent batch of 100 events
@@ -170,11 +187,13 @@ You should see:
 ### 6. Verify Observer Reception
 
 Check Observer logs:
+
 ```bash
 docker logs observer | grep "POST /log-entry"
 ```
 
 Or query Observer health:
+
 ```bash
 curl https://your-observer.example.com:38213/health
 ```
@@ -191,9 +210,11 @@ curl https://your-observer.example.com:38213/health
    - `vector_component_errors_total{component_name="observer_service"}`
 
 2. **Disk buffer usage**:
+
    ```bash
    du -sh /opt/vector-agent/vector-data
    ```
+
    Should stay below 256 MB (configured limit).
 
 3. **Observer metrics** (from Observer logs):
@@ -204,12 +225,14 @@ curl https://your-observer.example.com:38213/health
 ### Health Check Endpoint
 
 Vector checks Observer health every 30s:
+
 ```toml
 healthcheck.enabled = true
 healthcheck.uri = "https://your-observer.example.com:38213/health"
 ```
 
 If health check fails, Vector will:
+
 - Log warnings
 - Continue buffering events to disk
 - Retry when service recovers
@@ -221,12 +244,14 @@ If health check fails, Vector will:
 ### Problem: Vector not sending events
 
 **Check 1:** Verify log path is correct and readable:
+
 ```bash
 docker exec vector-agent ls -la /var/log/xray/access.log
 # Should show file with recent timestamp
 ```
 
 **Check 2:** Test regex manually:
+
 ```bash
 # View sample log line
 docker exec vector-agent tail -1 /var/log/xray/access.log
@@ -234,6 +259,7 @@ docker exec vector-agent tail -1 /var/log/xray/access.log
 ```
 
 **Check 3:** Check Vector internal logs:
+
 ```bash
 docker logs vector-agent 2>&1 | grep -i error
 ```
@@ -241,10 +267,12 @@ docker logs vector-agent 2>&1 | grep -i error
 ### Problem: 413 Request Entity Too Large
 
 Observer has limits:
+
 - `MAX_REQUEST_BYTES=2MB` (default)
 - `MAX_LOG_ENTRIES_PER_REQUEST=1000` (default)
 
 Reduce Vector batch size in `vector-node.toml`:
+
 ```toml
 batch.max_events = 50  # Reduce from 100
 ```
@@ -254,11 +282,13 @@ batch.max_events = 50  # Reduce from 100
 Events are buffering because Observer is unreachable or slow.
 
 **Check network connectivity:**
+
 ```bash
 docker exec vector-agent wget -O- https://your-observer.example.com:38213/health
 ```
 
 **Check buffer size:**
+
 ```bash
 du -sh /opt/vector-agent/vector-data
 ```
@@ -271,12 +301,14 @@ Observer will reject entries without `user_email`.
 
 **Validate parsed output:**
 Enable Vector debug mode in `docker-compose.node.yml`:
+
 ```yaml
 environment:
   - VECTOR_LOG=debug
 ```
 
 Restart and check logs:
+
 ```bash
 docker-compose -f docker-compose.node.yml restart
 docker logs -f vector-agent | grep "user_email"
@@ -291,18 +323,21 @@ If regex doesn't match, update the pattern in `vector-node.toml`.
 ### For High-Traffic Nodes (>10k req/s)
 
 1. **Increase batch size** (reduces HTTP overhead):
+
    ```toml
    batch.max_events = 500
    batch.timeout_secs = 2
    ```
 
 2. **Enable compression**:
+
    ```toml
    [sinks.observer_service]
      compression = "gzip"
    ```
 
 3. **Increase buffer size**:
+
    ```toml
    buffer.max_size = 536870912  # 512 MB
    ```
@@ -319,6 +354,7 @@ If regex doesn't match, update the pattern in `vector-node.toml`.
 ### For Low-Traffic Nodes (<100 req/s)
 
 1. **Reduce batch timeout** (faster delivery):
+
    ```toml
    batch.timeout_secs = 1
    ```
@@ -345,6 +381,7 @@ If regex doesn't match, update the pattern in `vector-node.toml`.
 If you need to revert to the old IP-blocking system:
 
 1. Stop Vector:
+
    ```bash
    docker-compose -f docker-compose.node.yml down
    ```
@@ -376,7 +413,7 @@ docker-compose -f docker-compose.node.yml up -d
 
 # Verify
 docker logs -f vector-agent
-curl https://observer.pr-dev.pro:38213/health
+curl https://your-observer.example.com:38213/health
 
 # Monitor for 5 minutes
 watch -n5 'docker logs vector-agent --tail 10'
@@ -390,7 +427,3 @@ watch -n5 'docker logs vector-agent --tail 10'
 - [Vector Remap Transform](https://vector.dev/docs/reference/vrl/)
 - [Observer API Docs](../internal/api/server.go) — `/log-entry` endpoint
 - [ADR-007](adr/ADR-007-remnawave-user-enforcement.md) — User-level enforcement architecture
-
----
-
-**Questions?** File an issue at [remnawave-observer/issues](https://github.com/your-org/remnawave-observer/issues)
