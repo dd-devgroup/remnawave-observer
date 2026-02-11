@@ -160,6 +160,14 @@ func main() {
 		log.Printf("✅ Auto-Learner инициализирован")
 	}
 
+	// Инициализация Re-enable Scheduler (пока noop enforcer, scheduler не запустится)
+	// TODO(MIG-6): Когда enforcer станет RemnawaveEnforcer, scheduler будет активен
+	var reenableScheduler *enforcement.Scheduler
+	if cfg.RemnawaveBaseURL != "" && cfg.RemnawaveAPIToken != "" {
+		// Real Remnawave client будет создан в MIG-7 при замене noop enforcer
+		log.Println("⚠️  Remnawave scheduler skipped: noop enforcer active (MIG-6)")
+	}
+
 	// Сообщаем WaitGroup, сколько горутин будем запускать
 	goroutineCount := 4 // poolMonitor + workerPool + sideEffectPool + metricsDumper
 	if autoLearner != nil {
@@ -167,6 +175,9 @@ func main() {
 	}
 	if as2orgLoader != nil {
 		goroutineCount++ // RunRefresh
+	}
+	if reenableScheduler != nil {
+		goroutineCount++ // Re-enable scheduler
 	}
 
 	wg.Add(goroutineCount)
@@ -183,6 +194,11 @@ func main() {
 	// Фоновое обновление CAIDA
 	if as2orgLoader != nil {
 		go as2orgLoader.RunRefresh(ctx, &wg)
+	}
+
+	// Запускаем Re-enable Scheduler если настроен
+	if reenableScheduler != nil {
+		go reenableScheduler.Run(ctx, &wg)
 	}
 
 	srv := &http.Server{
