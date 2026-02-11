@@ -15,14 +15,12 @@ type Config struct {
 	ScanMaxKeys                 int    // Макс. количество ключей при SCAN (default: 10000)
 	ScanCount                   int    // Hint COUNT для Redis SCAN (default: 100)
 	ScanTimeBudgetSeconds       int    // Макс. время одной SCAN операции в секундах (default: 30)
-	RabbitMQURL                 string
 	MaxIPsPerUser               int
 	AlertWebhookURL             string
 	UserIPTTL                   time.Duration
 	AlertCooldown               time.Duration
 	ClearIPsDelay               time.Duration
 	BlockDuration               string
-	BlockingExchangeName        string
 	MonitoringInterval          time.Duration
 	DebugEmail                  string
 	DebugIPLimit                int
@@ -67,14 +65,6 @@ type Config struct {
 	MaxRequestBytes         int64 // Максимальный размер body POST /log-entry (default: 2MB)
 	MaxLogEntriesPerRequest int   // Максимальное количество записей в одном запросе (default: 1000)
 
-	// --- ПАРАМЕТРЫ PUBLISHER ---
-	PublisherPoolSize          int // Размер пула каналов RabbitMQ (default: 5)
-	RabbitPublishMaxRetries    int // Макс. количество повторов публикации (default: 5)
-	RabbitPublishBackoffBaseMs int // Базовый интервал backoff в ms (default: 500)
-	RabbitPublishBackoffMaxMs  int // Макс. интервал backoff в ms (default: 30000)
-	MaxIPsPerBlockEvent        int // Макс. количество IP в одном block-event сообщении (default: 500)
-	PublishConfirmTimeoutMs    int // Таймаут ожидания подтверждения от брокера в ms (default: 3000)
-
 	// --- ПАРАМЕТРЫ АВТООБУЧЕНИЯ ---
 	UnknownProvidersLogEnabled bool // Включить логирование неизвестных провайдеров (default: false)
 
@@ -118,14 +108,12 @@ func New() *Config {
 		ScanMaxKeys:                 getEnvInt("SCAN_MAX_KEYS", 10000),
 		ScanCount:                   getEnvInt("SCAN_COUNT", 100),
 		ScanTimeBudgetSeconds:       getEnvInt("SCAN_TIME_BUDGET_SECONDS", 30),
-		RabbitMQURL:                 getEnv("RABBITMQ_URL", "amqp://guest:guest@localhost/"),
 		MaxIPsPerUser:               getEnvInt("MAX_IPS_PER_USER", 3),
 		AlertWebhookURL:             getEnv("ALERT_WEBHOOK_URL", ""),
 		UserIPTTL:                   time.Duration(getEnvInt("USER_IP_TTL_SECONDS", 24*60*60)) * time.Second,
 		AlertCooldown:               time.Duration(getEnvInt("ALERT_COOLDOWN_SECONDS", 60*60)) * time.Second,
 		ClearIPsDelay:               time.Duration(getEnvInt("CLEAR_IPS_DELAY_SECONDS", 30)) * time.Second,
 		BlockDuration:               getEnv("BLOCK_DURATION", "5m"),
-		BlockingExchangeName:        getEnv("BLOCKING_EXCHANGE_NAME", "blocking_exchange"),
 		MonitoringInterval:          time.Duration(getEnvInt("MONITORING_INTERVAL", 300)) * time.Second,
 		DebugEmail:                  getEnv("DEBUG_EMAIL", ""),
 		DebugIPLimit:                getEnvInt("DEBUG_IP_LIMIT", 1),
@@ -140,14 +128,6 @@ func New() *Config {
 		// --- Загрузка параметров входящих запросов ---
 		MaxRequestBytes:         int64(getEnvInt("MAX_REQUEST_BYTES", 2*1024*1024)),
 		MaxLogEntriesPerRequest: getEnvInt("MAX_LOG_ENTRIES_PER_REQUEST", 1000),
-
-		// --- Загрузка параметров publisher ---
-		PublisherPoolSize:          getEnvInt("PUBLISHER_POOL_SIZE", 5),
-		RabbitPublishMaxRetries:    getEnvInt("RABBIT_PUBLISH_MAX_RETRIES", 5),
-		RabbitPublishBackoffBaseMs: getEnvInt("RABBIT_PUBLISH_BACKOFF_BASE_MS", 500),
-		RabbitPublishBackoffMaxMs:  getEnvInt("RABBIT_PUBLISH_BACKOFF_MAX_MS", 30000),
-		MaxIPsPerBlockEvent:        getEnvInt("MAX_IPS_PER_BLOCK_EVENT", 500),
-		PublishConfirmTimeoutMs:    getEnvInt("PUBLISH_CONFIRM_TIMEOUT_MS", 3000),
 
 		// --- Загрузка параметров подсетей ---
 		DetectBySubnet:    getEnvBool("DETECT_BY_SUBNET", false),

@@ -63,23 +63,6 @@ func (m *MockStorage) GetUserActiveASNs(ctx context.Context, userEmail string) (
 	return make(map[string]*models.ASNInfo), nil
 }
 
-type MockPublisher struct {
-	publishedMessages int
-}
-
-func (m *MockPublisher) PublishBlockMessage(msg models.BlockMessage) error {
-	m.publishedMessages++
-	return nil
-}
-
-func (m *MockPublisher) Close() error {
-	return nil
-}
-
-func (m *MockPublisher) Ping() error {
-	return nil
-}
-
 type MockAlerter struct {
 	alertsSent int
 }
@@ -105,11 +88,10 @@ func TestLogProcessor_ASNMode_Initialization(t *testing.T) {
 	}
 
 	storage := &MockStorage{}
-	publisher := &MockPublisher{}
 	alerter := &MockAlerter{}
 
 	// Без ASN lookup (будет использован fallback)
-	processor := NewLogProcessor(storage, publisher, enforcement.NewNoopEnforcer(), alerter, cfg, nil, nil, nil, nil, nil)
+	processor := NewLogProcessor(storage, enforcement.NewNoopEnforcer(), alerter, cfg, nil, nil, nil, nil, nil)
 
 	if processor.cfg.DetectByASN != true {
 		t.Error("Expected ASN mode to be enabled")
@@ -139,10 +121,9 @@ func TestLogProcessor_ASNMode_ProcessEntry(t *testing.T) {
 	}
 
 	storage := &MockStorage{}
-	publisher := &MockPublisher{}
 	alerter := &MockAlerter{}
 
-	processor := NewLogProcessor(storage, publisher, enforcement.NewNoopEnforcer(), alerter, cfg, nil, nil, nil, nil, nil)
+	processor := NewLogProcessor(storage, enforcement.NewNoopEnforcer(), alerter, cfg, nil, nil, nil, nil, nil)
 
 	entry := models.LogEntry{
 		UserEmail: "test@example.com",
@@ -178,12 +159,11 @@ func TestLogProcessor_ASNMode_ExcludedASN(t *testing.T) {
 	}
 
 	storage := &MockStorage{}
-	publisher := &MockPublisher{}
 	alerter := &MockAlerter{}
 
 	// Примечание: Для полного теста нужна реальная ASN база
 	// Здесь тестируем логику без реального lookup
-	processor := NewLogProcessor(storage, publisher, enforcement.NewNoopEnforcer(), alerter, cfg, nil, nil, nil, nil, nil)
+	processor := NewLogProcessor(storage, enforcement.NewNoopEnforcer(), alerter, cfg, nil, nil, nil, nil, nil)
 
 	entry := models.LogEntry{
 		UserEmail: "test@example.com",
@@ -215,10 +195,9 @@ func TestLogProcessor_FallbackBehavior(t *testing.T) {
 	}
 
 	storage := &MockStorage{}
-	publisher := &MockPublisher{}
 	alerter := &MockAlerter{}
 
-	processor := NewLogProcessor(storage, publisher, enforcement.NewNoopEnforcer(), alerter, cfg, nil, nil, nil, nil, nil)
+	processor := NewLogProcessor(storage, enforcement.NewNoopEnforcer(), alerter, cfg, nil, nil, nil, nil, nil)
 
 	testIPs := []string{
 		"176.59.40.10",

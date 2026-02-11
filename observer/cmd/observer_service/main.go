@@ -20,7 +20,6 @@ import (
 	"observer_service/internal/services/enforcement"
 	"observer_service/internal/services/geodata"
 	"observer_service/internal/services/geoip"
-	"observer_service/internal/services/publisher"
 	"observer_service/internal/services/remnawave"
 	"observer_service/internal/services/scoring"
 	"observer_service/internal/services/storage"
@@ -45,13 +44,7 @@ func main() {
 	redisStore.SetScanCount(cfg.ScanCount)
 	redisStore.SetScanTimeBudget(time.Duration(cfg.ScanTimeBudgetSeconds) * time.Second)
 
-	rabbitPublisher, err := publisher.NewRabbitMQPublisher(cfg.RabbitMQURL, cfg.BlockingExchangeName, cfg.PublisherPoolSize, cfg.RabbitPublishMaxRetries, cfg.RabbitPublishBackoffBaseMs, cfg.RabbitPublishBackoffMaxMs, cfg.PublishConfirmTimeoutMs)
-	if err != nil {
-		log.Fatalf("Критическая ошибка: не удалось подключиться к RabbitMQ: %v", err)
-	}
-	defer rabbitPublisher.Close()
-
-	// MIG-7: Инициализация Remnawave Enforcer
+	// MIG-9: RabbitMQ publisher удалён, используется Remnawave enforcement
 	var enforcer enforcement.Enforcer
 	if cfg.RemnawaveBaseURL != "" && cfg.RemnawaveAPIToken != "" {
 		remnawaveClient := remnawave.NewClient(
@@ -126,7 +119,6 @@ func main() {
 
 	logProcessor := processor.NewLogProcessor(
 		redisStore,
-		rabbitPublisher,
 		enforcer,
 		webhookAlerter,
 		cfg,

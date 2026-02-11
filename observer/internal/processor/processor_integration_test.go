@@ -38,33 +38,6 @@ func (s *subnetMockStorage) CheckAndAddSubnet(_ context.Context, _, _ string, _ 
 	return s.result, nil
 }
 
-// capturingPublisher records every BlockMessage it receives (thread-safe) - DEPRECATED (MIG-7).
-type capturingPublisher struct {
-	mu   sync.Mutex
-	msgs []models.BlockMessage
-}
-
-func (p *capturingPublisher) PublishBlockMessage(msg models.BlockMessage) error {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	p.msgs = append(p.msgs, msg)
-	return nil
-}
-func (p *capturingPublisher) Close() error { return nil }
-func (p *capturingPublisher) Ping() error  { return nil }
-
-func (p *capturingPublisher) count() int {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	return len(p.msgs)
-}
-
-func (p *capturingPublisher) get(i int) models.BlockMessage {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	return p.msgs[i]
-}
-
 // capturingEnforcer captures disable calls for testing (MIG-7).
 type capturingEnforcer struct {
 	mu       sync.Mutex
@@ -128,10 +101,9 @@ func (a *capturingAlerter) get(i int) models.AlertPayload {
 
 // --- helpers ------------------------------------------------------------
 
-func ipCfg(maxIPs int, chunkSize int) *config.Config {
+func ipCfg(maxIPs int) *config.Config {
 	return &config.Config{
 		MaxIPsPerUser:              maxIPs,
-		MaxIPsPerBlockEvent:        chunkSize,
 		UserIPTTL:                  time.Hour,
 		AlertCooldown:              time.Minute,
 		ClearIPsDelay:              time.Hour, // never fires during test
@@ -149,12 +121,11 @@ func ipCfg(maxIPs int, chunkSize int) *config.Config {
 }
 
 func subnetCfg(maxSubnets int) *config.Config {
-	cfg := ipCfg(3, 500)
-	cfg.DetectBySubnet      = true
-	cfg.MaxSubnetsPerUser   = maxSubnets
-	cfg.SubnetMaskIPv4      = 24
-	cfg.UserSubnetTTL       = time.Hour
-	cfg.MaxIPsPerBlockEvent = 500
+	cfg := ipCfg(3)
+	cfg.DetectBySubnet    = true
+	cfg.MaxSubnetsPerUser = maxSubnets
+	cfg.SubnetMaskIPv4    = 24
+	cfg.UserSubnetTTL     = time.Hour
 	return cfg
 }
 
@@ -193,12 +164,11 @@ func TestIntegration_IPMode_LimitExceeded_Publishes(t *testing.T) {
 			AllUserItems: allIPs,
 		},
 	}
-	pub := &capturingPublisher{}
 	alrt := &capturingAlerter{}
-	cfg := ipCfg(3, 500)
+	cfg := ipCfg(3)
 
 	enf := &capturingEnforcer{}
-	proc := NewLogProcessor(stor, pub, enf, alrt, cfg, nil, nil, nil, nil, nil)
+	proc := NewLogProcessor(stor, enf, alrt, cfg, nil, nil, nil, nil, nil)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -259,12 +229,11 @@ func TestIntegration_IPMode_Chunking_600IPs(t *testing.T) {
 			AllUserItems: allIPs,
 		},
 	}
-	pub := &capturingPublisher{}
 	alrt := &capturingAlerter{}
-	cfg := ipCfg(5, 500) // chunkSize = 500
+	cfg := ipCfg(5) // chunkSize = 500
 
 	enf := &capturingEnforcer{}
-	proc := NewLogProcessor(stor, pub, enf, alrt, cfg, nil, nil, nil, nil, nil)
+	proc := NewLogProcessor(stor, enf, alrt, cfg, nil, nil, nil, nil, nil)
 	ctx := context.Background()
 
 	proc.ProcessEntries(ctx, []models.LogEntry{
@@ -298,12 +267,11 @@ func TestIntegration_SubnetMode_LimitExceeded_Publishes(t *testing.T) {
 			AllUserItems: allSubnets,
 		},
 	}
-	pub := &capturingPublisher{}
 	alrt := &capturingAlerter{}
 	cfg := subnetCfg(2)
 
 	enf := &capturingEnforcer{}
-	proc := NewLogProcessor(stor, pub, enf, alrt, cfg, nil, nil, nil, nil, nil)
+	proc := NewLogProcessor(stor, enf, alrt, cfg, nil, nil, nil, nil, nil)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -351,15 +319,14 @@ func TestIntegration_IPMode_ExcludedIPs_Filtered(t *testing.T) {
 			AllUserItems: allIPs,
 		},
 	}
-	pub := &capturingPublisher{}
 	alrt := &capturingAlerter{}
-	cfg := ipCfg(2, 500)
+	cfg := ipCfg(2)
 	cfg.ExcludedIPs = map[string]bool{
 		"192.168.1.100": true,
 	}
 
 	enf := &capturingEnforcer{}
-	proc := NewLogProcessor(stor, pub, enf, alrt, cfg, nil, nil, nil, nil, nil)
+	proc := NewLogProcessor(stor, enf, alrt, cfg, nil, nil, nil, nil, nil)
 	ctx := context.Background()
 
 	proc.ProcessEntries(ctx, []models.LogEntry{
@@ -385,13 +352,12 @@ func TestIntegration_ExcludedUser_NoPublish(t *testing.T) {
 	stor := &ipMockStorage{
 		result: &models.CheckResult{StatusCode: 1, CurrentCount: 5, AllUserItems: []string{"1.2.3.4"}},
 	}
-	pub := &capturingPublisher{}
 	alrt := &capturingAlerter{}
-	cfg := ipCfg(2, 500)
+	cfg := ipCfg(2)
 	cfg.ExcludedUsers = map[string]bool{"33333": true}
 
 	enf := &capturingEnforcer{}
-	proc := NewLogProcessor(stor, pub, enf, alrt, cfg, nil, nil, nil, nil, nil)
+	proc := NewLogProcessor(stor, enf, alrt, cfg, nil, nil, nil, nil, nil)
 	ctx := context.Background()
 
 	proc.ProcessEntries(ctx, []models.LogEntry{
@@ -409,12 +375,11 @@ func TestIntegration_ContextCancellation_StopsProcessing(t *testing.T) {
 	stor := &ipMockStorage{
 		result: &models.CheckResult{StatusCode: 0, CurrentCount: 1, IsNew: true},
 	}
-	pub := &capturingPublisher{}
 	alrt := &capturingAlerter{}
-	cfg := ipCfg(10, 500)
+	cfg := ipCfg(10)
 
 	enf := &capturingEnforcer{}
-	proc := NewLogProcessor(stor, pub, enf, alrt, cfg, nil, nil, nil, nil, nil)
+	proc := NewLogProcessor(stor, enf, alrt, cfg, nil, nil, nil, nil, nil)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel() // already cancelled
@@ -429,7 +394,7 @@ func TestIntegration_ContextCancellation_StopsProcessing(t *testing.T) {
 	// With a cancelled context the loop breaks after the first select hits
 	// ctx.Done(); at most 1 entry may have slipped through the default branch
 	// before the cancellation was visible. The important thing: no panic.
-	if pub.count() != 0 {
-		t.Errorf("no publish expected with cancelled ctx, got %d", pub.count())
+	if enf.count() != 0 {
+		t.Errorf("no enforcement expected with cancelled ctx, got %d", enf.count())
 	}
 }

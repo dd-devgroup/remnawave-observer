@@ -67,20 +67,6 @@ type GeoAnalysisResult struct {
 	GeoFlags        []string `json:"geo_flags"`
 }
 
-// BlockMessage представляет сообщение для отправки в очередь на блокировку.
-// Поля EventID / ChunkIndex / ChunkTotal / SchemaVersion присутствуют только
-// при чанкинге (len(ips) > MaxIPsPerBlockEvent); одночанковые сообщения
-// без них сериализуются в том же формате что и раньше (omitempty).
-type BlockMessage struct {
-	IPs      []string `json:"ips"`
-	Duration string   `json:"duration"`
-
-	EventID       string `json:"event_id,omitempty"`
-	ChunkIndex    *int   `json:"chunk_index,omitempty"` // 0-based
-	ChunkTotal    *int   `json:"chunk_total,omitempty"`
-	SchemaVersion int    `json:"schema_version,omitempty"` // 2 при чанкинге
-}
-
 // CheckResult представляет результат выполнения Lua-скрипта.
 type CheckResult struct {
 	StatusCode   int64
