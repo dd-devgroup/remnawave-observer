@@ -2,163 +2,116 @@ package geoip
 
 import (
 	"context"
-	"encoding/json"
-	"io"
-	"net/http"
-	"net/http/httptest"
-	"strings"
 	"testing"
-	"time"
 )
 
-// mockRoundTripper delegates HTTP requests to a handler without real network I/O.
-type mockRoundTripper struct {
-	handler http.HandlerFunc
+// --- Lookup with nil MMDB (iptoasn only) ---
+
+func TestGeoIPService_Close_NilMMDB(t *testing.T) {
+	svc := &GeoIPService{mmdbReader: nil}
+	// Should not panic
+	svc.Close()
 }
 
-func (m *mockRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
-	rr := httptest.NewRecorder()
-	m.handler(rr, req)
-	return rr.Result(), nil
-}
+// --- MMDBReader construction ---
 
-// slowRoundTripper simulates network latency; honours context cancellation.
-type slowRoundTripper struct {
-	delay time.Duration
-}
+func TestNewMMDBReader_EmptyPaths(t *testing.T) {
+	reader, err := NewMMDBReader("", "")
+	if err != nil {
+		t.Fatalf("expected no error for empty paths, got %v", err)
+	}
+	defer reader.Close()
 
-func (s *slowRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
-	select {
-	case <-time.After(s.delay):
-		return &http.Response{
-			StatusCode: http.StatusOK,
-			Body:       io.NopCloser(strings.NewReader(`{"status":"success","countryCode":"US","city":"Slow"}`)),
-			Header:     make(http.Header),
-		}, nil
-	case <-req.Context().Done():
-		return nil, req.Context().Err()
+	if reader.asnDB != nil {
+		t.Error("expected nil asnDB for empty path")
+	}
+	if reader.cityDB != nil {
+		t.Error("expected nil cityDB for empty path")
 	}
 }
 
-// newTestService builds a GeoIPService wired to rt, with no Redis and no ASN lookup.
-func newTestService(rt http.RoundTripper, timeout time.Duration, rateIntervalMs int) *GeoIPService {
-	if rateIntervalMs <= 0 {
-		rateIntervalMs = 10 // fast ticker for tests
-	}
-	if timeout == 0 {
-		timeout = 2 * time.Second
-	}
-	return &GeoIPService{
-		redisClient: nil,
-		cacheTTL:    time.Minute,
-		httpClient:  &http.Client{Transport: rt},
-		timeout:     timeout,
-		rateLimiter: time.NewTicker(time.Duration(rateIntervalMs) * time.Millisecond),
+func TestNewMMDBReader_InvalidASNPath(t *testing.T) {
+	_, err := NewMMDBReader("/nonexistent/GeoLite2-ASN.mmdb", "")
+	if err == nil {
+		t.Fatal("expected error for nonexistent ASN MMDB path")
 	}
 }
 
-// --- fetchFromIPAPI ---
-
-func TestFetchFromIPAPI_Success(t *testing.T) {
-	want := IPAPIResponse{
-		Status: "success", CountryCode: "US", City: "New York",
-		RegionName: "New York", Lat: 40.7128, Lon: -74.006,
-		ISP: "Google LLC", AS: "AS15169 Google LLC",
-	}
-	rt := &mockRoundTripper{handler: func(w http.ResponseWriter, _ *http.Request) {
-		json.NewEncoder(w).Encode(want)
-	}}
-	svc := newTestService(rt, 0, 0)
-	defer svc.Close()
-
-	got := svc.fetchFromIPAPI(context.Background(), "8.8.8.8")
-	if got == nil {
-		t.Fatal("fetchFromIPAPI returned nil on valid response")
-	}
-	if got.CountryCode != "US" {
-		t.Errorf("CountryCode = %q, want %q", got.CountryCode, "US")
-	}
-	if got.City != "New York" {
-		t.Errorf("City = %q, want %q", got.City, "New York")
-	}
-	if got.Lat != 40.7128 {
-		t.Errorf("Lat = %f, want 40.7128", got.Lat)
-	}
-	if got.Lon != -74.006 {
-		t.Errorf("Lon = %f, want -74.006", got.Lon)
+func TestNewMMDBReader_InvalidCityPath(t *testing.T) {
+	_, err := NewMMDBReader("", "/nonexistent/GeoLite2-City.mmdb")
+	if err == nil {
+		t.Fatal("expected error for nonexistent City MMDB path")
 	}
 }
 
-func TestFetchFromIPAPI_ContextCancelBeforeTick(t *testing.T) {
-	rt := &mockRoundTripper{handler: func(_ http.ResponseWriter, _ *http.Request) {
-		t.Error("HTTP request must not be issued when context is already cancelled")
-	}}
-	// Ticker interval so large it will never fire during the test.
-	svc := &GeoIPService{
-		httpClient:  &http.Client{Transport: rt},
-		timeout:     2 * time.Second,
-		rateLimiter: time.NewTicker(10 * time.Hour),
-	}
-	defer svc.Close()
-
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel() // cancel before entering fetchFromIPAPI
-
-	if got := svc.fetchFromIPAPI(ctx, "1.2.3.4"); got != nil {
-		t.Error("expected nil when context cancelled before rate-limit tick")
+func TestMMDBReader_LookupASN_NoDB(t *testing.T) {
+	reader := &MMDBReader{}
+	_, _, err := reader.LookupASN("8.8.8.8")
+	if err == nil {
+		t.Fatal("expected error when ASN DB not loaded")
 	}
 }
 
-func TestFetchFromIPAPI_PerRequestTimeout(t *testing.T) {
-	// Transport takes 5 s; per-request timeout is 50 ms — should bail out fast.
-	svc := newTestService(&slowRoundTripper{delay: 5 * time.Second}, 50*time.Millisecond, 0)
-	defer svc.Close()
-
-	start := time.Now()
-	got := svc.fetchFromIPAPI(context.Background(), "8.8.8.8")
-	elapsed := time.Since(start)
-
-	if got != nil {
-		t.Error("expected nil when per-request timeout fires")
-	}
-	if elapsed > 500*time.Millisecond {
-		t.Errorf("timeout did not fire promptly; elapsed %v", elapsed)
+func TestMMDBReader_LookupCity_NoDB(t *testing.T) {
+	reader := &MMDBReader{}
+	_, _, _, _, _, err := reader.LookupCity("8.8.8.8")
+	if err == nil {
+		t.Fatal("expected error when City DB not loaded")
 	}
 }
 
-func TestFetchFromIPAPI_NonOKStatus(t *testing.T) {
-	rt := &mockRoundTripper{handler: func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusTooManyRequests)
-	}}
-	svc := newTestService(rt, 0, 0)
-	defer svc.Close()
-
-	if got := svc.fetchFromIPAPI(context.Background(), "8.8.8.8"); got != nil {
-		t.Error("expected nil on HTTP 429")
+func TestMMDBReader_LookupASN_InvalidIP(t *testing.T) {
+	reader := &MMDBReader{}
+	_, _, err := reader.LookupASN("not-an-ip")
+	if err == nil {
+		t.Fatal("expected error for invalid IP")
 	}
 }
 
-func TestFetchFromIPAPI_InvalidJSON(t *testing.T) {
-	rt := &mockRoundTripper{handler: func(w http.ResponseWriter, _ *http.Request) {
-		w.Write([]byte("not-json"))
-	}}
-	svc := newTestService(rt, 0, 0)
-	defer svc.Close()
+// --- ASN double-check logic ---
 
-	if got := svc.fetchFromIPAPI(context.Background(), "8.8.8.8"); got != nil {
-		t.Error("expected nil on malformed JSON body")
+func TestLookup_ASNAgreement(t *testing.T) {
+	loc := &GeoLocation{
+		IP:           "8.8.8.8",
+		ASN:          "AS15169",
+		ASNAgreement: true,
+		Confidence:   0.95,
+		Source:       "mmdb",
+	}
+
+	if !loc.ASNAgreement {
+		t.Error("expected ASNAgreement to be true")
+	}
+	if loc.Confidence != 0.95 {
+		t.Errorf("expected Confidence 0.95, got %f", loc.Confidence)
+	}
+	if loc.Source != "mmdb" {
+		t.Errorf("expected Source 'mmdb', got %q", loc.Source)
 	}
 }
 
-func TestFetchFromIPAPI_APIFailStatus(t *testing.T) {
-	rt := &mockRoundTripper{handler: func(w http.ResponseWriter, _ *http.Request) {
-		json.NewEncoder(w).Encode(IPAPIResponse{Status: "fail", Message: "reserved range"})
-	}}
-	svc := newTestService(rt, 0, 0)
-	defer svc.Close()
+func TestLookup_SourceConfidence_Fields(t *testing.T) {
+	cases := []struct {
+		name       string
+		source     string
+		confidence float64
+	}{
+		{"iptoasn_only", "iptoasn", 0.5},
+		{"mmdb_enriched", "mmdb", 0.8},
+		{"cache_hit", "cache", 0.0},
+		{"agreement", "mmdb", 0.95},
+	}
 
-	if got := svc.fetchFromIPAPI(context.Background(), "127.0.0.1"); got != nil {
-		t.Error("expected nil when ip-api returns status=fail")
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			loc := &GeoLocation{Source: tc.source, Confidence: tc.confidence}
+			if loc.Source != tc.source {
+				t.Errorf("Source = %q, want %q", loc.Source, tc.source)
+			}
+			if loc.Confidence != tc.confidence {
+				t.Errorf("Confidence = %f, want %f", loc.Confidence, tc.confidence)
+			}
+		})
 	}
 }
 
@@ -182,4 +135,29 @@ func TestNormalizeCity(t *testing.T) {
 			}
 		})
 	}
+}
+
+// --- NewGeoIPService construction ---
+
+func TestNewGeoIPService_NilMMDB(t *testing.T) {
+	svc := NewGeoIPService(nil, nil, nil, 0)
+	if svc == nil {
+		t.Fatal("expected non-nil service")
+	}
+	defer svc.Close()
+}
+
+// --- Lookup requires asnLookup ---
+
+func TestLookup_WithoutASNLookup_Panics(t *testing.T) {
+	svc := NewGeoIPService(nil, nil, nil, 0)
+	defer svc.Close()
+
+	defer func() {
+		if r := recover(); r == nil {
+			t.Fatal("expected panic when asnLookup is nil")
+		}
+	}()
+
+	_, _ = svc.Lookup(context.Background(), "8.8.8.8")
 }

@@ -12,6 +12,7 @@ import (
 
 	"observer_service/internal/api"
 	"observer_service/internal/config"
+	"observer_service/internal/database"
 	"observer_service/internal/metrics"
 	"observer_service/internal/monitor"
 	"observer_service/internal/processor"
@@ -44,6 +45,21 @@ func main() {
 	redisStore.SetScanCount(cfg.ScanCount)
 	redisStore.SetScanTimeBudget(time.Duration(cfg.ScanTimeBudgetSeconds) * time.Second)
 
+	// Initialize PostgreSQL
+	if cfg.PostgresDSN == "" {
+		log.Fatalf("Critical error: POSTGRES_DSN is required but not set")
+	}
+	db, err := database.NewPostgresDB(cfg.PostgresDSN)
+	if err != nil {
+		log.Fatalf("Critical error: failed to connect to PostgreSQL: %v", err)
+	}
+	if err := database.AutoMigrate(db); err != nil {
+		log.Fatalf("Critical error: database migration failed: %v", err)
+	}
+	repo := database.NewGormRepository(db)
+	defer repo.Close()
+	log.Println("PostgreSQL initialized and migrated")
+
 	// MIG-9: RabbitMQ publisher removed, using Remnawave enforcement
 	var enforcer enforcement.Enforcer
 	if cfg.RemnawaveBaseURL != "" && cfg.RemnawaveAPIToken != "" {
@@ -63,16 +79,13 @@ func main() {
 
 	webhookAlerter := alerter.NewWebhookAlerter(cfg.AlertWebhookURL)
 
-	// Initialize ASN lookup service (optional)
-	var asnLookup *asn.ASNLookup
-	if cfg.DetectByASN {
-		asnLookup, err = asn.NewASNLookup(cfg.IPtoASNDownloadURL, cfg.IPtoASNUpdateInterval)
-		if err != nil {
-			log.Fatalf("Critical error: failed to load ASN database: %v", err)
-		}
-		defer asnLookup.Close()
-		log.Printf("✅ ASN mode activated (records: %d)", asnLookup.Count())
+	// Initialize ASN lookup service
+	asnLookup, err := asn.NewASNLookup(cfg.IPtoASNDownloadURL, cfg.IPtoASNUpdateInterval)
+	if err != nil {
+		log.Fatalf("Critical error: failed to load ASN database: %v", err)
 	}
+	defer asnLookup.Close()
+	log.Printf("ASN lookup initialized (records: %d)", asnLookup.Count())
 
 	// Initialize GeoData loader (optional)
 	var geoDataLoader *geodata.GeoDataLoader
@@ -92,12 +105,18 @@ func main() {
 		}
 		log.Printf("✅ GeoData loaded (agglomerations: %d)", len(geoDataLoader.GetAgglomerations()))
 
-		// Initialize GeoIP service if ASN lookup is available
-		if asnLookup != nil {
-			geoService = geoip.NewGeoIPService(asnLookup, redisStore.GetClient(), cfg.GeoIPCacheTTL, cfg.GeoIPTimeout, cfg.GeoIPRateIntervalMs)
-			geoAnalyzer = geoip.NewGeoAnalyzer(geoService, geoDataLoader)
-			log.Printf("✅ GeoIP service initialized (cache TTL: %v)", cfg.GeoIPCacheTTL)
+		// Initialize MMDB reader (optional — files may not exist)
+		var mmdbReader *geoip.MMDBReader
+		mmdbReader, err = geoip.NewMMDBReader(cfg.GeoLiteASNPath, cfg.GeoLiteCityPath)
+		if err != nil {
+			log.Printf("Warning: MMDB files not available, GeoIP enrichment will be limited: %v", err)
+			mmdbReader = nil
 		}
+
+		// Initialize GeoIP service
+		geoService = geoip.NewGeoIPService(asnLookup, mmdbReader, redisStore.GetClient(), cfg.GeoIPCacheTTL)
+		geoAnalyzer = geoip.NewGeoAnalyzer(geoService, geoDataLoader)
+		log.Printf("GeoIP service initialized (cache TTL: %v, MMDB: %v)", cfg.GeoIPCacheTTL, mmdbReader != nil)
 
 		// Initialize ASN classifier
 		asnClassifier = asn.NewASNClassifier(geoDataLoader)
@@ -123,6 +142,7 @@ func main() {
 		webhookAlerter,
 		cfg,
 		asnLookup,
+		repo,
 		geoService,
 		geoAnalyzer,
 		asnClassifier,
@@ -188,7 +208,7 @@ func main() {
 	}
 
 	// Tell WaitGroup how many goroutines we'll launch
-	goroutineCount := 4 // poolMonitor + workerPool + sideEffectPool + metricsDumper
+	goroutineCount := 5 // poolMonitor + workerPool + sideEffectPool + metricsDumper + batchWriter
 	if autoLearner != nil {
 		goroutineCount++
 	}
@@ -203,6 +223,7 @@ func main() {
 	go poolMonitor.Run(ctx, &wg)
 	go logProcessor.StartWorkerPool(ctx, &wg)
 	go logProcessor.StartSideEffectWorkerPool(ctx, &wg)
+	go logProcessor.StartBatchWriter(ctx, &wg)
 	go metrics.StartDumper(ctx, &wg, 60*time.Second)
 
 	// Start Auto-Learner if enabled

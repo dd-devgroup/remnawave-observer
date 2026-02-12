@@ -11,13 +11,12 @@ import (
 // Config хранит всю конфигурацию приложения.
 type Config struct {
 	Port                        string
+	PostgresDSN                 string // DSN for PostgreSQL (required, fatal if empty)
 	RedisURL                    string
 	ScanMaxKeys                 int    // Макс. количество ключей при SCAN (default: 10000)
 	ScanCount                   int    // Hint COUNT для Redis SCAN (default: 100)
 	ScanTimeBudgetSeconds       int    // Макс. время одной SCAN операции в секундах (default: 30)
-	MaxIPsPerUser               int
 	AlertWebhookURL             string
-	UserIPTTL                   time.Duration
 	AlertCooldown               time.Duration
 	ClearIPsDelay               time.Duration
 	BlockDuration               string
@@ -32,26 +31,18 @@ type Config struct {
 	SideEffectChannelBufferSize int
 	SideEffectTimeout          time.Duration // Таймаут на одну побочную задачу (default: 10s)
 
-	// --- ПАРАМЕТРЫ ДЛЯ РЕЖИМА ПОДСЕТЕЙ ---
-	DetectBySubnet    bool          // Включить режим детекции по подсетям
-	MaxSubnetsPerUser int           
-	UserSubnetTTL     time.Duration 
-	SubnetMaskIPv4    int           
-	ExcludedSubnets   map[string]bool 
-
 	// --- ПАРАМЕТРЫ ДЛЯ РЕЖИМА ASN ---
-	DetectByASN          bool            // Включить режим детекции по ASN
 	IPtoASNDownloadURL   string          // URL для скачивания базы iptoasn.com
 	IPtoASNUpdateInterval time.Duration  // Интервал обновления базы ASN
 	MaxASNsPerUser       int             // Лимит уникальных ASN на пользователя
-	ASNFallbackMask      int             // Маска для fallback если ASN не найден (по умолчанию 16)
+	UserASNTTL           time.Duration   // TTL для ASN записей пользователя
 	ExcludedASNs         map[string]bool // ASN которые не считаются (например Cloudflare, Google)
 
 	// --- ПАРАМЕТРЫ GEOIP ---
 	GeoIPEnabled        bool          // Включить GeoIP анализ
 	GeoIPCacheTTL       time.Duration // TTL для кэша GeoIP (default: 24 часа)
-	GeoIPTimeout        time.Duration // Таймаут на один HTTP-запрос к ip-api.com (default: 3s)
-	GeoIPRateIntervalMs int // Минимальный интервал между запросами к ip-api.com в ms (default: 1350)
+	GeoLiteASNPath      string        // Path to GeoLite2-ASN.mmdb (default: /app/data/GeoLite2-ASN.mmdb)
+	GeoLiteCityPath     string        // Path to GeoLite2-City.mmdb (default: /app/data/GeoLite2-City.mmdb)
 	GeoDataConfigDir    string        // Директория с конфигами (agglomerations.yaml, providers.yaml)
 	GeoDataDataDir      string        // Директория для записываемых данных (unknown_providers.json, backups)
 
@@ -93,13 +84,12 @@ type Config struct {
 func New() *Config {
 	cfg := &Config{
 		Port:                        getEnv("PORT", "9000"),
+		PostgresDSN:                 getEnv("POSTGRES_DSN", ""),
 		RedisURL:                    getEnv("REDIS_URL", "redis://localhost:6379/0"),
 		ScanMaxKeys:                 getEnvInt("SCAN_MAX_KEYS", 10000),
 		ScanCount:                   getEnvInt("SCAN_COUNT", 100),
 		ScanTimeBudgetSeconds:       getEnvInt("SCAN_TIME_BUDGET_SECONDS", 30),
-		MaxIPsPerUser:               getEnvInt("MAX_IPS_PER_USER", 3),
 		AlertWebhookURL:             getEnv("ALERT_WEBHOOK_URL", ""),
-		UserIPTTL:                   time.Duration(getEnvInt("USER_IP_TTL_SECONDS", 24*60*60)) * time.Second,
 		AlertCooldown:               time.Duration(getEnvInt("ALERT_COOLDOWN_SECONDS", 60*60)) * time.Second,
 		ClearIPsDelay:               time.Duration(getEnvInt("CLEAR_IPS_DELAY_SECONDS", 30)) * time.Second,
 		BlockDuration:               getEnv("BLOCK_DURATION", "5m"),
@@ -118,26 +108,18 @@ func New() *Config {
 		MaxRequestBytes:         int64(getEnvInt("MAX_REQUEST_BYTES", 2*1024*1024)),
 		MaxLogEntriesPerRequest: getEnvInt("MAX_LOG_ENTRIES_PER_REQUEST", 1000),
 
-		// --- Загрузка параметров подсетей ---
-		DetectBySubnet:    getEnvBool("DETECT_BY_SUBNET", false),
-		MaxSubnetsPerUser: getEnvInt("MAX_SUBNETS_PER_USER", 3),
-		UserSubnetTTL:     time.Duration(getEnvInt("USER_SUBNET_TTL_SECONDS", 86400)) * time.Second,
-		SubnetMaskIPv4:    getEnvInt("SUBNET_MASK_IPV4", 24),
-		ExcludedSubnets:   parseSet(getEnv("EXCLUDED_SUBNETS", "")),
-
 		// --- Загрузка параметров ASN ---
-		DetectByASN:           getEnvBool("DETECT_BY_ASN", false),
 		IPtoASNDownloadURL:    getEnv("IPTOASN_DOWNLOAD_URL", ""),
 		IPtoASNUpdateInterval: time.Duration(getEnvInt("IPTOASN_UPDATE_INTERVAL_MINUTES", 60)) * time.Minute,
 		MaxASNsPerUser:        getEnvInt("MAX_ASNS_PER_USER", 4),
-		ASNFallbackMask:       getEnvInt("ASN_FALLBACK_MASK", 16),
+		UserASNTTL:            time.Duration(getEnvInt("USER_ASN_TTL_SECONDS", 86400)) * time.Second,
 		ExcludedASNs:          parseSet(getEnv("EXCLUDED_ASNS", "")),
 
 		// --- Загрузка параметров GeoIP ---
 		GeoIPEnabled:        getEnvBool("GEOIP_ENABLED", false),
 		GeoIPCacheTTL:       time.Duration(getEnvInt("GEOIP_CACHE_TTL_HOURS", 24)) * time.Hour,
-		GeoIPTimeout:        time.Duration(getEnvInt("GEOIP_TIMEOUT_SECONDS", 3)) * time.Second,
-		GeoIPRateIntervalMs: getEnvInt("GEOIP_RATE_INTERVAL_MS", 1350),
+		GeoLiteASNPath:      getEnv("GEOLITE_ASN_PATH", "/app/data/GeoLite2-ASN.mmdb"),
+		GeoLiteCityPath:     getEnv("GEOLITE_CITY_PATH", "/app/data/GeoLite2-City.mmdb"),
 		GeoDataConfigDir:    getEnv("GEODATA_CONFIG_DIR", "/app/config"),
 		GeoDataDataDir:      getEnv("GEODATA_DATA_DIR", "/app/data"),
 
@@ -184,16 +166,10 @@ func New() *Config {
 	}
 
 	log.Printf("Configuration loaded. Port: %s", cfg.Port)
-	if cfg.DetectByASN {
-		log.Printf("!!! DETECTION MODE: by ASN (providers). Limit: %d providers per user", cfg.MaxASNsPerUser)
-		log.Printf("    Source: iptoasn.com, Update interval: %v, Fallback mask: /%d", cfg.IPtoASNUpdateInterval, cfg.ASNFallbackMask)
-		if len(cfg.ExcludedASNs) > 0 {
-			log.Printf("    Excluded ASNs: %d", len(cfg.ExcludedASNs))
-		}
-	} else if cfg.DetectBySubnet {
-		log.Printf("!!! DETECTION MODE: by SUBNETS (/%d). Limit: %d subnets per user", cfg.SubnetMaskIPv4, cfg.MaxSubnetsPerUser)
-	} else {
-		log.Printf("!!! DETECTION MODE: by IP addresses. Limit: %d IPs per user", cfg.MaxIPsPerUser)
+	log.Printf("Detection mode: ASN (providers). Limit: %d providers per user", cfg.MaxASNsPerUser)
+	log.Printf("    Source: iptoasn.com, Update interval: %v", cfg.IPtoASNUpdateInterval)
+	if len(cfg.ExcludedASNs) > 0 {
+		log.Printf("    Excluded ASNs: %d", len(cfg.ExcludedASNs))
 	}
 	log.Printf("Log processing worker pool: %d workers, channel buffer: %d", cfg.WorkerPoolSize, cfg.LogChannelBufferSize)
 	log.Printf("Side-effect worker pool (alerts, cleanup): %d workers, channel buffer: %d", cfg.SideEffectWorkerPoolSize, cfg.SideEffectChannelBufferSize)
@@ -203,11 +179,8 @@ func New() *Config {
 	if len(cfg.ExcludedIPs) > 0 {
 		log.Printf("IP exclusion list loaded: %d", len(cfg.ExcludedIPs))
 	}
-	if len(cfg.ExcludedSubnets) > 0 {
-		log.Printf("Subnet exclusion list loaded: %d", len(cfg.ExcludedSubnets))
-	}
 	if cfg.DebugEmail != "" {
-		log.Printf("Debug mode enabled for email: %s with IP limit: %d", cfg.DebugEmail, cfg.DebugIPLimit)
+		log.Printf("Debug mode enabled for email: %s with limit: %d", cfg.DebugEmail, cfg.DebugIPLimit)
 	}
 	if cfg.GeoIPEnabled {
 		log.Printf("GeoIP analysis enabled. Cache TTL: %v, Config dir: %s, Data dir: %s", cfg.GeoIPCacheTTL, cfg.GeoDataConfigDir, cfg.GeoDataDataDir)

@@ -26,12 +26,12 @@ type EntryEnqueuer interface {
 type Server struct {
 	router   *gin.Engine
 	enqueuer EntryEnqueuer
-	storage  storage.IPStorage
+	storage  storage.Storage
 	port     string
 	cfg      *config.Config
 }
 
-func NewServer(port string, enqueuer EntryEnqueuer, storage storage.IPStorage, cfg *config.Config) *Server {
+func NewServer(port string, enqueuer EntryEnqueuer, storage storage.Storage, cfg *config.Config) *Server {
 	gin.SetMode(gin.ReleaseMode)
 	router := gin.Default()
 	router.Use(gin.Logger())

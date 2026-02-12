@@ -14,34 +14,6 @@ import (
 	"github.com/redis/go-redis/v9"
 )
 
-// Скрипт для атомарной очистки всех ключей IP пользователя.
-const clearUserIPsScript = `
-local ips = redis.call('SMEMBERS', KEYS[1])
-if #ips == 0 then
-    return redis.call('DEL', KEYS[1])
-end
-local keysToDelete = { KEYS[1] }
-local prefix = ARGV[1]
-for i, ip in ipairs(ips) do
-    table.insert(keysToDelete, prefix .. ':' .. ip)
-end
-return redis.call('DEL', unpack(keysToDelete))
-`
-
-// Скрипт для атомарной очистки всех ключей ПОДСЕТЕЙ пользователя.
-const clearUserSubnetsScript = `
-local subnets = redis.call('SMEMBERS', KEYS[1])
-if #subnets == 0 then
-    return redis.call('DEL', KEYS[1])
-end
-local keysToDelete = { KEYS[1] }
-local prefix = ARGV[1]
-for i, subnet in ipairs(subnets) do
-    table.insert(keysToDelete, prefix .. ':' .. subnet)
-end
-return redis.call('DEL', unpack(keysToDelete))
-`
-
 // Скрипт для атомарной очистки всех ключей ASN пользователя.
 const clearUserASNsScript = `
 local asns = redis.call('SMEMBERS', KEYS[1])
@@ -56,33 +28,30 @@ end
 return redis.call('DEL', unpack(keysToDelete))
 `
 
-// IPStorage определяет интерфейс для работы с хранилищем IP-адресов.
-type IPStorage interface {
-	CheckAndAddIP(ctx context.Context, email, ip string, limit int, ttl, cooldown time.Duration) (*models.CheckResult, error)
-	ClearUserIPs(ctx context.Context, email string) (int, error)
-	GetUserActiveIPs(ctx context.Context, userEmail string) (map[string]int, error)
+// Storage определяет интерфейс для работы с хранилищем.
+type Storage interface {
+	CheckAndAddASN(ctx context.Context, email, asn string, limit int, ttl, cooldown time.Duration) (*models.CheckResult, error)
+	AddIPToASNMapping(ctx context.Context, email, asn, ip string, ttl time.Duration) error
+	SetASNOrgName(ctx context.Context, asn, orgName string, ttl time.Duration) error
+	GetIPsForUserASN(ctx context.Context, email, asn string) ([]string, error)
+	GetASNOrgName(ctx context.Context, asn string) (string, error)
+	GetUserActiveASNs(ctx context.Context, userEmail string) (map[string]*models.ASNInfo, error)
 	GetAllUserEmails(ctx context.Context) ([]string, error)
+	GetAllIPsForUser(ctx context.Context, email string) ([]string, error)
 	HasAlertCooldown(ctx context.Context, userEmail string) (bool, error)
+	ClearUserASNData(ctx context.Context, email string) (int, error)
 	Ping(ctx context.Context) error
 	Close() error
-	CheckAndAddSubnet(ctx context.Context, email, subnet string, limit int, ttl, cooldown time.Duration) (*models.CheckResult, error)
-	ClearUserSubnets(ctx context.Context, email string) (int, error)
-	GetUserActiveSubnets(ctx context.Context, userEmail string) (map[string]int, error)
-	GetUserActiveASNs(ctx context.Context, userEmail string) (map[string]*models.ASNInfo, error)
 }
 
-// RedisStore реализует IPStorage с использованием Redis.
+// RedisStore реализует Storage с использованием Redis.
 type RedisStore struct {
-	client                  *redis.Client
-	addCheckIPScriptSHA     string
-	clearIPsScriptSHA       string
-	addCheckSubnetScriptSHA string
-	clearSubnetsScriptSHA   string
-	addCheckASNScriptSHA    string
-	clearASNsScriptSHA      string
-	scanMaxKeys             int
-	scanCount               int
-	scanTimeBudget          time.Duration
+	client               *redis.Client
+	addCheckASNScriptSHA string
+	clearASNsScriptSHA   string
+	scanMaxKeys          int
+	scanCount            int
+	scanTimeBudget       time.Duration
 }
 
 // NewRedisStore создает новый экземпляр RedisStore.
@@ -94,34 +63,6 @@ func NewRedisStore(ctx context.Context, redisURL string, scriptPaths ...string) 
 	client := redis.NewClient(opt)
 	if err := client.Ping(ctx).Err(); err != nil {
 		return nil, fmt.Errorf("ошибка подключения к Redis: %w", err)
-	}
-	// Загрузка скрипта проверки и добавления IP из файла
-	addCheckIPScript, err := os.ReadFile("internal/scripts/add_and_check_ip.lua")
-	if err != nil {
-		return nil, fmt.Errorf("ошибка чтения Lua-скрипта 'add_and_check_ip.lua': %w", err)
-	}
-	addCheckIPScriptSHA, err := client.ScriptLoad(ctx, string(addCheckIPScript)).Result()
-	if err != nil {
-		return nil, fmt.Errorf("ошибка загрузки Lua-скрипта (add/check ip) в Redis: %w", err)
-	}
-	// Загрузка скрипта проверки и добавления ПОДСЕТИ из файла
-	addCheckSubnetScript, err := os.ReadFile("internal/scripts/add_and_check_subnet.lua")
-	if err != nil {
-		return nil, fmt.Errorf("ошибка чтения Lua-скрипта 'add_and_check_subnet.lua': %w", err)
-	}
-	addCheckSubnetScriptSHA, err := client.ScriptLoad(ctx, string(addCheckSubnetScript)).Result()
-	if err != nil {
-		return nil, fmt.Errorf("ошибка загрузки Lua-скрипта (add/check subnet) в Redis: %w", err)
-	}
-	// Загрузка скрипта атомарной очистки IP из константы
-	clearIPsScriptSHA, err := client.ScriptLoad(ctx, clearUserIPsScript).Result()
-	if err != nil {
-		return nil, fmt.Errorf("ошибка загрузки Lua-скрипта (clear ip) в Redis: %w", err)
-	}
-	// Загрузка скрипта атомарной очистки ПОДСЕТЕЙ из константы
-	clearSubnetsScriptSHA, err := client.ScriptLoad(ctx, clearUserSubnetsScript).Result()
-	if err != nil {
-		return nil, fmt.Errorf("ошибка загрузки Lua-скрипта (clear subnet) в Redis: %w", err)
 	}
 	// Загрузка скрипта проверки и добавления ASN из файла
 	addCheckASNScript, err := os.ReadFile("internal/scripts/add_and_check_asn.lua")
@@ -139,16 +80,12 @@ func NewRedisStore(ctx context.Context, redisURL string, scriptPaths ...string) 
 	}
 	log.Println("Successfully connected to Redis and loaded Lua scripts")
 	return &RedisStore{
-		client:                  client,
-		addCheckIPScriptSHA:     addCheckIPScriptSHA,
-		clearIPsScriptSHA:       clearIPsScriptSHA,
-		addCheckSubnetScriptSHA: addCheckSubnetScriptSHA,
-		clearSubnetsScriptSHA:   clearSubnetsScriptSHA,
-		addCheckASNScriptSHA:    addCheckASNScriptSHA,
-		clearASNsScriptSHA:      clearASNsScriptSHA,
-		scanMaxKeys:             10000,
-		scanCount:               100,
-		scanTimeBudget:          30 * time.Second,
+		client:               client,
+		addCheckASNScriptSHA: addCheckASNScriptSHA,
+		clearASNsScriptSHA:   clearASNsScriptSHA,
+		scanMaxKeys:          10000,
+		scanCount:            100,
+		scanTimeBudget:       30 * time.Second,
 	}, nil
 }
 
@@ -171,40 +108,6 @@ func (s *RedisStore) SetScanTimeBudget(d time.Duration) {
 	if d > 0 {
 		s.scanTimeBudget = d
 	}
-}
-
-// CheckAndAddIP выполняет Lua-скрипт для атомарной проверки и добавления IP.
-func (s *RedisStore) CheckAndAddIP(ctx context.Context, email, ip string, limit int, ttl, cooldown time.Duration) (*models.CheckResult, error) {
-	userIPsSetKey := fmt.Sprintf("user_ips:%s", email)
-	alertSentKey := fmt.Sprintf("alert_sent:%s", email)
-	args := []interface{}{
-		ip,
-		int(ttl.Seconds()),
-		limit,
-		int(cooldown.Seconds()),
-	}
-	result, err := s.client.EvalSha(ctx, s.addCheckIPScriptSHA, []string{userIPsSetKey, alertSentKey}, args...).Result()
-	if err != nil {
-		return nil, fmt.Errorf("ошибка выполнения Lua-скрипта для %s: %w", email, err)
-	}
-	return parseCheckResult(result, email)
-}
-
-// CheckAndAddSubnet выполняет Lua-скрипт для атомарной проверки и добавления подсети.
-func (s *RedisStore) CheckAndAddSubnet(ctx context.Context, email, subnet string, limit int, ttl, cooldown time.Duration) (*models.CheckResult, error) {
-	userSubnetsSetKey := fmt.Sprintf("user_subnets:%s", email)
-	alertSentKey := fmt.Sprintf("alert_sent:%s", email)
-	args := []interface{}{
-		subnet,
-		int(ttl.Seconds()),
-		limit,
-		int(cooldown.Seconds()),
-	}
-	result, err := s.client.EvalSha(ctx, s.addCheckSubnetScriptSHA, []string{userSubnetsSetKey, alertSentKey}, args...).Result()
-	if err != nil {
-		return nil, fmt.Errorf("ошибка выполнения Lua-скрипта (subnet) для %s: %w", email, err)
-	}
-	return parseCheckResult(result, email)
 }
 
 // CheckAndAddASN выполняет Lua-скрипт для атомарной проверки и добавления ASN с фильтрацией "мертвых" ASN.
@@ -250,96 +153,6 @@ func parseCheckResult(result interface{}, identifier string) (*models.CheckResul
 	return checkResult, nil
 }
 
-// ClearUserIPs атомарно удаляет все ключи, связанные с IP пользователя, используя Lua-скрипт.
-func (s *RedisStore) ClearUserIPs(ctx context.Context, email string) (int, error) {
-	userIpsKey := fmt.Sprintf("user_ips:%s", email)
-	ipTtlPrefix := fmt.Sprintf("ip_ttl:%s", email)
-	deleted, err := s.client.EvalSha(ctx, s.clearIPsScriptSHA, []string{userIpsKey}, ipTtlPrefix).Int64()
-	if err != nil {
-		if err == redis.Nil {
-			return 0, nil
-		}
-		return 0, fmt.Errorf("ошибка выполнения Lua-скрипта (clear ip) для %s: %w", email, err)
-	}
-	return int(deleted), nil
-}
-
-// ClearUserSubnets атомарно удаляет все ключи, связанные с подсетями пользователя.
-func (s *RedisStore) ClearUserSubnets(ctx context.Context, email string) (int, error) {
-	userSubnetsKey := fmt.Sprintf("user_subnets:%s", email)
-	subnetTtlPrefix := fmt.Sprintf("subnet_ttl:%s", email)
-	deleted, err := s.client.EvalSha(ctx, s.clearSubnetsScriptSHA, []string{userSubnetsKey}, subnetTtlPrefix).Int64()
-	if err != nil {
-		if err == redis.Nil {
-			return 0, nil
-		}
-		return 0, fmt.Errorf("ошибка выполнения Lua-скрипта (clear subnet) для %s: %w", email, err)
-	}
-	return int(deleted), nil
-}
-
-// GetUserActiveIPs возвращает активные IP пользователя с их TTL.
-func (s *RedisStore) GetUserActiveIPs(ctx context.Context, userEmail string) (map[string]int, error) {
-	userIpsKey := fmt.Sprintf("user_ips:%s", userEmail)
-	ips, err := s.client.SMembers(ctx, userIpsKey).Result()
-	if err != nil {
-		return nil, err
-	}
-	if len(ips) == 0 {
-		return make(map[string]int), nil
-	}
-	activeIPs := make(map[string]int)
-	pipe := s.client.Pipeline()
-	ttlResults := make(map[string]*redis.DurationCmd)
-	for _, ip := range ips {
-		ipTtlKey := fmt.Sprintf("ip_ttl:%s:%s", userEmail, ip)
-		ttlResults[ip] = pipe.TTL(ctx, ipTtlKey)
-	}
-	_, err = pipe.Exec(ctx)
-	if err != nil && err != redis.Nil {
-		return nil, err
-	}
-	for ip, cmd := range ttlResults {
-		ttl, err := cmd.Result()
-		if err != nil || ttl <= 0 {
-			continue
-		}
-		activeIPs[ip] = int(ttl.Seconds())
-	}
-	return activeIPs, nil
-}
-
-// GetUserActiveSubnets возвращает активные подсети пользователя с их TTL.
-func (s *RedisStore) GetUserActiveSubnets(ctx context.Context, userEmail string) (map[string]int, error) {
-	userSubnetsKey := fmt.Sprintf("user_subnets:%s", userEmail)
-	subnets, err := s.client.SMembers(ctx, userSubnetsKey).Result()
-	if err != nil {
-		return nil, err
-	}
-	if len(subnets) == 0 {
-		return make(map[string]int), nil
-	}
-	activeSubnets := make(map[string]int)
-	pipe := s.client.Pipeline()
-	ttlResults := make(map[string]*redis.DurationCmd)
-	for _, subnet := range subnets {
-		subnetTtlKey := fmt.Sprintf("subnet_ttl:%s:%s", userEmail, subnet)
-		ttlResults[subnet] = pipe.TTL(ctx, subnetTtlKey)
-	}
-	_, err = pipe.Exec(ctx)
-	if err != nil && err != redis.Nil {
-		return nil, err
-	}
-	for subnet, cmd := range ttlResults {
-		ttl, err := cmd.Result()
-		if err != nil || ttl <= 0 {
-			continue
-		}
-		activeSubnets[subnet] = int(ttl.Seconds())
-	}
-	return activeSubnets, nil
-}
-
 // GetAllUserEmails сканирует ключи Redis для получения всех username (email) пользователей.
 // Операция ограничена scanMaxKeys (кол-во ключей), scanTimeBudget (время) и дедлайном ctx.
 // При достижении любого из лимитов возвращает частичный результат и логирует предупреждение.
@@ -351,47 +164,33 @@ func (s *RedisStore) GetAllUserEmails(ctx context.Context) ([]string, error) {
 	emailSet := make(map[string]struct{})
 	deadline := time.Now().Add(s.scanTimeBudget)
 
-	patterns := []string{
-		"user_ips:*",     // Режим по IP
-		"user_subnets:*", // Режим по подсетям
-		"user_asns:*",    // Режим по ASN
-	}
-
+	pattern := "user_asns:*"
 	scanned := 0
-	partial := false
-	for _, pattern := range patterns {
-		cursor = 0
-		for {
-			if time.Now().After(deadline) {
-				log.Printf("GetAllUserEmails: time budget %v reached, partial result", s.scanTimeBudget)
+	for {
+		if time.Now().After(deadline) {
+			log.Printf("GetAllUserEmails: time budget %v reached, partial result", s.scanTimeBudget)
+			metrics.ScanPartialRunsCount.Add(1)
+			break
+		}
+		var keys []string
+		var err error
+		keys, cursor, err = s.client.Scan(scanCtx, cursor, pattern, int64(s.scanCount)).Result()
+		if err != nil {
+			if scanCtx.Err() != nil {
+				log.Printf("GetAllUserEmails: context cancelled (%v), partial result", scanCtx.Err())
 				metrics.ScanPartialRunsCount.Add(1)
-				partial = true
 				break
 			}
-			var keys []string
-			var err error
-			keys, cursor, err = s.client.Scan(scanCtx, cursor, pattern, int64(s.scanCount)).Result()
-			if err != nil {
-				if scanCtx.Err() != nil {
-					log.Printf("GetAllUserEmails: context cancelled (%v), partial result", scanCtx.Err())
-					metrics.ScanPartialRunsCount.Add(1)
-					partial = true
-					break
-				}
-				return nil, fmt.Errorf("ошибка при сканировании ключей по паттерну %s: %w", pattern, err)
-			}
-			scanned += len(keys)
-			for _, key := range keys {
-				parts := strings.SplitN(key, ":", 2)
-				if len(parts) == 2 {
-					emailSet[parts[1]] = struct{}{}
-				}
-			}
-			if cursor == 0 || scanned >= s.scanMaxKeys {
-				break
+			return nil, fmt.Errorf("ошибка при сканировании ключей по паттерну %s: %w", pattern, err)
+		}
+		scanned += len(keys)
+		for _, key := range keys {
+			parts := strings.SplitN(key, ":", 2)
+			if len(parts) == 2 {
+				emailSet[parts[1]] = struct{}{}
 			}
 		}
-		if partial || scanned >= s.scanMaxKeys {
+		if cursor == 0 || scanned >= s.scanMaxKeys {
 			if scanned >= s.scanMaxKeys {
 				log.Printf("GetAllUserEmails: scan limit %d keys reached", s.scanMaxKeys)
 			}

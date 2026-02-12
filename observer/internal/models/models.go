@@ -13,10 +13,6 @@ type AlertPayload struct {
 	BlockDuration    string                `json:"block_duration"`
 	ViolationType    string                `json:"violation_type"`
 
-	// Поля для режима по IP и подсетям (violation_type: ip_limit_exceeded, subnet_limit_exceeded)
-	DetectedIPsCount *int                  `json:"detected_ips_count,omitempty"` // Кол-во IP/подсетей
-	AllUserIPs       []string              `json:"all_user_ips,omitempty"`       // Список IP/подсетей
-
 	// Поля для режима по ASN (violation_type: asn_limit_exceeded)
 	DetectedASNCount *int                  `json:"detected_asn_count,omitempty"` // Количество уникальных провайдеров (ASN)
 	AllUserASNs      []string              `json:"all_user_asns,omitempty"`      // Список ASN (например: ["AS31133", "AS3267"])

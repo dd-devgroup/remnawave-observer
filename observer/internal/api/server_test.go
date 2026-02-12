@@ -31,23 +31,22 @@ func (t *testEnqueuer) EnqueueEntries(entries []models.LogEntry) error {
 
 type testStorage struct{}
 
-func (t *testStorage) CheckAndAddIP(_ context.Context, _, _ string, _ int, _, _ time.Duration) (*models.CheckResult, error) {
+func (t *testStorage) CheckAndAddASN(_ context.Context, _, _ string, _ int, _, _ time.Duration) (*models.CheckResult, error) {
 	return nil, nil
 }
-func (t *testStorage) ClearUserIPs(_ context.Context, _ string) (int, error)                        { return 0, nil }
-func (t *testStorage) GetUserActiveIPs(_ context.Context, _ string) (map[string]int, error)         { return nil, nil }
-func (t *testStorage) GetAllUserEmails(_ context.Context) ([]string, error)                         { return nil, nil }
-func (t *testStorage) HasAlertCooldown(_ context.Context, _ string) (bool, error)                   { return false, nil }
-func (t *testStorage) Ping(_ context.Context) error                                                 { return nil }
-func (t *testStorage) Close() error                                                                 { return nil }
-func (t *testStorage) CheckAndAddSubnet(_ context.Context, _, _ string, _ int, _, _ time.Duration) (*models.CheckResult, error) {
-	return nil, nil
-}
-func (t *testStorage) ClearUserSubnets(_ context.Context, _ string) (int, error)                    { return 0, nil }
-func (t *testStorage) GetUserActiveSubnets(_ context.Context, _ string) (map[string]int, error)     { return nil, nil }
+func (t *testStorage) AddIPToASNMapping(_ context.Context, _, _, _ string, _ time.Duration) error { return nil }
+func (t *testStorage) SetASNOrgName(_ context.Context, _, _ string, _ time.Duration) error        { return nil }
+func (t *testStorage) GetIPsForUserASN(_ context.Context, _, _ string) ([]string, error)          { return nil, nil }
+func (t *testStorage) GetASNOrgName(_ context.Context, _ string) (string, error)                  { return "", nil }
 func (t *testStorage) GetUserActiveASNs(_ context.Context, _ string) (map[string]*models.ASNInfo, error) {
 	return nil, nil
 }
+func (t *testStorage) GetAllUserEmails(_ context.Context) ([]string, error)    { return nil, nil }
+func (t *testStorage) GetAllIPsForUser(_ context.Context, _ string) ([]string, error) { return nil, nil }
+func (t *testStorage) HasAlertCooldown(_ context.Context, _ string) (bool, error) { return false, nil }
+func (t *testStorage) ClearUserASNData(_ context.Context, _ string) (int, error) { return 0, nil }
+func (t *testStorage) Ping(_ context.Context) error                            { return nil }
+func (t *testStorage) Close() error                                            { return nil }
 
 // --- helpers ---
 
