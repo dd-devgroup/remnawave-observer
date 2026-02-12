@@ -67,26 +67,26 @@ func NewLogProcessor(
 		sideEffectChannel: make(chan func(context.Context), cfg.SideEffectChannelBufferSize),
 	}
 
-	// Парсим исключённые подсети один раз при инициализации
+	// Parse excluded subnets once during initialization
 	for subnetStr := range cfg.ExcludedSubnets {
 		_, ipNet, err := net.ParseCIDR(subnetStr)
 		if err != nil {
-			log.Printf("Предупреждение: не удалось распарсить исключённую подсеть '%s': %v", subnetStr, err)
+			log.Printf("Warning: failed to parse excluded subnet '%s': %v", subnetStr, err)
 			continue
 		}
 		lp.excludedSubnetsParsed = append(lp.excludedSubnetsParsed, ipNet)
 	}
 	if len(lp.excludedSubnetsParsed) > 0 {
-		log.Printf("Распарсено %d исключённых подсетей для проверки вложенности", len(lp.excludedSubnetsParsed))
+		log.Printf("Parsed %d excluded subnets for containment check", len(lp.excludedSubnetsParsed))
 	}
 
-	// Парсим исключённые IP (поддержка CIDR в EXCLUDED_IPS)
+	// Parse excluded IPs (supports CIDR in EXCLUDED_IPS)
 	for ipStr := range cfg.ExcludedIPs {
-		// Пробуем распарсить как CIDR
+		// Try parsing as CIDR
 		if _, ipNet, err := net.ParseCIDR(ipStr); err == nil {
 			lp.excludedIPsParsed = append(lp.excludedIPsParsed, ipNet)
 		} else if ip := net.ParseIP(ipStr); ip != nil {
-			// Одиночный IP -> преобразуем в /32 CIDR
+			// Single IP -> convert to /32 CIDR
 			var mask net.IPMask
 			if ip.To4() != nil {
 				mask = net.CIDRMask(32, 32)
@@ -95,11 +95,11 @@ func NewLogProcessor(
 			}
 			lp.excludedIPsParsed = append(lp.excludedIPsParsed, &net.IPNet{IP: ip, Mask: mask})
 		} else {
-			log.Printf("Предупреждение: не удалось распарсить исключённый IP '%s'", ipStr)
+			log.Printf("Warning: failed to parse excluded IP '%s'", ipStr)
 		}
 	}
 	if len(lp.excludedIPsParsed) > 0 {
-		log.Printf("Распарсено %d исключённых IP/CIDR для проверки вложенности", len(lp.excludedIPsParsed))
+		log.Printf("Parsed %d excluded IPs/CIDRs for containment check", len(lp.excludedIPsParsed))
 	}
 
 	return lp
@@ -110,43 +110,43 @@ func (p *LogProcessor) StartWorkerPool(ctx context.Context, mainWg *sync.WaitGro
 	defer mainWg.Done()
 
 	var workerWg sync.WaitGroup
-	log.Printf("Запуск пула воркеров обработки логов в количестве %d...", p.cfg.WorkerPoolSize)
+	log.Printf("Starting log processing worker pool (size: %d)...", p.cfg.WorkerPoolSize)
 
 	for i := 0; i < p.cfg.WorkerPoolSize; i++ {
 		workerWg.Add(1)
 		go func(workerID int) {
 			defer workerWg.Done()
-			log.Printf("Воркер обработки логов %d запущен", workerID)
+			log.Printf("Log processing worker %d started", workerID)
 			for entries := range p.logChannel {
 				p.ProcessEntries(ctx, entries)
 			}
-			log.Printf("Воркер обработки логов %d останавливается.", workerID)
+			log.Printf("Log processing worker %d stopping", workerID)
 		}(i + 1)
 	}
 
 	<-ctx.Done()
-	log.Println("Получен сигнал остановки для воркеров обработки логов. Закрываю канал...")
+	log.Println("Stop signal received for log processing workers. Closing channel...")
 	close(p.logChannel)
 	workerWg.Wait()
-	log.Println("Все воркеры обработки логов успешно остановлены.")
+	log.Println("All log processing workers stopped successfully")
 }
 
-// StartSideEffectWorkerPool запускает пул воркеров для выполнения побочных задач.
+// StartSideEffectWorkerPool starts the side-effect task worker pool.
 func (p *LogProcessor) StartSideEffectWorkerPool(ctx context.Context, mainWg *sync.WaitGroup) {
 	defer mainWg.Done()
 
 	var workerWg sync.WaitGroup
-	log.Printf("Запуск пула воркеров побочных задач в количестве %d...", p.cfg.SideEffectWorkerPoolSize)
+	log.Printf("Starting side-effect worker pool (size: %d)...", p.cfg.SideEffectWorkerPoolSize)
 
 	for i := 0; i < p.cfg.SideEffectWorkerPoolSize; i++ {
 		workerWg.Add(1)
 		go func(workerID int) {
 			defer workerWg.Done()
-			log.Printf("Воркер побочных задач %d запущен", workerID)
+			log.Printf("Side-effect worker %d started", workerID)
 			for task := range p.sideEffectChannel {
 				select {
 				case <-ctx.Done():
-					log.Printf("Воркер побочных задач %d пропустил задачу из-за отмены контекста.", workerID)
+					log.Printf("Side-effect worker %d skipped task due to context cancellation", workerID)
 				default:
 					taskCtx, cancel := context.WithTimeout(ctx, p.cfg.SideEffectTimeout)
 					task(taskCtx)
@@ -156,22 +156,22 @@ func (p *LogProcessor) StartSideEffectWorkerPool(ctx context.Context, mainWg *sy
 					cancel()
 				}
 			}
-			log.Printf("Воркер побочных задач %d останавливается.", workerID)
+			log.Printf("Side-effect worker %d stopping", workerID)
 		}(i + 1)
 	}
 
 	<-ctx.Done()
-	log.Println("Получен сигнал остановки для воркеров побочных задач. Закрываю канал...")
+	log.Println("Stop signal received for side-effect workers. Closing channel...")
 	close(p.sideEffectChannel)
 	workerWg.Wait()
-	log.Println("Все воркеры побочных задач успешно остановлены.")
+	log.Println("All side-effect workers stopped successfully")
 }
 
-// EnqueueEntries добавляет пачку логов в очередь на обработку.
+// EnqueueEntries adds a batch of logs to the processing queue.
 func (p *LogProcessor) EnqueueEntries(entries []models.LogEntry) error {
 	defer func() {
 		if r := recover(); r != nil {
-			log.Println("Попытка записи в закрытый канал логов. Сервис находится в процессе остановки.")
+			log.Println("Attempted to write to closed log channel. Service is shutting down")
 		}
 	}()
 
@@ -183,28 +183,28 @@ func (p *LogProcessor) EnqueueEntries(entries []models.LogEntry) error {
 	}
 }
 
-// enqueueSideEffectTask добавляет побочную задачу в очередь на выполнение.
+// enqueueSideEffectTask adds a side-effect task to the execution queue.
 func (p *LogProcessor) enqueueSideEffectTask(task func(context.Context)) {
 	defer func() {
 		if r := recover(); r != nil {
-			log.Println("Попытка записи в закрытый канал побочных задач. Сервис находится в процессе остановки.")
+			log.Println("Attempted to write to closed side-effect channel. Service is shutting down")
 		}
 	}()
 
 	select {
 	case p.sideEffectChannel <- task:
-		// Задача успешно добавлена в очередь
+		// Task successfully queued
 	default:
-		log.Println("Warning: очередь побочных задач заполнена. Задача отброшена.")
+		log.Println("Warning: side-effect queue is full. Task dropped")
 	}
 }
 
-// ProcessEntries обрабатывает пачку записей логов.
+// ProcessEntries processes a batch of log entries.
 func (p *LogProcessor) ProcessEntries(ctx context.Context, entries []models.LogEntry) {
 	for _, entry := range entries {
 		select {
 		case <-ctx.Done():
-			log.Printf("Обработка пачки прервана из-за отмены контекста: %v", ctx.Err())
+			log.Printf("Batch processing interrupted due to context cancellation: %v", ctx.Err())
 			return
 		default:
 			p.processSingleEntry(ctx, entry)
@@ -214,7 +214,7 @@ func (p *LogProcessor) ProcessEntries(ctx context.Context, entries []models.LogE
 
 func (p *LogProcessor) processSingleEntry(ctx context.Context, entry models.LogEntry) {
 	if p.cfg.ExcludedUsers[entry.UserEmail] {
-		return // Пользователь в списке исключений
+		return // User is in exclusion list
 	}
 
 	if p.cfg.DetectByASN {
@@ -233,31 +233,31 @@ func (p *LogProcessor) processEntryByIP(ctx context.Context, entry models.LogEnt
 	res, err := p.storage.CheckAndAddIP(ctx, entry.UserEmail, entry.SourceIP, userIPLimit, p.cfg.UserIPTTL, p.cfg.AlertCooldown)
 	if err != nil {
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-			log.Printf("Операция CheckAndAddIP отменена для %s: %v", entry.UserEmail, err)
+			log.Printf("CheckAndAddIP operation cancelled for %s: %v", entry.UserEmail, err)
 		} else {
-			log.Printf("Ошибка обработки записи для %s: %v", entry.UserEmail, err)
+			log.Printf("Entry processing error for %s: %v", entry.UserEmail, err)
 		}
 		return
 	}
 
 	if res.StatusCode == 0 && res.IsNew {
-		log.Printf("Новый IP для пользователя %s%s: %s. Всего IP: %d/%d",
+		log.Printf("New IP for user %s%s: %s. Total IPs: %d/%d",
 			entry.UserEmail, debugMarker, entry.SourceIP, res.CurrentCount, userIPLimit)
 	}
 
-	if res.StatusCode == 1 { // Лимит превышен, enforcement
-		log.Printf("ПРЕВЫШЕНИЕ ЛИМИТА IP%s: Пользователь %s, IP-адресов: %d/%d",
+	if res.StatusCode == 1 { // Limit exceeded, enforcement
+		log.Printf("IP LIMIT EXCEEDED%s: User %s, IPs: %d/%d",
 			debugMarker, entry.UserEmail, res.CurrentCount, userIPLimit)
 
-		// MIG-7: User-level enforcement вместо IP-blocking
+		// MIG-7: User-level enforcement instead of IP-blocking
 		reason := fmt.Sprintf("ip_limit_exceeded: %d/%d IPs", res.CurrentCount, userIPLimit)
-		score := 85 // default score для IP limit
+		score := 85 // default score for IP limit
 
 		if err := p.disableUser(ctx, entry.UserEmail, reason, score); err != nil {
-			log.Printf("Ошибка enforcement для %s: %v", entry.UserEmail, err)
+			log.Printf("Enforcement error for %s: %v", entry.UserEmail, err)
 		}
 
-		// Webhook alert как side-effect
+		// Webhook alert as side-effect
 		ipCount := int(res.CurrentCount)
 		alertPayload := models.AlertPayload{
 			UserIdentifier:   entry.UserEmail,
@@ -269,7 +269,7 @@ func (p *LogProcessor) processEntryByIP(ctx context.Context, entry models.LogEnt
 		}
 		p.enqueueSideEffectTask(func(ctx context.Context) {
 			if err := p.alerter.SendAlert(ctx, alertPayload); err != nil {
-				log.Printf("Ошибка отправки вебхук-уведомления: %v", err)
+				log.Printf("Webhook notification send error: %v", err)
 			}
 		})
 	}
@@ -278,7 +278,7 @@ func (p *LogProcessor) processEntryByIP(ctx context.Context, entry models.LogEnt
 func (p *LogProcessor) processEntryBySubnet(ctx context.Context, entry models.LogEntry) {
 	ip := net.ParseIP(entry.SourceIP)
 	if ip == nil || ip.To4() == nil {
-		return // Игнорируем невалидные или не-IPv4 адреса
+		return // Ignore invalid or non-IPv4 addresses
 	}
 
 	mask := net.CIDRMask(p.cfg.SubnetMaskIPv4, 32)
@@ -291,20 +291,20 @@ func (p *LogProcessor) processEntryBySubnet(ctx context.Context, entry models.Lo
 	res, err := p.storage.CheckAndAddSubnet(ctx, entry.UserEmail, subnetStr, userSubnetLimit, p.cfg.UserSubnetTTL, p.cfg.AlertCooldown)
 	if err != nil {
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-			log.Printf("Операция CheckAndAddSubnet отменена для %s: %v", entry.UserEmail, err)
+			log.Printf("CheckAndAddSubnet operation cancelled for %s: %v", entry.UserEmail, err)
 		} else {
-			log.Printf("Ошибка обработки записи (Subnet) для %s: %v", entry.UserEmail, err)
+			log.Printf("Entry processing error (Subnet) for %s: %v", entry.UserEmail, err)
 		}
 		return
 	}
 
 	if res.StatusCode == 0 && res.IsNew {
-		log.Printf("Новая подсеть для пользователя %s%s: %s. Всего подсетей: %d/%d",
+		log.Printf("New subnet for user %s%s: %s. Total subnets: %d/%d",
 			entry.UserEmail, debugMarker, subnetStr, res.CurrentCount, userSubnetLimit)
 	}
 
-	if res.StatusCode == 1 { // Лимит превышен, enforcement
-		log.Printf("ПРЕВЫШЕНИЕ ЛИМИТА ПОДСЕТЕЙ%s: Пользователь %s, подсетей: %d/%d",
+	if res.StatusCode == 1 { // Limit exceeded, enforcement
+		log.Printf("SUBNET LIMIT EXCEEDED%s: User %s, subnets: %d/%d",
 			debugMarker, entry.UserEmail, res.CurrentCount, userSubnetLimit)
 
 		// MIG-7: User-level enforcement
@@ -312,7 +312,7 @@ func (p *LogProcessor) processEntryBySubnet(ctx context.Context, entry models.Lo
 		score := 85
 
 		if err := p.disableUser(ctx, entry.UserEmail, reason, score); err != nil {
-			log.Printf("Ошибка enforcement для %s: %v", entry.UserEmail, err)
+			log.Printf("Enforcement error for %s: %v", entry.UserEmail, err)
 		}
 
 		// Webhook alert
@@ -327,7 +327,7 @@ func (p *LogProcessor) processEntryBySubnet(ctx context.Context, entry models.Lo
 		}
 		p.enqueueSideEffectTask(func(ctx context.Context) {
 			if err := p.alerter.SendAlert(ctx, alertPayload); err != nil {
-				log.Printf("Ошибка отправки вебхук-уведомления: %v", err)
+				log.Printf("Webhook notification send error: %v", err)
 			}
 		})
 	}
@@ -364,7 +364,7 @@ func (p *LogProcessor) filterExcludedIPs(ips []string, email string) []string {
 		excluded := false
 		for _, excludedNet := range p.excludedIPsParsed {
 			if excludedNet.Contains(ip) {
-				log.Printf("IP-адрес %s для пользователя %s пропущен (входит в исключённую сеть %s)", ipStr, email, excludedNet.String())
+				log.Printf("IP address %s for user %s skipped (belongs to excluded network %s)", ipStr, email, excludedNet.String())
 				excluded = true
 				break
 			}
@@ -394,15 +394,15 @@ func (p *LogProcessor) filterExcludedSubnets(subnets []string, email string) []s
 
 		excluded := false
 		for _, excludedNet := range p.excludedSubnetsParsed {
-			// Проверяем: входит ли первый IP подсети в исключённую сеть
-			// Это означает, что subnetNet является подмножеством excludedNet
+			// Check: does the first subnet IP belong to the excluded network
+			// This means subnetNet is a subset of excludedNet
 			if excludedNet.Contains(subnetNet.IP) {
-				// Дополнительная проверка: маска subnetNet должна быть >= маски excludedNet
-				// (т.е. subnetNet должна быть меньше или равна excludedNet)
+				// Additional check: subnetNet mask must be >= excludedNet mask
+				// (i.e., subnetNet must be smaller or equal to excludedNet)
 				excludedOnes, _ := excludedNet.Mask.Size()
 				subnetOnes, _ := subnetNet.Mask.Size()
 				if subnetOnes >= excludedOnes {
-					log.Printf("Подсеть %s для пользователя %s пропущена (входит в исключённую сеть %s)", subnetStr, email, excludedNet.String())
+					log.Printf("Subnet %s for user %s skipped (belongs to excluded network %s)", subnetStr, email, excludedNet.String())
 					excluded = true
 					break
 				}
@@ -415,7 +415,7 @@ func (p *LogProcessor) filterExcludedSubnets(subnets []string, email string) []s
 	return filtered
 }
 
-// processEntryByASN обрабатывает подключение в режиме ASN (по провайдерам)
+// processEntryByASN processes connections in ASN mode (by providers)
 func (p *LogProcessor) processEntryByASN(ctx context.Context, entry models.LogEntry) {
 	var identifier string
 	var identifierType string
@@ -423,40 +423,40 @@ func (p *LogProcessor) processEntryByASN(ctx context.Context, entry models.LogEn
 
 	var redisStore *storage.RedisStore
 
-	// Пытаемся получить ASN для IP
+	// Try to get ASN for IP
 	if p.asnLookup != nil {
 		redisStore = p.storage.(*storage.RedisStore)
 		asnStr, org, err := p.asnLookup.LookupWithOrg(entry.SourceIP)
 		if err == nil && asnStr != "" {
-			// Проверяем, не в списке ли исключённых ASN
+			// Check if ASN is in exclusion list
 			if p.cfg.ExcludedASNs[asnStr] {
-				log.Printf("IP %s (ASN %s - %s) в списке исключённых ASN, пропускаем", entry.SourceIP, asnStr, org)
+				log.Printf("IP %s (ASN %s - %s) in excluded ASN list, skipping", entry.SourceIP, asnStr, org)
 				return
 			}
 			identifier = asnStr
 			identifierType = "ASN"
 			orgName = org
 
-			// Кешируем название организации для последующего использования
+			// Cache organization name for later use
 			if org != "" {
 				if err := redisStore.SetASNOrgName(ctx, asnStr, org, p.cfg.UserSubnetTTL); err != nil {
-					log.Printf("Ошибка кеширования org для ASN %s: %v", asnStr, err)
+					log.Printf("Org caching error for ASN %s: %v", asnStr, err)
 				}
 			}
 		} else {
-			// Логируем для дебага, но продолжаем с fallback
+			// Log for debugging but continue with fallback
 			if err != nil {
-				log.Printf("Не удалось определить ASN для IP %s (пользователь %s): %v. Используем fallback.",
+				log.Printf("Failed to determine ASN for IP %s (user %s): %v. Using fallback",
 					entry.SourceIP, entry.UserEmail, err)
 			}
 		}
 	}
 
-	// Fallback на подсеть если ASN не найден или сервис недоступен
+	// Fallback to subnet if ASN not found or service unavailable
 	if identifier == "" {
 		ip := net.ParseIP(entry.SourceIP)
 		if ip == nil || ip.To4() == nil {
-			log.Printf("Невалидный IP-адрес %s для пользователя %s, пропускаем", entry.SourceIP, entry.UserEmail)
+			log.Printf("Invalid IP address %s for user %s, skipping", entry.SourceIP, entry.UserEmail)
 			return
 		}
 		mask := net.CIDRMask(p.cfg.ASNFallbackMask, 32)
@@ -468,17 +468,17 @@ func (p *LogProcessor) processEntryByASN(ctx context.Context, entry models.LogEn
 	userASNLimit := p.cfg.MaxASNsPerUser
 	debugMarker := p.getDebugMarker(entry.UserEmail)
 
-	// ВАЖНО: Сохраняем связь ASN -> IP ДО проверки лимита
-	// Это гарантирует что IP будет в Redis когда мы соберём данные для блокировки
+	// IMPORTANT: Save ASN -> IP mapping BEFORE limit check
+	// This ensures IP will be in Redis when we collect block data
 	if identifierType == "ASN" {
 		if err := redisStore.AddIPToASNMapping(ctx, entry.UserEmail, identifier, entry.SourceIP, p.cfg.UserSubnetTTL); err != nil {
-			log.Printf("Ошибка сохранения связи ASN->IP для %s: %v. Пропускаем обработку.", entry.UserEmail, err)
-			return // Прерываем если не удалось сохранить IP - иначе ASN будет без IP
+			log.Printf("ASN->IP mapping save error for %s: %v. Skipping processing", entry.UserEmail, err)
+			return // Abort if failed to save IP - otherwise ASN will be without IP
 		}
 	}
 
-	// Для ASN используем специальный метод CheckAndAddASN с фильтрацией "мертвых" ASN
-	// Для Subnet fallback используем стандартный CheckAndAddSubnet
+	// For ASN use special CheckAndAddASN method with "dead" ASN filtering
+	// For Subnet fallback use standard CheckAndAddSubnet
 	var res *models.CheckResult
 	var err error
 	if identifierType == "ASN" {
@@ -488,16 +488,16 @@ func (p *LogProcessor) processEntryByASN(ctx context.Context, entry models.LogEn
 	}
 	if err != nil {
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-			log.Printf("Операция CheckAndAdd%s отменена для %s: %v", identifierType, entry.UserEmail, err)
+			log.Printf("CheckAndAdd%s operation cancelled for %s: %v", identifierType, entry.UserEmail, err)
 		} else {
-			log.Printf("Ошибка обработки записи (%s) для %s: %v", identifierType, entry.UserEmail, err)
+			log.Printf("Entry processing error (%s) for %s: %v", identifierType, entry.UserEmail, err)
 		}
 		return
 	}
 
 	if res.StatusCode == 0 && res.IsNew {
 		if identifierType == "ASN" && orgName != "" {
-			// Получаем GeoIP данные ОДИН раз для классификатора и логирования
+			// Get GeoIP data ONCE for classifier and logging
 			var countryCode string
 			var geoLoc *geoip.GeoLocation
 			if p.geoService != nil && p.cfg.GeoIPEnabled {
@@ -515,29 +515,29 @@ func (p *LogProcessor) processEntryByASN(ctx context.Context, entry models.LogEn
 				}
 			}
 
-			// Классифицируем провайдера для логирования с учетом страны
+			// Classify provider for logging with country consideration
 			var providerInfo string
 			if p.asnClassifier != nil {
 				classification := p.asnClassifier.ClassifyWithCountry(identifier, orgName, countryCode)
-				providerInfo = fmt.Sprintf(" [%s, риск:%.1f]", classification.ProviderType, classification.Modifier)
+				providerInfo = fmt.Sprintf(" [%s, risk:%.1f]", classification.ProviderType, classification.Modifier)
 			}
-			log.Printf("Новый %s для пользователя %s%s: %s (%s)%s | IP: %s. Всего: %d/%d",
+			log.Printf("New %s for user %s%s: %s (%s)%s | IP: %s. Total: %d/%d",
 				identifierType, entry.UserEmail, debugMarker, identifier, orgName, providerInfo, entry.SourceIP, res.CurrentCount, userASNLimit)
 
-			// Логируем GeoIP анализ (используем уже полученные данные)
+			// Log GeoIP analysis (using already obtained data)
 			if geoLoc != nil {
 				log.Printf("[GeoIP] %s: %s -> %s, %s (%.2f, %.2f)",
 					entry.UserEmail, entry.SourceIP, geoLoc.CountryCode, geoLoc.City,
 					geoLoc.Latitude, geoLoc.Longitude)
 			}
 		} else {
-			log.Printf("Новый %s для пользователя %s%s: %s | IP: %s. Всего: %d/%d",
+			log.Printf("New %s for user %s%s: %s | IP: %s. Total: %d/%d",
 				identifierType, entry.UserEmail, debugMarker, identifier, entry.SourceIP, res.CurrentCount, userASNLimit)
 		}
 	}
 
-	if res.StatusCode == 1 { // Лимит превышен, enforcement
-		log.Printf("⚠️  ПРЕВЫШЕНИЕ ЛИМИТА %s%s: Пользователь %s, кол-во: %d/%d",
+	if res.StatusCode == 1 { // Limit exceeded, enforcement
+		log.Printf("⚠️  %s LIMIT EXCEEDED%s: User %s, count: %d/%d",
 			identifierType, debugMarker, entry.UserEmail, res.CurrentCount, userASNLimit)
 
 		// Формируем алерт
@@ -571,7 +571,7 @@ func (p *LogProcessor) processEntryByASN(ctx context.Context, entry models.LogEn
 					alertPayload.ASNDetails,
 				)
 
-				// Добавляем результаты в alert payload
+				// Add results to alert payload
 				if geoResult != nil {
 					alertPayload.GeoAnalysis = geoResult
 				}
@@ -583,28 +583,28 @@ func (p *LogProcessor) processEntryByASN(ctx context.Context, entry models.LogEn
 					alertPayload.Score = &score
 					alertPayload.ScoreAction = string(violationScore.Action)
 
-					// Проверяем действие на основе скора
+					// Check action based on score
 					if violationScore.Action == scoring.ActionNone {
-						log.Printf("[Anti-Abuse] Скор %.1f < 30 для %s, блокировка отменена",
+						log.Printf("[Anti-Abuse] Score %.1f < 30 for %s, block cancelled",
 							violationScore.FinalScore, entry.UserEmail)
-						return // Не блокируем и не отправляем алерт
+						return // Don't block and don't send alert
 					}
 				}
 			}
 		} else {
-			// Для Subnet fallback: используем IP-поля
+			// For Subnet fallback: use IP fields
 			subnetCount := int(res.CurrentCount)
 			alertPayload.DetectedIPsCount = &subnetCount
 			alertPayload.AllUserIPs = res.AllUserItems
 		}
 
-		// MIG-7: User-level enforcement (до отправки alert)
+		// MIG-7: User-level enforcement (before alert send)
 		var enfScore int
 		var enfReason string
 
 		if identifierType == "ASN" {
 			enfReason = fmt.Sprintf("asn_limit_exceeded: %d/%d ASNs", res.CurrentCount, userASNLimit)
-			// Используем violationScore если есть
+			// Use violationScore if available
 			if alertPayload.Score != nil {
 				enfScore = int(*alertPayload.Score)
 			} else {
@@ -616,37 +616,37 @@ func (p *LogProcessor) processEntryByASN(ctx context.Context, entry models.LogEn
 		}
 
 		if err := p.disableUser(ctx, entry.UserEmail, enfReason, enfScore); err != nil {
-			log.Printf("Ошибка enforcement для %s: %v", entry.UserEmail, err)
+			log.Printf("Enforcement error for %s: %v", entry.UserEmail, err)
 		}
 
 		p.enqueueSideEffectTask(func(ctx context.Context) {
 			if err := p.alerter.SendAlert(ctx, alertPayload); err != nil {
-				log.Printf("Ошибка отправки вебхук-уведомления: %v", err)
+				log.Printf("Webhook notification send error: %v", err)
 			}
 		})
 	}
 }
 
-// collectASNDetails собирает детали по каждому ASN (организация, IP, количество)
-// currentASN и currentIP - текущий ASN и IP для гарантированного включения в результат
+// collectASNDetails collects details for each ASN (organization, IPs, count)
+// currentASN and currentIP - current ASN and IP for guaranteed inclusion in result
 func (p *LogProcessor) collectASNDetails(ctx context.Context, email string, asns []string, currentASN, currentIP string) map[string]*models.ASNInfo {
 	result := make(map[string]*models.ASNInfo)
 	redisStore := p.storage.(*storage.RedisStore)
 
 	for _, asn := range asns {
-		// Пропускаем не-ASN идентификаторы (подсети)
+		// Skip non-ASN identifiers (subnets)
 		if len(asn) < 2 || asn[:2] != "AS" {
 			continue
 		}
 
-		// Получаем IP-адреса для этого ASN
+		// Get IP addresses for this ASN
 		ips, err := redisStore.GetIPsForUserASN(ctx, email, asn)
 		if err != nil {
-			log.Printf("Ошибка получения IP для ASN %s пользователя %s: %v", asn, email, err)
-			ips = []string{} // Продолжаем с пустым списком вместо пропуска
+			log.Printf("Error getting IPs for ASN %s user %s: %v", asn, email, err)
+			ips = []string{} // Continue with empty list instead of skip
 		}
 
-		// Если это текущий ASN и текущий IP не в списке - добавляем
+		// If this is current ASN and current IP not in list - add it
 		if asn == currentASN && currentIP != "" {
 			found := false
 			for _, ip := range ips {
@@ -660,31 +660,31 @@ func (p *LogProcessor) collectASNDetails(ctx context.Context, email string, asns
 			}
 		}
 
-		// Получаем название организации и страну для ASN
-		// Сначала пробуем из кеша Redis
+		// Get organization name and country for ASN
+		// First try from Redis cache
 		org, err := redisStore.GetASNOrgName(ctx, asn)
 		if err != nil {
-			log.Printf("Ошибка получения org из кеша для ASN %s: %v", asn, err)
+			log.Printf("Error getting org from cache for ASN %s: %v", asn, err)
 		}
 
-		// Получаем код страны через lookup
+		// Get country code via lookup
 		var countryCode string
 		if p.asnLookup != nil && len(ips) > 0 {
 			if org == "" {
-				// Если в кеше нет org - используем LookupFull
+				// If no org in cache - use LookupFull
 				_, orgName, country, err := p.asnLookup.LookupFull(ips[0])
 				if err == nil {
 					if orgName != "" {
 						org = orgName
-						// Сохраняем в кеш для будущего использования
+						// Save to cache for future use
 						if cacheErr := redisStore.SetASNOrgName(ctx, asn, orgName, p.cfg.UserSubnetTTL); cacheErr != nil {
-							log.Printf("Ошибка кеширования org для ASN %s: %v", asn, cacheErr)
+							log.Printf("Org caching error for ASN %s: %v", asn, cacheErr)
 						}
 					}
 					countryCode = country
 				}
 			} else {
-				// Если org уже есть - получаем только страну
+				// If org already exists - get only country
 				_, _, country, err := p.asnLookup.LookupFull(ips[0])
 				if err == nil {
 					countryCode = country
@@ -692,7 +692,7 @@ func (p *LogProcessor) collectASNDetails(ctx context.Context, email string, asns
 			}
 		}
 
-		// Если org всё ещё пустой - ставим fallback
+		// If org still empty - set fallback
 		if org == "" {
 			org = "Unknown"
 		}
@@ -709,30 +709,30 @@ func (p *LogProcessor) collectASNDetails(ctx context.Context, email string, asns
 	return result
 }
 
-// collectIPsForASNBlock собирает все IP-адреса для блокировки на основе ASN/подсетей
-// currentIP - текущий IP для гарантированного включения в результат
+// collectIPsForASNBlock collects all IPs for blocking based on ASN/subnets
+// currentIP - current IP for guaranteed inclusion in result
 func (p *LogProcessor) collectIPsForASNBlock(ctx context.Context, email string, identifiers []string, currentIP string) []string {
 	var result []string
 	seenIPs := make(map[string]struct{})
 	redisStore := p.storage.(*storage.RedisStore)
 
-	// Сначала добавляем текущий IP чтобы гарантировать его блокировку
+	// First add current IP to guarantee its blocking
 	if currentIP != "" {
 		seenIPs[currentIP] = struct{}{}
 		result = append(result, currentIP)
 	}
 
 	for _, item := range identifiers {
-		// Проверяем не в списке ли исключённых ASN
+		// Check if not in excluded ASN list
 		if len(item) > 2 && item[:2] == "AS" {
 			if p.cfg.ExcludedASNs[item] {
-				log.Printf("ASN %s в списке исключённых, пропускаем при сборе IP для блокировки", item)
+				log.Printf("ASN %s in excluded list, skipping during IP collection for block", item)
 				continue
 			}
 
 			ips, err := redisStore.GetIPsForUserASN(ctx, email, item)
 			if err != nil {
-				log.Printf("Ошибка получения IP для ASN %s пользователя %s: %v", item, email, err)
+				log.Printf("Error getting IPs for ASN %s user %s: %v", item, email, err)
 				continue
 			}
 			for _, ip := range ips {
@@ -742,7 +742,7 @@ func (p *LogProcessor) collectIPsForASNBlock(ctx context.Context, email string, 
 				}
 			}
 		} else {
-			// Это подсеть (fallback) - добавляем как есть для блокировки CIDR
+			// This is subnet (fallback) - add as-is for CIDR blocking
 			if _, exists := seenIPs[item]; !exists {
 				seenIPs[item] = struct{}{}
 				result = append(result, item)
@@ -751,7 +751,7 @@ func (p *LogProcessor) collectIPsForASNBlock(ctx context.Context, email string, 
 	}
 
 	if len(result) == 0 {
-		log.Printf("⚠️  Не найдено IP-адресов для блокировки пользователя %s", email)
+		log.Printf("⚠️  No IP addresses found for blocking user %s", email)
 	}
 
 	return result
@@ -778,24 +778,24 @@ func parseBlockDuration(durationStr string) (time.Duration, error) {
 	return dur, nil
 }
 
-// disableUser выполняет user-level enforcement через Remnawave API.
-// Парсит internal ID, вызывает enforcer, логирует результат.
+// disableUser performs user-level enforcement via Remnawave API.
+// Parses internal ID, calls enforcer, logs result.
 func (p *LogProcessor) disableUser(ctx context.Context, userEmail string, reason string, score int) error {
-	// Парсим internal ID
+	// Parse internal ID
 	internalID, err := parseInternalID(userEmail)
 	if err != nil {
 		metrics.RejectedRequestsTotal.Add(1)
 		return err
 	}
 
-	// Парсим duration
+	// Parse duration
 	duration, err := parseBlockDuration(p.cfg.BlockDuration)
 	if err != nil {
 		log.Printf("Warning: invalid BlockDuration config %q, using default 5m", p.cfg.BlockDuration)
 		duration = 5 * time.Minute
 	}
 
-	// Вызываем enforcer (с таймаутом)
+	// Call enforcer (with timeout)
 	enfCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 
@@ -807,13 +807,13 @@ func (p *LogProcessor) disableUser(ctx context.Context, userEmail string, reason
 	return nil
 }
 
-// scheduleASNClear планирует отложенную очистку ASN данных
+// scheduleASNClear schedules delayed ASN data cleanup
 func (p *LogProcessor) scheduleASNClear(ctx context.Context, userEmail string) {
-	log.Printf("Планирование отложенной очистки ASN данных для %s через %v.", userEmail, p.cfg.ClearIPsDelay)
+	log.Printf("Scheduling delayed ASN data cleanup for %s in %v", userEmail, p.cfg.ClearIPsDelay)
 
 	time.AfterFunc(p.cfg.ClearIPsDelay, func() {
 		if ctx.Err() != nil {
-			log.Printf("Отложенная очистка ASN данных для %s отменена из-за остановки сервиса.", userEmail)
+			log.Printf("Delayed ASN data cleanup for %s cancelled due to service shutdown", userEmail)
 			return
 		}
 
@@ -823,25 +823,25 @@ func (p *LogProcessor) scheduleASNClear(ctx context.Context, userEmail string) {
 		cleared, err := p.storage.(*storage.RedisStore).ClearUserASNData(opCtx, userEmail)
 		if err != nil {
 			if errors.Is(err, context.Canceled) {
-				log.Printf("Отложенная очистка ASN данных для %s отменена из-за остановки сервиса во время выполнения.", userEmail)
+				log.Printf("Delayed ASN data cleanup for %s cancelled due to service shutdown during execution", userEmail)
 			} else if errors.Is(err, context.DeadlineExceeded) {
-				log.Printf("Таймаут при отложенной очистке ASN данных для %s.", userEmail)
+				log.Printf("Timeout during delayed ASN data cleanup for %s", userEmail)
 			} else {
-				log.Printf("Ошибка при отложенной очистке ASN данных для %s: %v", userEmail, err)
+				log.Printf("Error during delayed ASN data cleanup for %s: %v", userEmail, err)
 			}
 			return
 		}
-		log.Printf("✅ Отложенная очистка ASN данных для %s%s выполнена. Очищено ключей: %d",
+		log.Printf("✅ Delayed ASN data cleanup for %s%s completed. Keys cleared: %d",
 			userEmail, p.getDebugMarker(userEmail), cleared)
 	})
 }
 
 func (p *LogProcessor) scheduleIPsClear(ctx context.Context, userEmail string) {
-	log.Printf("Планирование отложенной очистки IP для %s через %v.", userEmail, p.cfg.ClearIPsDelay)
+	log.Printf("Scheduling delayed IP cleanup for %s in %v", userEmail, p.cfg.ClearIPsDelay)
 
 	time.AfterFunc(p.cfg.ClearIPsDelay, func() {
 		if ctx.Err() != nil {
-			log.Printf("Отложенная очистка IP для %s отменена из-за остановки сервиса.", userEmail)
+			log.Printf("Delayed IP cleanup for %s cancelled due to service shutdown", userEmail)
 			return
 		}
 
@@ -851,25 +851,25 @@ func (p *LogProcessor) scheduleIPsClear(ctx context.Context, userEmail string) {
 		cleared, err := p.storage.ClearUserIPs(opCtx, userEmail)
 		if err != nil {
 			if errors.Is(err, context.Canceled) {
-				log.Printf("Отложенная очистка IP для %s отменена из-за остановки сервиса во время выполнения.", userEmail)
+				log.Printf("Delayed IP cleanup for %s cancelled due to service shutdown during execution", userEmail)
 			} else if errors.Is(err, context.DeadlineExceeded) {
-				log.Printf("Таймаут при отложенной очистке IP для %s.", userEmail)
+				log.Printf("Timeout during delayed IP cleanup for %s", userEmail)
 			} else {
-				log.Printf("Ошибка при отложенной очистке IP для %s: %v", userEmail, err)
+				log.Printf("Error during delayed IP cleanup for %s: %v", userEmail, err)
 			}
 			return
 		}
-		log.Printf("Отложенная очистка IP для %s%s выполнена. Очищено ключей: %d",
+		log.Printf("Delayed IP cleanup for %s%s completed. Keys cleared: %d",
 			userEmail, p.getDebugMarker(userEmail), cleared)
 	})
 }
 
 func (p *LogProcessor) scheduleSubnetsClear(ctx context.Context, userEmail string) {
-	log.Printf("Планирование отложенной очистки ПОДСЕТЕЙ для %s через %v.", userEmail, p.cfg.ClearIPsDelay)
+	log.Printf("Scheduling delayed SUBNET cleanup for %s in %v", userEmail, p.cfg.ClearIPsDelay)
 
 	time.AfterFunc(p.cfg.ClearIPsDelay, func() {
 		if ctx.Err() != nil {
-			log.Printf("Отложенная очистка ПОДСЕТЕЙ для %s отменена из-за остановки сервиса.", userEmail)
+			log.Printf("Delayed SUBNET cleanup for %s cancelled due to service shutdown", userEmail)
 			return
 		}
 
@@ -879,15 +879,15 @@ func (p *LogProcessor) scheduleSubnetsClear(ctx context.Context, userEmail strin
 		cleared, err := p.storage.ClearUserSubnets(opCtx, userEmail)
 		if err != nil {
 			if errors.Is(err, context.Canceled) {
-				log.Printf("Отложенная очистка ПОДСЕТЕЙ для %s отменена из-за остановки сервиса во время выполнения.", userEmail)
+				log.Printf("Delayed SUBNET cleanup for %s cancelled due to service shutdown during execution", userEmail)
 			} else if errors.Is(err, context.DeadlineExceeded) {
-				log.Printf("Таймаут при отложенной очистке ПОДСЕТЕЙ для %s.", userEmail)
+				log.Printf("Timeout during delayed SUBNET cleanup for %s", userEmail)
 			} else {
-				log.Printf("Ошибка при отложенной очистке ПОДСЕТЕЙ для %s: %v", userEmail, err)
+				log.Printf("Error during delayed SUBNET cleanup for %s: %v", userEmail, err)
 			}
 			return
 		}
-		log.Printf("Отложенная очистка ПОДСЕТЕЙ для %s%s выполнена. Очищено ключей: %d",
+		log.Printf("Delayed SUBNET cleanup for %s%s completed. Keys cleared: %d",
 			userEmail, p.getDebugMarker(userEmail), cleared)
 	})
 }
@@ -959,7 +959,7 @@ func (p *LogProcessor) performEnhancedAnalytics(
 		p.cfg.MaxASNsPerUser,
 	)
 
-	log.Printf("[Anti-Abuse] Анализ для %s: GeoScore=%d, ASNScore=%.1f, FinalScore=%.1f, Action=%s",
+	log.Printf("[Anti-Abuse] Analysis for %s: GeoScore=%d, ASNScore=%.1f, FinalScore=%.1f, Action=%s",
 		email, geoResult.GeoScore, violationScore.Components.ASNScore,
 		violationScore.FinalScore, violationScore.Action)
 
