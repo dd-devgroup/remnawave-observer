@@ -27,7 +27,6 @@ type PoolMonitor struct {
 	geoService    *geoip.GeoIPService
 	geoCache      map[string]*geoCacheEntry
 	geoCacheMu    sync.Mutex
-	geoChecksLeft int
 }
 
 // NewPoolMonitor создает новый экземпляр PoolMonitor.
@@ -58,10 +57,9 @@ func (m *PoolMonitor) Run(ctx context.Context, wg *sync.WaitGroup) {
 }
 
 func (m *PoolMonitor) performMonitoring(ctx context.Context) {
-	// Reset cache and GeoIP check budget for this monitoring cycle
+	// Reset per-cycle in-memory cache
 	m.geoCacheMu.Lock()
 	m.geoCache = make(map[string]*geoCacheEntry)
-	m.geoChecksLeft = m.cfg.GeoIPMonitorMaxChecksPerRun
 	m.geoCacheMu.Unlock()
 
 	userEmails, err := m.storage.GetAllUserEmails(ctx)
@@ -395,18 +393,12 @@ func (m *PoolMonitor) collectUserIPs(user models.UserIPStats) []string {
 }
 
 // cachedLookup выполняет GeoIP lookup с мемоизацией в рамках текущего цикла мониторинга.
-// Возвращает nil, nil когда бюджет проверок исчерпан.
 func (m *PoolMonitor) cachedLookup(ctx context.Context, ip string) (*geoip.GeoLocation, error) {
 	m.geoCacheMu.Lock()
 	if entry, ok := m.geoCache[ip]; ok {
 		m.geoCacheMu.Unlock()
 		return entry.loc, entry.err
 	}
-	if m.geoChecksLeft <= 0 {
-		m.geoCacheMu.Unlock()
-		return nil, nil
-	}
-	m.geoChecksLeft--
 	m.geoCacheMu.Unlock()
 
 	loc, err := m.geoService.Lookup(ctx, ip)
