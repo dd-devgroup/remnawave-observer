@@ -354,18 +354,18 @@ var stopWords = map[string]bool{
 // asnSuffixes суффиксы для удаления из ключевых слов провайдеров
 var asnSuffixes = []string{"-as", "-net", "-isp"}
 
-// extractKeyword извлекает ключевое слово из названия организации.
-// Пропускает stop-words, убирает AS/ASN-префиксы и суффиксы (-as, -net, -isp).
-// Итерирует по словам org, пока не найдёт подходящее.
+// extractKeyword extracts a keyword from an organization name.
+// Uses normalizeOrgName for consistent normalization, then picks the first
+// non-stopword token with length 3-30, stripping ASN suffixes (-as, -net, -isp).
 func (al *AutoLearner) extractKeyword(org string) string {
-	orgLower := strings.ToLower(org)
+	normalized := normalizeOrgName(org)
 
-	// Убираем AS/ASN-prefixes из начала ("asn" раньше "as")
-	orgLower = strings.TrimPrefix(orgLower, "asn")
-	orgLower = strings.TrimPrefix(orgLower, "as")
-	orgLower = strings.TrimLeft(orgLower, " -_")
+	// Strip AS/ASN-prefixes from start ("asn" before "as")
+	normalized = strings.TrimPrefix(normalized, "asn")
+	normalized = strings.TrimPrefix(normalized, "as")
+	normalized = strings.TrimLeft(normalized, " -_")
 
-	parts := strings.Fields(orgLower)
+	parts := strings.Fields(normalized)
 	for _, part := range parts {
 		word := strings.Trim(part, "-_.,;:!?()[]{}\"'")
 		word = strings.TrimLeft(word, "0123456789")
@@ -378,7 +378,7 @@ func (al *AutoLearner) extractKeyword(org string) string {
 			continue
 		}
 
-		// Убираем суффиксы -as / -net / -isp если остаток >= 3 символа
+		// Strip suffixes -as / -net / -isp if remainder >= 3 chars
 		for _, suffix := range asnSuffixes {
 			if strings.HasSuffix(word, suffix) && len(word)-len(suffix) >= 3 {
 				word = strings.TrimSuffix(word, suffix)
