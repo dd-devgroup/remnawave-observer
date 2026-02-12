@@ -425,9 +425,25 @@ func (p *LogProcessor) processEntryByASN(ctx context.Context, entry models.LogEn
 				score := violationScore.FinalScore
 				alertPayload.Score = &score
 				alertPayload.ScoreAction = string(violationScore.Action)
+				conf := violationScore.Confidence
+				alertPayload.ScoreConfidence = &conf
+				alertPayload.ScoreModifiers = violationScore.Modifiers
+
+				// Convert feature results to model
+				breakdown := make([]models.ScoreFeatureResult, 0, len(violationScore.Features))
+				for _, f := range violationScore.Features {
+					breakdown = append(breakdown, models.ScoreFeatureResult{
+						Name:       f.Name,
+						Score:      f.Score,
+						Weight:     f.Weight,
+						Confidence: f.Confidence,
+						Details:    f.Details,
+					})
+				}
+				alertPayload.ScoreBreakdown = breakdown
 
 				if violationScore.Action == scoring.ActionNone {
-					log.Printf("[Anti-Abuse] Score %.1f < 30 for %s, block cancelled",
+					log.Printf("[Anti-Abuse] Score %.1f for %s, action=none, block cancelled",
 						violationScore.FinalScore, entry.UserEmail)
 					return
 				}
@@ -691,16 +707,16 @@ func (p *LogProcessor) performEnhancedAnalytics(
 		GeoFlags:        geoResult.GeoFlags,
 	}
 
-	violationScore := p.scorer.Calculate(
-		asnClassifications,
-		geoResultForScorer,
-		len(allASNs),
-		p.cfg.MaxASNsPerUser,
-	)
+	violationScore := p.scorer.Calculate(&scoring.ScoringInput{
+		ASNClassifications: asnClassifications,
+		GeoResult:          geoResultForScorer,
+		UniqueCount:        len(allASNs),
+		Limit:              p.cfg.MaxASNsPerUser,
+	})
 
-	log.Printf("[Anti-Abuse] Analysis for %s: GeoScore=%d, ASNScore=%.1f, FinalScore=%.1f, Action=%s",
-		email, geoResult.GeoScore, violationScore.Components.ASNScore,
-		violationScore.FinalScore, violationScore.Action)
+	log.Printf("[Anti-Abuse] Analysis for %s: GeoScore=%d, ASNScore=%.1f, FinalScore=%.1f, Confidence=%.2f, Action=%s",
+		email, geoResult.GeoScore, violationScore.GetFeatureScore("asn"),
+		violationScore.FinalScore, violationScore.Confidence, violationScore.Action)
 
 	return geoResult, providerTypes, violationScore
 }

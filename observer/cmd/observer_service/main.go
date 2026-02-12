@@ -125,13 +125,14 @@ func main() {
 		// Initialize scoring system
 		if cfg.ScoringEnabled {
 			thresholds := scoring.ScoreThresholds{
-				MonitorThreshold:   30,
-				WarnThreshold:      cfg.ScoreThresholdWarn,
-				SoftBlockThreshold: 70,
-				BlockThreshold:     cfg.ScoreThresholdBlock,
+				MonitorThreshold:       25,
+				WarnThreshold:          cfg.ScoreThresholdWarn,
+				SoftChallengeThreshold: 60,
+				TempDisableThreshold:   75,
+				HardDisableThreshold:   cfg.ScoreThresholdBlock,
 			}
 			scorer = scoring.NewScorer(thresholds)
-			log.Printf("✅ Scoring system initialized (warn: %.1f, block: %.1f)",
+			log.Printf("✅ Scoring system initialized (warn: %.1f, hard_disable: %.1f)",
 				cfg.ScoreThresholdWarn, cfg.ScoreThresholdBlock)
 		}
 	}
