@@ -86,14 +86,14 @@ func (s *Server) handleProcessLogEntries(c *gin.Context) {
 			return
 		}
 
-		// Детектируем unknown field error для специфичного кода ошибки
+		// Detect unknown field error for specific error code
 		if s.cfg.StrictJSONDecode && errors.Is(err, &json.UnmarshalTypeError{}) {
-			log.Printf("Отклонён запрос: unknown field в JSON: %v", err)
+			log.Printf("Request rejected: unknown field in JSON: %v", err)
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error(), "code": "unknown_field"})
 			return
 		}
 
-		log.Printf("Ошибка декодирования body: %v", err)
+		log.Printf("Body decoding error: %v", err)
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error(), "code": "invalid_json"})
 		return
 	}
@@ -106,7 +106,7 @@ func (s *Server) handleProcessLogEntries(c *gin.Context) {
 
 	if len(entries) > s.cfg.MaxLogEntriesPerRequest {
 		metrics.RejectedRequestsTotal.Add(1)
-		log.Printf("Отклонён запрос: %d записей, максимум %d", len(entries), s.cfg.MaxLogEntriesPerRequest)
+		log.Printf("Request rejected: %d entries, max %d", len(entries), s.cfg.MaxLogEntriesPerRequest)
 		c.JSON(http.StatusBadRequest, gin.H{
 			"error": fmt.Sprintf("too many entries: %d, max allowed: %d", len(entries), s.cfg.MaxLogEntriesPerRequest),
 			"code":  "too_many_entries",
@@ -123,7 +123,7 @@ func (s *Server) handleProcessLogEntries(c *gin.Context) {
 			return
 		}
 		if _, err := netip.ParseAddr(entry.SourceIP); err != nil {
-			log.Printf("Невалидный source_ip в записи %d для пользователя %s: %q", i, entry.UserEmail, entry.SourceIP)
+			log.Printf("Invalid source_ip in entry %d for user %s: %q", i, entry.UserEmail, entry.SourceIP)
 			c.JSON(http.StatusBadRequest, gin.H{
 				"error": fmt.Sprintf("invalid source_ip at index %d: %q", i, entry.SourceIP),
 				"code":  "invalid_ip",

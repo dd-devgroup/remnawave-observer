@@ -205,47 +205,47 @@ func New() *Config {
 		cfg.ReenableBatchSize = 100
 	}
 
-	log.Printf("Конфигурация загружена. Порт: %s", cfg.Port)
+	log.Printf("Configuration loaded. Port: %s", cfg.Port)
 	if cfg.DetectByASN {
-		log.Printf("!!! РЕЖИМ ОБНАРУЖЕНИЯ: по ASN (провайдерам). Лимит: %d провайдеров на пользователя.", cfg.MaxASNsPerUser)
-		log.Printf("    Источник: iptoasn.com, Интервал обновления: %v, Fallback маска: /%d", cfg.IPtoASNUpdateInterval, cfg.ASNFallbackMask)
+		log.Printf("!!! DETECTION MODE: by ASN (providers). Limit: %d providers per user", cfg.MaxASNsPerUser)
+		log.Printf("    Source: iptoasn.com, Update interval: %v, Fallback mask: /%d", cfg.IPtoASNUpdateInterval, cfg.ASNFallbackMask)
 		if len(cfg.ExcludedASNs) > 0 {
-			log.Printf("    Исключенные ASN: %d", len(cfg.ExcludedASNs))
+			log.Printf("    Excluded ASNs: %d", len(cfg.ExcludedASNs))
 		}
 	} else if cfg.DetectBySubnet {
-		log.Printf("!!! РЕЖИМ ОБНАРУЖЕНИЯ: по ПОДСЕТЯМ (/%d). Лимит: %d подсетей на пользователя.", cfg.SubnetMaskIPv4, cfg.MaxSubnetsPerUser)
+		log.Printf("!!! DETECTION MODE: by SUBNETS (/%d). Limit: %d subnets per user", cfg.SubnetMaskIPv4, cfg.MaxSubnetsPerUser)
 	} else {
-		log.Printf("!!! РЕЖИМ ОБНАРУЖЕНИЯ: по IP-адресам. Лимит: %d IP на пользователя.", cfg.MaxIPsPerUser)
+		log.Printf("!!! DETECTION MODE: by IP addresses. Limit: %d IPs per user", cfg.MaxIPsPerUser)
 	}
-	log.Printf("Пул воркеров обработки логов: %d воркеров, размер буфера канала: %d", cfg.WorkerPoolSize, cfg.LogChannelBufferSize)
-	log.Printf("Пул воркеров побочных задач (алерты, очистка): %d воркеров, размер буфера канала: %d", cfg.SideEffectWorkerPoolSize, cfg.SideEffectChannelBufferSize)
+	log.Printf("Log processing worker pool: %d workers, channel buffer: %d", cfg.WorkerPoolSize, cfg.LogChannelBufferSize)
+	log.Printf("Side-effect worker pool (alerts, cleanup): %d workers, channel buffer: %d", cfg.SideEffectWorkerPoolSize, cfg.SideEffectChannelBufferSize)
 	if len(cfg.ExcludedUsers) > 0 {
-		log.Printf("Загружен список исключений: %d пользователей", len(cfg.ExcludedUsers))
+		log.Printf("Exclusion list loaded: %d users", len(cfg.ExcludedUsers))
 	}
 	if len(cfg.ExcludedIPs) > 0 {
-		log.Printf("Загружен список исключений IP-адресов: %d", len(cfg.ExcludedIPs))
+		log.Printf("IP exclusion list loaded: %d", len(cfg.ExcludedIPs))
 	}
 	if len(cfg.ExcludedSubnets) > 0 {
-		log.Printf("Загружен список исключений подсетей: %d", len(cfg.ExcludedSubnets))
+		log.Printf("Subnet exclusion list loaded: %d", len(cfg.ExcludedSubnets))
 	}
 	if cfg.DebugEmail != "" {
-		log.Printf("Режим дебага включен для email: %s с лимитом IP: %d", cfg.DebugEmail, cfg.DebugIPLimit)
+		log.Printf("Debug mode enabled for email: %s with IP limit: %d", cfg.DebugEmail, cfg.DebugIPLimit)
 	}
 	if cfg.GeoIPEnabled {
-		log.Printf("GeoIP анализ включен. Cache TTL: %v, Config dir: %s, Data dir: %s", cfg.GeoIPCacheTTL, cfg.GeoDataConfigDir, cfg.GeoDataDataDir)
+		log.Printf("GeoIP analysis enabled. Cache TTL: %v, Config dir: %s, Data dir: %s", cfg.GeoIPCacheTTL, cfg.GeoDataConfigDir, cfg.GeoDataDataDir)
 	}
 	if cfg.ScoringEnabled {
-		log.Printf("Система скоринга включена. Warn threshold: %.1f, Block threshold: %.1f", cfg.ScoreThresholdWarn, cfg.ScoreThresholdBlock)
+		log.Printf("Scoring system enabled. Warn threshold: %.1f, Block threshold: %.1f", cfg.ScoreThresholdWarn, cfg.ScoreThresholdBlock)
 	}
 	if cfg.UnknownProvidersLogEnabled {
-		log.Printf("Логирование неизвестных провайдеров включено")
+		log.Printf("Unknown providers logging enabled")
 	}
 	if cfg.AutoLearningEnabled {
-		log.Printf("Автоматическое обучение включено. Интервал: %v, Min count: %d, Min confidence: %s, Max adds/цикл: %d, Output: %s",
+		log.Printf("Auto-learning enabled. Interval: %v, Min count: %d, Min confidence: %s, Max adds/cycle: %d, Output: %s",
 			cfg.AutoLearningInterval, cfg.AutoLearningMinCount, cfg.AutoLearningMinConfidence, cfg.AutoLearningMaxAddsPerRun, cfg.AutoLearningOutputFile)
 	}
 	if cfg.CAIDAEnabled {
-		log.Printf("CAIDA AS2Org включен. Обновление каждые %dh", cfg.CAIDARefreshHours)
+		log.Printf("CAIDA AS2Org enabled. Refresh every %dh", cfg.CAIDARefreshHours)
 	}
 
 	// Валидация и логирование HTTP таймаутов
@@ -264,12 +264,12 @@ func New() *Config {
 	if cfg.HTTPMaxHeaderBytes <= 0 {
 		cfg.HTTPMaxHeaderBytes = 1 << 20
 	}
-	log.Printf("HTTP Server таймауты: ReadHeader=%ds Read=%ds Write=%ds Idle=%ds MaxHeaderBytes=%d",
+	log.Printf("HTTP Server timeouts: ReadHeader=%ds Read=%ds Write=%ds Idle=%ds MaxHeaderBytes=%d",
 		cfg.HTTPReadHeaderTimeoutSeconds, cfg.HTTPReadTimeoutSeconds,
 		cfg.HTTPWriteTimeoutSeconds, cfg.HTTPIdleTimeoutSeconds, cfg.HTTPMaxHeaderBytes)
 
 	if cfg.StrictJSONDecode {
-		log.Printf("Строгая валидация JSON включена (unknown fields будут отклонены)")
+		log.Printf("Strict JSON validation enabled (unknown fields will be rejected)")
 	}
 
 	return cfg

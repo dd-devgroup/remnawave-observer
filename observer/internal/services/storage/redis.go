@@ -137,7 +137,7 @@ func NewRedisStore(ctx context.Context, redisURL string, scriptPaths ...string) 
 	if err != nil {
 		return nil, fmt.Errorf("ошибка загрузки Lua-скрипта (clear asn) в Redis: %w", err)
 	}
-	log.Println("Успешное подключение к Redis и загрузка Lua-скриптов.")
+	log.Println("Successfully connected to Redis and loaded Lua scripts")
 	return &RedisStore{
 		client:                  client,
 		addCheckIPScriptSHA:     addCheckIPScriptSHA,
@@ -363,7 +363,7 @@ func (s *RedisStore) GetAllUserEmails(ctx context.Context) ([]string, error) {
 		cursor = 0
 		for {
 			if time.Now().After(deadline) {
-				log.Printf("GetAllUserEmails: достигнут time budget %v, результат частичный", s.scanTimeBudget)
+				log.Printf("GetAllUserEmails: time budget %v reached, partial result", s.scanTimeBudget)
 				metrics.ScanPartialRunsCount.Add(1)
 				partial = true
 				break
@@ -373,7 +373,7 @@ func (s *RedisStore) GetAllUserEmails(ctx context.Context) ([]string, error) {
 			keys, cursor, err = s.client.Scan(scanCtx, cursor, pattern, int64(s.scanCount)).Result()
 			if err != nil {
 				if scanCtx.Err() != nil {
-					log.Printf("GetAllUserEmails: контекст отменён (%v), результат частичный", scanCtx.Err())
+					log.Printf("GetAllUserEmails: context cancelled (%v), partial result", scanCtx.Err())
 					metrics.ScanPartialRunsCount.Add(1)
 					partial = true
 					break
@@ -393,7 +393,7 @@ func (s *RedisStore) GetAllUserEmails(ctx context.Context) ([]string, error) {
 		}
 		if partial || scanned >= s.scanMaxKeys {
 			if scanned >= s.scanMaxKeys {
-				log.Printf("GetAllUserEmails: достигнут лимит сканирования %d ключей", s.scanMaxKeys)
+				log.Printf("GetAllUserEmails: scan limit %d keys reached", s.scanMaxKeys)
 			}
 			break
 		}
@@ -459,13 +459,13 @@ func (s *RedisStore) GetAllIPsForUser(ctx context.Context, email string) ([]stri
 	iter := s.client.Scan(scanCtx, 0, pattern, int64(s.scanCount)).Iterator()
 	for iter.Next(scanCtx) {
 		if time.Now().After(deadline) {
-			log.Printf("GetAllIPsForUser(%s): достигнут time budget %v, результат частичный", email, s.scanTimeBudget)
+			log.Printf("GetAllIPsForUser(%s): time budget %v reached, partial result", email, s.scanTimeBudget)
 			metrics.ScanPartialRunsCount.Add(1)
 			break
 		}
 		scanned++
 		if scanned > s.scanMaxKeys {
-			log.Printf("GetAllIPsForUser(%s): достигнут лимит сканирования %d ключей", email, s.scanMaxKeys)
+			log.Printf("GetAllIPsForUser(%s): scan limit %d keys reached", email, s.scanMaxKeys)
 			break
 		}
 		key := iter.Val()
