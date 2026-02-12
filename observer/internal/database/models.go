@@ -63,6 +63,29 @@ type UserScoreEvent struct {
 	ScoreBreakdown string `gorm:"type:jsonb;default:'{}'"`
 }
 
+// LearningCandidate represents a provider classification candidate for auto-learning.
+type LearningCandidate struct {
+	gorm.Model
+	ASN            string  `gorm:"index"`
+	OrgName        string
+	NormalizedName string
+	ProposedType   string
+	Confidence     float64
+	Evidence       string
+	DistinctUsers  int
+	TotalConns     int
+	Countries      string `gorm:"type:text"` // comma-separated
+	Status         string `gorm:"index;default:'pending'"` // pending, approved, rejected
+}
+
+// ASNOrgStats holds aggregated connection stats per ASN/org pair.
+type ASNOrgStats struct {
+	ASN           string
+	OrgName       string
+	DistinctUsers int64
+	TotalConns    int64
+}
+
 // IPEnrichmentCache stores enrichment data for IP addresses.
 type IPEnrichmentCache struct {
 	IP         string    `gorm:"primaryKey;not null"`

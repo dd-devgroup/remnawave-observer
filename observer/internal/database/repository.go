@@ -20,6 +20,10 @@ type Repository interface {
 	GetEnrichment(ctx context.Context, ip string) (*IPEnrichmentCache, error)
 	UpsertEnrichment(ctx context.Context, cache *IPEnrichmentCache) error
 	CleanExpiredEnrichments(ctx context.Context) (int64, error)
+	GetASNOrgStats(ctx context.Context, minDistinctUsers int) ([]ASNOrgStats, error)
+	InsertCandidate(ctx context.Context, candidate *LearningCandidate) error
+	GetPendingCandidates(ctx context.Context) ([]LearningCandidate, error)
+	UpdateCandidateStatus(ctx context.Context, id uint, status string) error
 	Close() error
 }
 
@@ -108,6 +112,44 @@ func (r *GormRepository) CleanExpiredEnrichments(ctx context.Context) (int64, er
 		Where("expires_at < ?", time.Now()).
 		Delete(&IPEnrichmentCache{})
 	return result.RowsAffected, result.Error
+}
+
+func (r *GormRepository) GetASNOrgStats(ctx context.Context, minDistinctUsers int) ([]ASNOrgStats, error) {
+	var stats []ASNOrgStats
+	err := r.db.WithContext(ctx).
+		Model(&UserConnection{}).
+		Select("asn, org_name, COUNT(DISTINCT user_id) as distinct_users, COUNT(*) as total_conns").
+		Where("asn != '' AND org_name != ''").
+		Group("asn, org_name").
+		Having("COUNT(DISTINCT user_id) >= ?", minDistinctUsers).
+		Find(&stats).Error
+	if err != nil {
+		return nil, fmt.Errorf("get ASN/org stats: %w", err)
+	}
+	return stats, nil
+}
+
+func (r *GormRepository) InsertCandidate(ctx context.Context, candidate *LearningCandidate) error {
+	return r.db.WithContext(ctx).Create(candidate).Error
+}
+
+func (r *GormRepository) GetPendingCandidates(ctx context.Context) ([]LearningCandidate, error) {
+	var candidates []LearningCandidate
+	err := r.db.WithContext(ctx).
+		Where("status = ?", "pending").
+		Order("confidence DESC").
+		Find(&candidates).Error
+	if err != nil {
+		return nil, fmt.Errorf("get pending candidates: %w", err)
+	}
+	return candidates, nil
+}
+
+func (r *GormRepository) UpdateCandidateStatus(ctx context.Context, id uint, status string) error {
+	return r.db.WithContext(ctx).
+		Model(&LearningCandidate{}).
+		Where("id = ?", id).
+		Update("status", status).Error
 }
 
 func (r *GormRepository) Close() error {

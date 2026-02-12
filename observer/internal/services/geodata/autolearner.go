@@ -11,25 +11,39 @@ import (
 	"sync"
 	"time"
 
+	"observer_service/internal/database"
+
 	"gopkg.in/yaml.v3"
 )
 
+// OrgCluster represents a group of similar organization names.
+type OrgCluster struct {
+	CanonicalName string
+	Members       []string
+	ProposedType  string
+	Confidence    float64
+	Evidence      string
+}
+
 // AutoLearner автоматическое обучение провайдеров
 type AutoLearner struct {
-	geoDataLoader *GeoDataLoader
-	configDir     string // read-only: base providers.yaml
-	dataDir       string // writable: overlay + backups
-	interval      time.Duration
-	minCount      int
-	minConfidence string
-	maxAddsPerRun int           // макс. добавлений за один цикл
-	outputFile    string        // имя overlay файла в dataDir
-	as2org        *AS2OrgLoader // CAIDA AS2Org (может быть nil)
-	mu            sync.Mutex
+	geoDataLoader         *GeoDataLoader
+	configDir             string // read-only: base providers.yaml
+	dataDir               string // writable: overlay + backups
+	interval              time.Duration
+	minCount              int
+	minConfidence         string
+	maxAddsPerRun         int                 // макс. добавлений за один цикл
+	outputFile            string              // имя overlay файла в dataDir
+	as2org                *AS2OrgLoader       // CAIDA AS2Org (может быть nil)
+	repo                  database.Repository // Postgres repository (может быть nil)
+	minDistinctUsers      int                 // min distinct users for Postgres learning
+	autoApproveThreshold  float64             // auto-approve confidence threshold
+	mu                    sync.Mutex
 }
 
 // NewAutoLearner создает новый AutoLearner.
-// as2org может быть nil — тогда CAIDA-нормализация не применяется.
+// as2org и repo могут быть nil.
 func NewAutoLearner(geoDataLoader *GeoDataLoader, configDir, dataDir string, interval time.Duration, minCount int, minConfidence string, maxAddsPerRun int, outputFile string, as2org *AS2OrgLoader) *AutoLearner {
 	if outputFile == "" {
 		outputFile = "providers.learned.yaml"
@@ -38,15 +52,36 @@ func NewAutoLearner(geoDataLoader *GeoDataLoader, configDir, dataDir string, int
 		maxAddsPerRun = 20
 	}
 	return &AutoLearner{
-		geoDataLoader: geoDataLoader,
-		configDir:     configDir,
-		dataDir:       dataDir,
-		interval:      interval,
-		minCount:      minCount,
-		minConfidence: minConfidence,
-		maxAddsPerRun: maxAddsPerRun,
-		outputFile:    outputFile,
-		as2org:        as2org,
+		geoDataLoader:        geoDataLoader,
+		configDir:            configDir,
+		dataDir:              dataDir,
+		interval:             interval,
+		minCount:             minCount,
+		minConfidence:        minConfidence,
+		maxAddsPerRun:        maxAddsPerRun,
+		outputFile:           outputFile,
+		as2org:               as2org,
+		minDistinctUsers:     3,
+		autoApproveThreshold: 0.8,
+	}
+}
+
+// SetRepo sets the Postgres repository for Postgres-based learning.
+func (al *AutoLearner) SetRepo(repo database.Repository) {
+	al.repo = repo
+}
+
+// SetMinDistinctUsers sets the minimum distinct users threshold.
+func (al *AutoLearner) SetMinDistinctUsers(n int) {
+	if n > 0 {
+		al.minDistinctUsers = n
+	}
+}
+
+// SetAutoApproveThreshold sets the auto-approve confidence threshold.
+func (al *AutoLearner) SetAutoApproveThreshold(t float64) {
+	if t > 0 {
+		al.autoApproveThreshold = t
 	}
 }
 
@@ -82,11 +117,16 @@ func (al *AutoLearner) Run(ctx context.Context, wg *sync.WaitGroup) {
 }
 
 // performLearningCycle выполняет цикл обучения.
-// Загружает merged-конфиг (base+overlay) через GeoDataLoader, для каждого unknown-провайдера
-// выполняет CAIDA-lookup по ASN, классифицирует, применяет антиспам и maxAddsPerRun.
+// Uses Postgres-based learning when repo is available, falls back to in-memory log.
 func (al *AutoLearner) performLearningCycle() {
 	al.mu.Lock()
 	defer al.mu.Unlock()
+
+	// Prefer Postgres-based learning when repository is available
+	if al.repo != nil {
+		al.performPostgresLearningCycle()
+		return
+	}
 
 	unknownProviders := GetUnknownProvidersStats()
 	if len(unknownProviders) == 0 {
@@ -451,6 +491,237 @@ func (al *AutoLearner) writeOverlay(newKeywords map[string][]string) error {
 
 	log.Printf("[AutoLearner] Overlay updated: %s", overlayPath)
 	return nil
+}
+
+// jaccardSimilarity computes the Jaccard similarity between two token sets.
+func jaccardSimilarity(a, b []string) float64 {
+	if len(a) == 0 && len(b) == 0 {
+		return 0
+	}
+	setA := make(map[string]bool, len(a))
+	for _, t := range a {
+		setA[t] = true
+	}
+	setB := make(map[string]bool, len(b))
+	for _, t := range b {
+		setB[t] = true
+	}
+
+	intersection := 0
+	for t := range setA {
+		if setB[t] {
+			intersection++
+		}
+	}
+
+	union := len(setA) + len(setB) - intersection
+	if union == 0 {
+		return 0
+	}
+	return float64(intersection) / float64(union)
+}
+
+// groupSimilarOrgs groups organization names by Jaccard similarity on their tokens.
+// Organizations with similarity >= threshold are placed in the same cluster.
+func groupSimilarOrgs(orgs []string, threshold float64) []OrgCluster {
+	tokenized := make([][]string, len(orgs))
+	for i, org := range orgs {
+		tokenized[i] = tokenizeOrg(normalizeOrgName(org))
+	}
+
+	used := make([]bool, len(orgs))
+	var clusters []OrgCluster
+
+	for i := 0; i < len(orgs); i++ {
+		if used[i] {
+			continue
+		}
+		cluster := OrgCluster{
+			CanonicalName: orgs[i],
+			Members:       []string{orgs[i]},
+		}
+		used[i] = true
+
+		for j := i + 1; j < len(orgs); j++ {
+			if used[j] {
+				continue
+			}
+			if jaccardSimilarity(tokenized[i], tokenized[j]) >= threshold {
+				cluster.Members = append(cluster.Members, orgs[j])
+				used[j] = true
+			}
+		}
+
+		clusters = append(clusters, cluster)
+	}
+
+	return clusters
+}
+
+// performPostgresLearningCycle runs a learning cycle using Postgres data.
+// Queries distinct users per ASN/org, classifies unknowns, creates candidates,
+// auto-approves high-confidence ones, and applies them to overlay.
+func (al *AutoLearner) performPostgresLearningCycle() {
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	stats, err := al.repo.GetASNOrgStats(ctx, al.minDistinctUsers)
+	if err != nil {
+		log.Printf("[AutoLearner] Postgres query failed: %v", err)
+		return
+	}
+
+	if len(stats) == 0 {
+		log.Println("[AutoLearner] No ASN/org stats meeting threshold")
+		return
+	}
+
+	log.Printf("[AutoLearner] Found %d ASN/org pairs with >= %d distinct users", len(stats), al.minDistinctUsers)
+
+	providersConfig := al.geoDataLoader.GetProviders()
+	if providersConfig == nil {
+		log.Println("[AutoLearner] Providers config not loaded")
+		return
+	}
+
+	// Collect unknown orgs (those that classify as "default")
+	var unknownOrgs []string
+	orgStatsMap := make(map[string]database.ASNOrgStats)
+	for _, stat := range stats {
+		result := al.geoDataLoader.GetProviderTypeWithCountry(stat.OrgName, "")
+		if result.Evidence == "default" {
+			unknownOrgs = append(unknownOrgs, stat.OrgName)
+			orgStatsMap[stat.OrgName] = stat
+		}
+	}
+
+	if len(unknownOrgs) == 0 {
+		log.Println("[AutoLearner] No unknown providers found in Postgres data")
+		return
+	}
+
+	log.Printf("[AutoLearner] Found %d unknown orgs, clustering...", len(unknownOrgs))
+
+	// Group similar org names
+	clusters := groupSimilarOrgs(unknownOrgs, 0.7)
+
+	addedCount := 0
+	newKeywords := make(map[string][]string)
+
+	for _, cluster := range clusters {
+		if addedCount >= al.maxAddsPerRun {
+			log.Printf("[AutoLearner] Reached max adds per cycle (%d)", al.maxAddsPerRun)
+			break
+		}
+
+		// Use canonical (first) member for classification
+		orgName := cluster.CanonicalName
+		stat := orgStatsMap[orgName]
+
+		// CAIDA lookup
+		asnNum := parseASNToInt(stat.ASN)
+		var caidaOrgName string
+		hasCaida := false
+		if al.as2org != nil && asnNum > 0 {
+			cOrgName, _, _, ok := al.as2org.LookupOrgByASN(asnNum)
+			if ok {
+				caidaOrgName = cOrgName
+				hasCaida = true
+			}
+		}
+
+		suggestedType, confidence, evidence := al.classifyProvider(orgName, caidaOrgName, providersConfig)
+
+		// Anti-spam: skip if no CAIDA and default evidence
+		if !hasCaida && evidence == "default" {
+			continue
+		}
+
+		boosted := al.boostConfidenceByCount(confidence, int(stat.TotalConns))
+		if boosted != confidence {
+			evidence += "+count_boost"
+			confidence = boosted
+		}
+
+		if !al.meetsConfidenceThreshold(confidence) {
+			continue
+		}
+
+		keyword := al.extractKeyword(orgName)
+		if keyword == "" {
+			continue
+		}
+		if al.keywordExists(keyword, providersConfig) {
+			continue
+		}
+
+		// Create candidate in Postgres
+		confFloat := confidenceToFloat(confidence)
+		candidate := &database.LearningCandidate{
+			ASN:            stat.ASN,
+			OrgName:        orgName,
+			NormalizedName: normalizeOrgName(orgName),
+			ProposedType:   suggestedType,
+			Confidence:     confFloat,
+			Evidence:       evidence,
+			DistinctUsers:  int(stat.DistinctUsers),
+			TotalConns:     int(stat.TotalConns),
+			Status:         "pending",
+		}
+
+		if err := al.repo.InsertCandidate(ctx, candidate); err != nil {
+			log.Printf("[AutoLearner] Failed to insert candidate: %v", err)
+			continue
+		}
+
+		// Auto-approve if confidence meets threshold
+		if confFloat >= al.autoApproveThreshold {
+			if err := al.repo.UpdateCandidateStatus(ctx, candidate.ID, "approved"); err != nil {
+				log.Printf("[AutoLearner] Failed to approve candidate: %v", err)
+				continue
+			}
+
+			newKeywords[suggestedType] = append(newKeywords[suggestedType], keyword)
+			addedCount++
+
+			log.Printf("[AutoLearner] Auto-approved: %s -> %s (type: %s, confidence: %.2f, evidence: %s, distinct_users: %d, cluster_size: %d)",
+				orgName, keyword, suggestedType, confFloat, evidence, stat.DistinctUsers, len(cluster.Members))
+		} else {
+			log.Printf("[AutoLearner] Pending: %s (type: %s, confidence: %.2f, evidence: %s, distinct_users: %d)",
+				orgName, suggestedType, confFloat, evidence, stat.DistinctUsers)
+		}
+	}
+
+	if addedCount == 0 {
+		log.Println("[AutoLearner] No new providers auto-approved")
+		return
+	}
+
+	if err := al.writeOverlay(newKeywords); err != nil {
+		log.Printf("[AutoLearner] Overlay write error: %v", err)
+		return
+	}
+
+	if err := al.geoDataLoader.ReloadProviders(); err != nil {
+		log.Printf("[AutoLearner] Providers config reload error: %v", err)
+		return
+	}
+
+	log.Printf("[AutoLearner] Successfully auto-approved %d new provider keywords", addedCount)
+}
+
+// confidenceToFloat converts string confidence level to float64.
+func confidenceToFloat(c string) float64 {
+	switch c {
+	case "high":
+		return 0.9
+	case "medium":
+		return 0.6
+	case "low":
+		return 0.4
+	default:
+		return 0.2
+	}
 }
 
 // ReloadProviders перезагружает base providers.yaml + overlay (если есть).

@@ -183,7 +183,11 @@ func main() {
 			cfg.AutoLearningOutputFile,
 			as2orgLoader,
 		)
-		log.Printf("✅ Auto-Learner initialized")
+		autoLearner.SetRepo(repo)
+		autoLearner.SetMinDistinctUsers(cfg.AutoLearnMinDistinctUsers)
+		autoLearner.SetAutoApproveThreshold(cfg.AutoLearnAutoApproveThreshold)
+		log.Printf("✅ Auto-Learner initialized (Postgres-backed, min_distinct_users: %d, auto_approve: %.2f)",
+			cfg.AutoLearnMinDistinctUsers, cfg.AutoLearnAutoApproveThreshold)
 	}
 
 	// MIG-7: Initialize Re-enable Scheduler

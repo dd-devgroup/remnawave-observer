@@ -40,7 +40,17 @@ func (m *mockRepo) UpsertEnrichment(_ context.Context, cache *database.IPEnrichm
 func (m *mockRepo) CleanExpiredEnrichments(_ context.Context) (int64, error) {
 	return m.cleaned, nil
 }
-func (m *mockRepo) Close() error { return nil }
+func (m *mockRepo) GetASNOrgStats(_ context.Context, _ int) ([]database.ASNOrgStats, error) {
+	return nil, nil
+}
+func (m *mockRepo) InsertCandidate(_ context.Context, _ *database.LearningCandidate) error {
+	return nil
+}
+func (m *mockRepo) GetPendingCandidates(_ context.Context) ([]database.LearningCandidate, error) {
+	return nil, nil
+}
+func (m *mockRepo) UpdateCandidateStatus(_ context.Context, _ uint, _ string) error { return nil }
+func (m *mockRepo) Close() error                                                     { return nil }
 
 // --- Tests ---
 

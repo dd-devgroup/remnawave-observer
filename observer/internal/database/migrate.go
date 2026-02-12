@@ -15,6 +15,7 @@ func AutoMigrate(db *gorm.DB) error {
 		&AntiAbuseAction{},
 		&UserScoreEvent{},
 		&IPEnrichmentCache{},
+		&LearningCandidate{},
 	); err != nil {
 		return fmt.Errorf("auto-migration failed: %w", err)
 	}

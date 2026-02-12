@@ -63,8 +63,10 @@ type Config struct {
 	AutoLearningInterval      time.Duration // Интервал проверки (default: 24 часа)
 	AutoLearningMinCount      int           // Минимальное количество встреч для автодобавления (default: 10)
 	AutoLearningMinConfidence string        // Минимальный уровень уверенности: high, medium (default: high)
-	AutoLearningMaxAddsPerRun int           // Макс. добавлений за один цикл (default: 20)
-	AutoLearningOutputFile    string        // Имя overlay файла в dataDir (default: providers.learned.yaml)
+	AutoLearningMaxAddsPerRun        int           // Макс. добавлений за один цикл (default: 20)
+	AutoLearningOutputFile           string        // Имя overlay файла в dataDir (default: providers.learned.yaml)
+	AutoLearnMinDistinctUsers        int           // Min distinct users per ASN for Postgres learning (default: 3)
+	AutoLearnAutoApproveThreshold    float64       // Auto-approve confidence threshold (default: 0.8)
 
 	// --- ПАРАМЕТРЫ CAIDA AS2Org ---
 	CAIDAEnabled      bool   // Включить загрузку CAIDA AS-Organizations (default: true)
@@ -134,8 +136,10 @@ func New() *Config {
 		AutoLearningInterval:       time.Duration(getEnvInt("AUTO_LEARNING_INTERVAL_HOURS", 24)) * time.Hour,
 		AutoLearningMinCount:       getEnvInt("AUTO_LEARNING_MIN_COUNT", 10),
 		AutoLearningMinConfidence:  getEnv("AUTO_LEARNING_MIN_CONFIDENCE", "high"),
-		AutoLearningMaxAddsPerRun:  getEnvInt("AUTO_LEARNING_MAX_ADDS_PER_RUN", 20),
-		AutoLearningOutputFile:     getEnv("AUTO_LEARNING_OUTPUT_FILE", "providers.learned.yaml"),
+		AutoLearningMaxAddsPerRun:        getEnvInt("AUTO_LEARNING_MAX_ADDS_PER_RUN", 20),
+		AutoLearningOutputFile:           getEnv("AUTO_LEARNING_OUTPUT_FILE", "providers.learned.yaml"),
+		AutoLearnMinDistinctUsers:        getEnvInt("AUTO_LEARN_MIN_DISTINCT_USERS", 3),
+		AutoLearnAutoApproveThreshold:    getEnvFloat("AUTO_LEARN_AUTO_APPROVE_THRESHOLD", 0.8),
 
 		// --- CAIDA AS2Org ---
 		CAIDAEnabled:      getEnvBool("CAIDA_ENABLED", true),
