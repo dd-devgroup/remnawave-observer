@@ -54,10 +54,10 @@ func NewAutoLearner(geoDataLoader *GeoDataLoader, configDir, dataDir string, int
 func (al *AutoLearner) Run(ctx context.Context, wg *sync.WaitGroup) {
 	defer wg.Done()
 
-	log.Printf("[AutoLearner] Запущен с интервалом: %v, мин. количество: %d, мин. уверенность: %s",
+	log.Printf("[AutoLearner] Started with interval: %v, min count: %d, min confidence: %s",
 		al.interval, al.minCount, al.minConfidence)
 
-	// Первый запуск через 1 минуту после старта
+	// First run 1 minute after startup
 	firstRun := time.NewTimer(1 * time.Minute)
 	defer firstRun.Stop()
 
@@ -67,15 +67,15 @@ func (al *AutoLearner) Run(ctx context.Context, wg *sync.WaitGroup) {
 	for {
 		select {
 		case <-ctx.Done():
-			log.Println("[AutoLearner] Остановка автообучения...")
+			log.Println("[AutoLearner] Auto-learning stopped")
 			return
 
 		case <-firstRun.C:
-			log.Println("[AutoLearner] Запуск начального цикла обучения...")
+			log.Println("[AutoLearner] Starting initial learning cycle...")
 			al.performLearningCycle()
 
 		case <-ticker.C:
-			log.Println("[AutoLearner] Запуск планового цикла обучения...")
+			log.Println("[AutoLearner] Starting scheduled learning cycle...")
 			al.performLearningCycle()
 		}
 	}
@@ -90,16 +90,16 @@ func (al *AutoLearner) performLearningCycle() {
 
 	unknownProviders := GetUnknownProvidersStats()
 	if len(unknownProviders) == 0 {
-		log.Println("[AutoLearner] Нет неизвестных провайдеров для обучения")
+		log.Println("[AutoLearner] No unknown providers to learn")
 		return
 	}
 
-	log.Printf("[AutoLearner] Найдено %d неизвестных провайдеров, анализирую...", len(unknownProviders))
+	log.Printf("[AutoLearner] Found %d unknown providers, analyzing...", len(unknownProviders))
 
-	// Snapshot merged конфиг (base + overlay) — copy-on-write под RLock в GetProviders
+	// Snapshot merged config (base + overlay) — copy-on-write under RLock in GetProviders
 	providersConfig := al.geoDataLoader.GetProviders()
 	if providersConfig == nil {
-		log.Println("[AutoLearner] Конфиг провайдеров не загружен")
+		log.Println("[AutoLearner] Providers config not loaded")
 		return
 	}
 
@@ -108,7 +108,7 @@ func (al *AutoLearner) performLearningCycle() {
 
 	for _, provider := range unknownProviders {
 		if addedCount >= al.maxAddsPerRun {
-			log.Printf("[AutoLearner] Достигнут лимит добавлений за цикл (%d)", al.maxAddsPerRun)
+			log.Printf("[AutoLearner] Reached max adds per cycle (%d)", al.maxAddsPerRun)
 			break
 		}
 
@@ -161,26 +161,26 @@ func (al *AutoLearner) performLearningCycle() {
 		newKeywords[suggestedType] = append(newKeywords[suggestedType], keyword)
 		addedCount++
 
-		log.Printf("[AutoLearner] Добавлен: %s -> %s (тип: %s, уверенность: %s, evidence: %s, count: %d, ASN: %s, CAIDA: %s/%s)",
+		log.Printf("[AutoLearner] Added: %s -> %s (type: %s, confidence: %s, evidence: %s, count: %d, ASN: %s, CAIDA: %s/%s)",
 			provider.Organization, keyword, suggestedType, confidence, evidence, provider.Count, provider.ASN, caidaOrgName, caidaCountry)
 	}
 
 	if addedCount == 0 {
-		log.Println("[AutoLearner] Нет новых провайдеров для добавления")
+		log.Println("[AutoLearner] No new providers to add")
 		return
 	}
 
 	if err := al.writeOverlay(newKeywords); err != nil {
-		log.Printf("[AutoLearner] Ошибка записи overlay: %v", err)
+		log.Printf("[AutoLearner] Overlay write error: %v", err)
 		return
 	}
 
 	if err := al.geoDataLoader.ReloadProviders(); err != nil {
-		log.Printf("[AutoLearner] Ошибка перезагрузки конфига провайдеров: %v", err)
+		log.Printf("[AutoLearner] Providers config reload error: %v", err)
 		return
 	}
 
-	log.Printf("[AutoLearner] ✅ Успешно добавлено %d новых ключевых слов провайдеров", addedCount)
+	log.Printf("[AutoLearner] ✅ Successfully added %d new provider keywords", addedCount)
 }
 
 // suggestProviderType предлагает тип провайдера
@@ -449,7 +449,7 @@ func (al *AutoLearner) writeOverlay(newKeywords map[string][]string) error {
 		return fmt.Errorf("rename tmp→overlay: %w", err)
 	}
 
-	log.Printf("[AutoLearner] Overlay обновлён: %s", overlayPath)
+	log.Printf("[AutoLearner] Overlay updated: %s", overlayPath)
 	return nil
 }
 
@@ -464,6 +464,6 @@ func (l *GeoDataLoader) ReloadProviders() error {
 	l.providers = merged
 	l.mu.Unlock()
 
-	log.Println("[GeoDataLoader] Конфигурация провайдеров успешно перезагружена (base + overlay)")
+	log.Println("[GeoDataLoader] Providers config successfully reloaded (base + overlay)")
 	return nil
 }

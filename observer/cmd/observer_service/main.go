@@ -30,21 +30,21 @@ func main() {
 
 	cfg := config.New()
 
-	// Контекст для сигнализации о завершении работы фоновых процессов
+	// Context for background process shutdown signaling
 	ctx, cancel := context.WithCancel(context.Background())
-	// WaitGroup для ожидания завершения всех фоновых горутин
+	// WaitGroup for waiting on all background goroutines
 	var wg sync.WaitGroup
 
 	redisStore, err := storage.NewRedisStore(ctx, cfg.RedisURL)
 	if err != nil {
-		log.Fatalf("Критическая ошибка: не удалось подключиться к Redis: %v", err)
+		log.Fatalf("Critical error: failed to connect to Redis: %v", err)
 	}
 	defer redisStore.Close()
 	redisStore.SetScanMaxKeys(cfg.ScanMaxKeys)
 	redisStore.SetScanCount(cfg.ScanCount)
 	redisStore.SetScanTimeBudget(time.Duration(cfg.ScanTimeBudgetSeconds) * time.Second)
 
-	// MIG-9: RabbitMQ publisher удалён, используется Remnawave enforcement
+	// MIG-9: RabbitMQ publisher removed, using Remnawave enforcement
 	var enforcer enforcement.Enforcer
 	if cfg.RemnawaveBaseURL != "" && cfg.RemnawaveAPIToken != "" {
 		remnawaveClient := remnawave.NewClient(
@@ -55,26 +55,26 @@ func main() {
 			redisStore.GetClient(),
 		)
 		enforcer = enforcement.NewRemnawaveEnforcer(remnawaveClient, redisStore)
-		log.Printf("✅ Remnawave Enforcer инициализирован (URL: %s)", cfg.RemnawaveBaseURL)
+		log.Printf("✅ Remnawave Enforcer initialized (URL: %s)", cfg.RemnawaveBaseURL)
 	} else {
 		enforcer = enforcement.NewNoopEnforcer()
-		log.Printf("⚠️  Remnawave не настроен, используется noop enforcer")
+		log.Printf("⚠️  Remnawave not configured, using noop enforcer")
 	}
 
 	webhookAlerter := alerter.NewWebhookAlerter(cfg.AlertWebhookURL)
 
-	// Инициализация ASN lookup сервиса (опционально)
+	// Initialize ASN lookup service (optional)
 	var asnLookup *asn.ASNLookup
 	if cfg.DetectByASN {
 		asnLookup, err = asn.NewASNLookup(cfg.IPtoASNDownloadURL, cfg.IPtoASNUpdateInterval)
 		if err != nil {
-			log.Fatalf("Критическая ошибка: не удалось загрузить ASN базу: %v", err)
+			log.Fatalf("Critical error: failed to load ASN database: %v", err)
 		}
 		defer asnLookup.Close()
-		log.Printf("✅ ASN режим активирован (записей: %d)", asnLookup.Count())
+		log.Printf("✅ ASN mode activated (records: %d)", asnLookup.Count())
 	}
 
-	// Инициализация GeoData загрузчика (опционально)
+	// Initialize GeoData loader (optional)
 	var geoDataLoader *geodata.GeoDataLoader
 	var geoService *geoip.GeoIPService
 	var geoAnalyzer *geoip.GeoAnalyzer
@@ -82,28 +82,28 @@ func main() {
 	var scorer *scoring.Scorer
 
 	if cfg.GeoIPEnabled || cfg.ScoringEnabled {
-		// Инициализируем логирование неизвестных провайдеров
+		// Initialize unknown providers logging
 		geodata.InitUnknownProvidersLog(cfg.GeoDataDataDir, cfg.UnknownProvidersLogEnabled)
 
-		// Загружаем конфигурации провайдеров и агломераций
+		// Load provider and agglomeration configs
 		geoDataLoader, err = geodata.NewGeoDataLoader(cfg.GeoDataConfigDir, cfg.GeoDataDataDir)
 		if err != nil {
-			log.Fatalf("Критическая ошибка: не удалось загрузить географические данные: %v", err)
+			log.Fatalf("Critical error: failed to load geodata: %v", err)
 		}
-		log.Printf("✅ GeoData загружен (агломерации: %d)", len(geoDataLoader.GetAgglomerations()))
+		log.Printf("✅ GeoData loaded (agglomerations: %d)", len(geoDataLoader.GetAgglomerations()))
 
-		// Инициализируем GeoIP сервис если ASN lookup доступен
+		// Initialize GeoIP service if ASN lookup is available
 		if asnLookup != nil {
 			geoService = geoip.NewGeoIPService(asnLookup, redisStore.GetClient(), cfg.GeoIPCacheTTL, cfg.GeoIPTimeout, cfg.GeoIPRateIntervalMs)
 			geoAnalyzer = geoip.NewGeoAnalyzer(geoService, geoDataLoader)
-			log.Printf("✅ GeoIP сервис инициализирован (cache TTL: %v)", cfg.GeoIPCacheTTL)
+			log.Printf("✅ GeoIP service initialized (cache TTL: %v)", cfg.GeoIPCacheTTL)
 		}
 
-		// Инициализируем классификатор провайдеров
+		// Initialize ASN classifier
 		asnClassifier = asn.NewASNClassifier(geoDataLoader)
-		log.Printf("✅ ASN классификатор инициализирован")
+		log.Printf("✅ ASN classifier initialized")
 
-		// Инициализируем систему скоринга
+		// Initialize scoring system
 		if cfg.ScoringEnabled {
 			thresholds := scoring.ScoreThresholds{
 				MonitorThreshold:   30,
@@ -112,7 +112,7 @@ func main() {
 				BlockThreshold:     cfg.ScoreThresholdBlock,
 			}
 			scorer = scoring.NewScorer(thresholds)
-			log.Printf("✅ Система скоринга инициализирована (warn: %.1f, block: %.1f)",
+			log.Printf("✅ Scoring system initialized (warn: %.1f, block: %.1f)",
 				cfg.ScoreThresholdWarn, cfg.ScoreThresholdBlock)
 		}
 	}
@@ -129,7 +129,7 @@ func main() {
 		scorer,
 	)
 
-	// Cleanup для GeoIP сервиса
+	// GeoIP service cleanup
 	if geoService != nil {
 		defer geoService.Close()
 	}
@@ -137,19 +137,19 @@ func main() {
 	poolMonitor := monitor.NewPoolMonitor(redisStore, cfg, geoService)
 	apiServer := api.NewServer(cfg.Port, logProcessor, redisStore, cfg)
 
-	// Инициализация CAIDA AS2Org (опционально, синхронная начальная загрузка)
+	// Initialize CAIDA AS2Org (optional, synchronous initial load)
 	var as2orgLoader *geodata.AS2OrgLoader
 	if cfg.CAIDAEnabled && cfg.GeoIPEnabled {
 		as2orgLoader = geodata.NewAS2OrgLoader(cfg.GeoDataDataDir, cfg.CAIDADownloadURL, time.Duration(cfg.CAIDARefreshHours)*time.Hour)
 		if err := as2orgLoader.InitialLoad(); err != nil {
-			log.Printf("Warning: CAIDA initial load failed: %v (работаем без CAIDA)", err)
+			log.Printf("Warning: CAIDA initial load failed: %v (running without CAIDA)", err)
 			as2orgLoader = nil
 		} else {
-			log.Printf("✅ CAIDA AS2Org загружен (%d записей, обновление каждые %dh)", as2orgLoader.Count(), cfg.CAIDARefreshHours)
+			log.Printf("✅ CAIDA AS2Org loaded (%d records, refresh every %dh)", as2orgLoader.Count(), cfg.CAIDARefreshHours)
 		}
 	}
 
-	// Инициализация Auto-Learner (опционально)
+	// Initialize Auto-Learner (optional)
 	var autoLearner *geodata.AutoLearner
 	if cfg.AutoLearningEnabled && geoDataLoader != nil {
 		autoLearner = geodata.NewAutoLearner(
@@ -163,13 +163,13 @@ func main() {
 			cfg.AutoLearningOutputFile,
 			as2orgLoader,
 		)
-		log.Printf("✅ Auto-Learner инициализирован")
+		log.Printf("✅ Auto-Learner initialized")
 	}
 
-	// MIG-7: Инициализация Re-enable Scheduler
+	// MIG-7: Initialize Re-enable Scheduler
 	var reenableScheduler *enforcement.Scheduler
 	if cfg.RemnawaveBaseURL != "" && cfg.RemnawaveAPIToken != "" {
-		// Создаём scheduler с тем же Remnawave client
+		// Create scheduler with the same Remnawave client
 		remnawaveClient := remnawave.NewClient(
 			cfg.RemnawaveBaseURL,
 			cfg.RemnawaveAPIToken,
@@ -183,11 +183,11 @@ func main() {
 			time.Duration(cfg.ReenableTickSeconds)*time.Second,
 			cfg.ReenableBatchSize,
 		)
-		log.Printf("✅ Re-enable Scheduler инициализирован (tick: %ds, batch: %d)",
+		log.Printf("✅ Re-enable Scheduler initialized (tick: %ds, batch: %d)",
 			cfg.ReenableTickSeconds, cfg.ReenableBatchSize)
 	}
 
-	// Сообщаем WaitGroup, сколько горутин будем запускать
+	// Tell WaitGroup how many goroutines we'll launch
 	goroutineCount := 4 // poolMonitor + workerPool + sideEffectPool + metricsDumper
 	if autoLearner != nil {
 		goroutineCount++
@@ -205,25 +205,25 @@ func main() {
 	go logProcessor.StartSideEffectWorkerPool(ctx, &wg)
 	go metrics.StartDumper(ctx, &wg, 60*time.Second)
 
-	// Запускаем Auto-Learner если включен
+	// Start Auto-Learner if enabled
 	if autoLearner != nil {
 		go autoLearner.Run(ctx, &wg)
 	}
 
-	// Фоновое обновление CAIDA
+	// Background CAIDA refresh
 	if as2orgLoader != nil {
 		go as2orgLoader.RunRefresh(ctx, &wg)
 	}
 
-	// Запускаем Re-enable Scheduler если настроен
+	// Start Re-enable Scheduler if configured
 	if reenableScheduler != nil {
 		go reenableScheduler.Run(ctx, &wg)
 	}
 
 	srv := &http.Server{
 		Addr:    ":" + cfg.Port,
-		Handler: apiServer.GetRouter(), // Получаем роутер из нашего api.Server
-		// Таймауты для защиты от slowloris и других DoS атак
+		Handler: apiServer.GetRouter(), // Get router from our api.Server
+		// Timeouts to protect against slowloris and other DoS attacks
 		ReadHeaderTimeout: time.Duration(cfg.HTTPReadHeaderTimeoutSeconds) * time.Second,
 		ReadTimeout:       time.Duration(cfg.HTTPReadTimeoutSeconds) * time.Second,
 		WriteTimeout:      time.Duration(cfg.HTTPWriteTimeoutSeconds) * time.Second,
@@ -232,9 +232,9 @@ func main() {
 	}
 
 	go func() {
-		log.Printf("Сервер Observer Service запущен на порту %s", cfg.Port)
+		log.Printf("Observer Service server started on port %s", cfg.Port)
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			log.Fatalf("Ошибка запуска сервера: %v", err)
+			log.Fatalf("Server startup error: %v", err)
 		}
 	}()
 
@@ -242,27 +242,27 @@ func main() {
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 	<-quit
 
-	log.Println("Получен сигнал завершения, начинаю остановку сервиса...")
+	log.Println("Shutdown signal received, stopping service...")
 
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer shutdownCancel()
 
 	if err := srv.Shutdown(shutdownCtx); err != nil {
-		log.Printf("Ошибка при остановке HTTP-сервера: %v", err)
+		log.Printf("HTTP server shutdown error: %v", err)
 	} else {
-		log.Println("HTTP-сервер успешно остановлен.")
+		log.Println("HTTP server stopped successfully")
 	}
 
 	cancel()
 
-	log.Println("Ожидание завершения фоновых процессов...")
+	log.Println("Waiting for background processes to finish...")
 	wg.Wait()
 
-	// Сохраняем лог неизвестных провайдеров перед выходом
+	// Save unknown providers log before exit
 	if cfg.UnknownProvidersLogEnabled {
-		log.Println("Сохранение лога неизвестных провайдеров...")
+		log.Println("Saving unknown providers log...")
 		geodata.FlushUnknownProvidersLog()
 	}
 
-	log.Println("Все фоновые процессы остановлены. Сервис успешно остановлен.")
+	log.Println("All background processes stopped. Service shutdown complete.")
 }
