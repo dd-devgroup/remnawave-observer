@@ -126,7 +126,7 @@ DETECT_BY_ASN=true                # ASN mode (recommended)
 MAX_ASNS_PER_USER=4
 
 # Remnawave API
-REMNAWAVE_API_URL=https://panel.example.com
+REMNAWAVE_BASE_URL=https://panel.example.com
 REMNAWAVE_API_TOKEN=your_api_token
 
 # Block duration
@@ -178,7 +178,7 @@ accepted tcp:1.2.3.4:12345 [inbound_user:12345 >> ...]
 | `DETECT_BY_ASN`        | Enable ASN mode                  | false    |
 | `MAX_ASNS_PER_USER`    | Provider limit                   | 4        |
 | `BLOCK_DURATION`       | Block duration                   | 5m       |
-| `REMNAWAVE_API_URL`    | Panel URL                        | required |
+| `REMNAWAVE_BASE_URL`   | Panel URL                        | required |
 | `REMNAWAVE_API_TOKEN`  | API token                        | required |
 | `EXCLUDED_USERS`       | Excluded users (comma-separated) | —        |
 | `EXCLUDED_IPS`         | Excluded IPs                     | —        |

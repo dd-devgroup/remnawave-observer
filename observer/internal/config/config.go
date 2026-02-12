@@ -81,16 +81,6 @@ type Config struct {
 	CAIDADownloadURL  string // URL файла CAIDA (default: из as2org.go)
 	CAIDARefreshHours int    // Интервал обновления в часах (default: 168 = 7 дней)
 
-	// --- ПАРАМЕТРЫ HTTP SERVER ---
-	HTTPReadHeaderTimeoutSeconds int // Таймаут чтения заголовков (default: 5)
-	HTTPReadTimeoutSeconds       int // Таймаут полного чтения запроса (default: 15)
-	HTTPWriteTimeoutSeconds      int // Таймаут записи ответа (default: 15)
-	HTTPIdleTimeoutSeconds       int // Таймаут keep-alive соединений (default: 60)
-	HTTPMaxHeaderBytes           int // Макс. размер заголовков в байтах (default: 1MB)
-
-	// --- ПАРАМЕТРЫ JSON ДЕКОДИРОВАНИЯ ---
-	StrictJSONDecode bool // Отклонять unknown fields в JSON (default: false для backward compatibility)
-
 	// --- ПАРАМЕТРЫ REMNAWAVE ENFORCEMENT ---
 	RemnawaveBaseURL         string        // Base URL Remnawave панели (например: https://panel.example.com)
 	RemnawaveAPIToken        string        // API токен для аутентификации (X-Api-Key)
@@ -172,16 +162,6 @@ func New() *Config {
 		CAIDADownloadURL:  getEnv("CAIDA_DOWNLOAD_URL", ""),
 		CAIDARefreshHours: getEnvInt("CAIDA_REFRESH_HOURS", 168),
 
-		// --- HTTP Server ---
-		HTTPReadHeaderTimeoutSeconds: getEnvInt("HTTP_READ_HEADER_TIMEOUT_SECONDS", 5),
-		HTTPReadTimeoutSeconds:       getEnvInt("HTTP_READ_TIMEOUT_SECONDS", 15),
-		HTTPWriteTimeoutSeconds:      getEnvInt("HTTP_WRITE_TIMEOUT_SECONDS", 15),
-		HTTPIdleTimeoutSeconds:       getEnvInt("HTTP_IDLE_TIMEOUT_SECONDS", 60),
-		HTTPMaxHeaderBytes:           getEnvInt("HTTP_MAX_HEADER_BYTES", 1<<20),
-
-		// --- JSON Decoding ---
-		StrictJSONDecode: getEnvBool("STRICT_JSON_DECODE", false),
-
 		// --- Загрузка параметров Remnawave enforcement ---
 		RemnawaveBaseURL:        getEnv("REMNAWAVE_BASE_URL", ""),
 		RemnawaveAPIToken:       getEnv("REMNAWAVE_API_TOKEN", ""),
@@ -246,30 +226,6 @@ func New() *Config {
 	}
 	if cfg.CAIDAEnabled {
 		log.Printf("CAIDA AS2Org enabled. Refresh every %dh", cfg.CAIDARefreshHours)
-	}
-
-	// Валидация и логирование HTTP таймаутов
-	if cfg.HTTPReadHeaderTimeoutSeconds <= 0 {
-		cfg.HTTPReadHeaderTimeoutSeconds = 5
-	}
-	if cfg.HTTPReadTimeoutSeconds <= 0 {
-		cfg.HTTPReadTimeoutSeconds = 15
-	}
-	if cfg.HTTPWriteTimeoutSeconds <= 0 {
-		cfg.HTTPWriteTimeoutSeconds = 15
-	}
-	if cfg.HTTPIdleTimeoutSeconds <= 0 {
-		cfg.HTTPIdleTimeoutSeconds = 60
-	}
-	if cfg.HTTPMaxHeaderBytes <= 0 {
-		cfg.HTTPMaxHeaderBytes = 1 << 20
-	}
-	log.Printf("HTTP Server timeouts: ReadHeader=%ds Read=%ds Write=%ds Idle=%ds MaxHeaderBytes=%d",
-		cfg.HTTPReadHeaderTimeoutSeconds, cfg.HTTPReadTimeoutSeconds,
-		cfg.HTTPWriteTimeoutSeconds, cfg.HTTPIdleTimeoutSeconds, cfg.HTTPMaxHeaderBytes)
-
-	if cfg.StrictJSONDecode {
-		log.Printf("Strict JSON validation enabled (unknown fields will be rejected)")
 	}
 
 	return cfg

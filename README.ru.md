@@ -126,7 +126,7 @@ DETECT_BY_ASN=true                # Режим по ASN (рекомендует�
 MAX_ASNS_PER_USER=4
 
 # Remnawave API
-REMNAWAVE_API_URL=https://panel.example.com
+REMNAWAVE_BASE_URL=https://panel.example.com
 REMNAWAVE_API_TOKEN=your_api_token
 
 # Длительность блокировки
@@ -178,7 +178,7 @@ accepted tcp:1.2.3.4:12345 [inbound_user:12345 >> ...]
 | `DETECT_BY_ASN`        | Включить режим по ASN                    | false        |
 | `MAX_ASNS_PER_USER`    | Лимит провайдеров                        | 4            |
 | `BLOCK_DURATION`       | Длительность блокировки                  | 5m           |
-| `REMNAWAVE_API_URL`    | URL панели                               | обязательно  |
+| `REMNAWAVE_BASE_URL`   | URL панели                               | обязательно  |
 | `REMNAWAVE_API_TOKEN`  | API токен                                | обязательно  |
 | `EXCLUDED_USERS`       | Исключенные пользователи (через запятую) | —            |
 | `EXCLUDED_IPS`         | Исключенные IP                           | —            |
