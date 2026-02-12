@@ -52,44 +52,44 @@ func NewASNUpdater(db *IPtoASNDatabase, downloadURL string, interval time.Durati
 
 // Start запускает процесс обновления базы данных
 // При первом запуске блокирующе загружает базу данных
-// Затем запускает фоновое обновление по интервалу
+// Then starts background update by interval
 func (u *ASNUpdater) Start(ctx context.Context) error {
-	// Загрузить при старте (блокирующе)
-	log.Printf("Загрузка ASN базы данных с %s...", u.downloadURL)
+	// Load at startup (blocking)
+	log.Printf("Loading ASN database from %s...", u.downloadURL)
 	if err := u.downloadAndReload(); err != nil {
-		return fmt.Errorf("не удалось загрузить ASN базу данных: %w", err)
+		return fmt.Errorf("failed to load ASN database: %w", err)
 	}
 
-	// Запустить фоновое обновление
+	// Start background update
 	go u.runBackgroundUpdates(ctx)
 
 	return nil
 }
 
-// Stop останавливает фоновое обновление
+// Stop stops background update
 func (u *ASNUpdater) Stop() {
 	close(u.stopCh)
 }
 
-// runBackgroundUpdates запускает периодическое обновление базы
+// runBackgroundUpdates runs periodic database update
 func (u *ASNUpdater) runBackgroundUpdates(ctx context.Context) {
 	ticker := time.NewTicker(u.interval)
 	defer ticker.Stop()
 
-	log.Printf("Фоновое обновление ASN базы запущено (интервал: %v)", u.interval)
+	log.Printf("ASN database background update started (interval: %v)", u.interval)
 
 	for {
 		select {
 		case <-ticker.C:
-			log.Println("Начало планового обновления ASN базы...")
+			log.Println("Starting scheduled ASN database update...")
 			if err := u.downloadAndReload(); err != nil {
-				log.Printf("Ошибка обновления ASN базы: %v", err)
+				log.Printf("ASN database update error: %v", err)
 			}
 		case <-ctx.Done():
-			log.Println("Фоновое обновление ASN базы остановлено (context cancelled)")
+			log.Println("ASN database background update stopped (context cancelled)")
 			return
 		case <-u.stopCh:
-			log.Println("Фоновое обновление ASN базы остановлено")
+			log.Println("ASN database background update stopped")
 			return
 		}
 	}
@@ -143,14 +143,14 @@ func (u *ASNUpdater) downloadAndReload() error {
 	}
 
 	duration := time.Since(startTime)
-	log.Printf("ASN база данных успешно загружена: %d записей за %v", u.db.Count(), duration)
+	log.Printf("ASN database successfully loaded: %d records in %v", u.db.Count(), duration)
 
 	return nil
 }
 
-// ForceReload принудительно перезагружает базу данных
+// ForceReload forcibly reloads the database
 func (u *ASNUpdater) ForceReload() error {
-	log.Println("Принудительная перезагрузка ASN базы...")
+	log.Println("Forcing ASN database reload...")
 	return u.downloadAndReload()
 }
 

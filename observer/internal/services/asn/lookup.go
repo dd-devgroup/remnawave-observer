@@ -27,14 +27,14 @@ func NewASNLookup(downloadURL string, updateInterval time.Duration) (*ASNLookup,
 		return nil, fmt.Errorf("не удалось инициализировать ASN lookup: %w", err)
 	}
 
-	log.Printf("ASN lookup сервис инициализирован (источник: iptoasn.com)")
+	log.Printf("ASN lookup service initialized (source: iptoasn.com)")
 	return &ASNLookup{
 		db:      db,
 		updater: updater,
 	}, nil
 }
 
-// Lookup возвращает ASN и имя организации для IP-адреса
+// Lookup returns ASN and organization name for IP address
 func (a *ASNLookup) Lookup(ipStr string) (uint, string, error) {
 	asn, org, err := a.db.Lookup(ipStr)
 	if err != nil {
@@ -67,10 +67,10 @@ func (a *ASNLookup) Reload() error {
 	return a.updater.ForceReload()
 }
 
-// Close останавливает фоновое обновление
+// Close stops background update
 func (a *ASNLookup) Close() error {
 	a.updater.Stop()
-	log.Println("ASN lookup сервис остановлен")
+	log.Println("ASN lookup service stopped")
 	return nil
 }
 
