@@ -1,4 +1,22 @@
 services:
+  observer-updater:
+    container_name: observer-updater
+    build:
+      context: ../observer
+      dockerfile: Dockerfile.updater
+    restart: unless-stopped
+    volumes:
+      - ./data:/app/data # Shared write volume for ASN, CAIDA, GeoLite files
+    env_file:
+      - .env
+    networks:
+      - observer-net
+    logging:
+      driver: json-file
+      options:
+        max-size: '8m'
+        max-file: '3'
+
   observer:
     container_name: observer
     image: quay.io/fxfuren/remnawave-observer:latest
@@ -11,6 +29,8 @@ services:
     env_file:
       - .env
     depends_on:
+      observer-updater:
+        condition: service_started # No healthcheck, just start order
       vector-aggregator:
         condition: service_healthy
       redis:
