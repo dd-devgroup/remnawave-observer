@@ -41,6 +41,8 @@ type UserIPStats struct {
 	HasAlertCooldown bool     `json:"has_alert_cooldown"`
 	IsExcluded       bool     `json:"excluded"`
 	IsDebug          bool     `json:"is_debug"`
+	LatestScore      *float64 `json:"latest_score,omitempty"`       // Latest scoring result
+	LatestScoreAction string  `json:"latest_score_action,omitempty"` // Action from latest score
 	ASNDetails       map[string]*ASNInfo `json:"asn_details,omitempty"` // Детали по каждому ASN (для ASN режима)
 }
 

@@ -159,6 +159,18 @@ func (m *PoolMonitor) buildUserStatsByASN(ctx context.Context, email string) (*m
 		minTTL = float64(ttlValues[0]) / 3600.0
 		maxTTL = float64(ttlValues[len(ttlValues)-1]) / 3600.0
 	}
+
+	// Fetch latest score event for this user
+	var latestScore *float64
+	var latestScoreAction string
+	if m.repo != nil {
+		scoreEvent, _ := m.repo.GetLatestScoreEvent(ctx, email)
+		if scoreEvent != nil {
+			latestScore = &scoreEvent.ScoreTotal
+			latestScoreAction = scoreEvent.ScoreAction
+		}
+	}
+
 	return &models.UserIPStats{
 		Email:            email,
 		IPCount:          itemCount,
@@ -171,6 +183,8 @@ func (m *PoolMonitor) buildUserStatsByASN(ctx context.Context, email string) (*m
 		HasAlertCooldown: hasCooldown,
 		IsExcluded:       m.cfg.ExcludedUsers[email],
 		IsDebug:          m.cfg.DebugEmail != "" && email == m.cfg.DebugEmail,
+		LatestScore:      latestScore,
+		LatestScoreAction: latestScoreAction,
 		ASNDetails:       activeASNs,
 	}, nil
 }
@@ -363,6 +377,9 @@ func (m *PoolMonitor) printTopUsers(ctx context.Context, buf *strings.Builder, s
 		user := stats[i]
 		buf.WriteString(fmt.Sprintf("   %2d. %s %s%s\n", i+1, getStatusEmoji(user.Status), user.Email, getMarkers(user)))
 		buf.WriteString(fmt.Sprintf("       Providers: %d/%d | TTL: %.1f-%.1fh\n", user.IPCount, user.Limit, user.MinTTLHours, user.MaxTTLHours))
+		if user.LatestScore != nil {
+			buf.WriteString(fmt.Sprintf("       Score: %.1f [%s]\n", *user.LatestScore, user.LatestScoreAction))
+		}
 		buf.WriteString(fmt.Sprintf("       ASNs: %s\n", strings.Join(user.IPsWithTTL, ", ")))
 		var geoSummary *geoSummary
 		var geoByIP map[string]*geoip.GeoLocation
@@ -404,6 +421,9 @@ func (m *PoolMonitor) printOverLimitUsers(ctx context.Context, buf *strings.Buil
 		for _, user := range overLimitUsers {
 			buf.WriteString(fmt.Sprintf("   %s%s\n", user.Email, getMarkers(user)))
 			buf.WriteString(fmt.Sprintf("     Providers: %d/%d | TTL: %.1f-%.1fh\n", user.IPCount, user.Limit, user.MinTTLHours, user.MaxTTLHours))
+			if user.LatestScore != nil {
+				buf.WriteString(fmt.Sprintf("     Score: %.1f [%s]\n", *user.LatestScore, user.LatestScoreAction))
+			}
 			buf.WriteString(fmt.Sprintf("     ASNs: %s\n", strings.Join(user.IPsWithTTL, ", ")))
 			var geoSummary *geoSummary
 			var geoByIP map[string]*geoip.GeoLocation

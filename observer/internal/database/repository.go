@@ -25,6 +25,7 @@ type Repository interface {
 	GetPendingCandidates(ctx context.Context) ([]LearningCandidate, error)
 	UpdateCandidateStatus(ctx context.Context, id uint, status string) error
 	GetActiveUsersForMonitor(ctx context.Context, since time.Time) ([]MonitorUserStats, error)
+	GetLatestScoreEvent(ctx context.Context, userID string) (*UserScoreEvent, error)
 	Close() error
 }
 
@@ -166,6 +167,21 @@ func (r *GormRepository) GetActiveUsersForMonitor(ctx context.Context, since tim
 		return nil, fmt.Errorf("get active users for monitor: %w", err)
 	}
 	return stats, nil
+}
+
+func (r *GormRepository) GetLatestScoreEvent(ctx context.Context, userID string) (*UserScoreEvent, error) {
+	var event UserScoreEvent
+	err := r.db.WithContext(ctx).
+		Where("user_id = ?", userID).
+		Order("created_at DESC").
+		First(&event).Error
+	if err != nil {
+		if err == gorm.ErrRecordNotFound {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("get latest score event: %w", err)
+	}
+	return &event, nil
 }
 
 func (r *GormRepository) Close() error {
