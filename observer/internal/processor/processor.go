@@ -2,6 +2,7 @@ package processor
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
@@ -441,6 +442,23 @@ func (p *LogProcessor) processEntryByASN(ctx context.Context, entry models.LogEn
 					})
 				}
 				alertPayload.ScoreBreakdown = breakdown
+
+				// Persist scoring event to database
+				if p.repo != nil {
+					breakdownJSON, _ := json.Marshal(breakdown)
+					scoreEvent := &database.UserScoreEvent{
+						UserID:         entry.UserEmail,
+						SourceIP:       entry.SourceIP,
+						ASN:            identifier,
+						IsNewASN:       res.IsNew,
+						ScoreTotal:     violationScore.FinalScore,
+						ScoreAction:    string(violationScore.Action),
+						ScoreBreakdown: string(breakdownJSON),
+					}
+					if err := p.repo.InsertScoreEvent(ctx, scoreEvent); err != nil {
+						log.Printf("Error saving score event for %s: %v", entry.UserEmail, err)
+					}
+				}
 
 				if violationScore.Action == scoring.ActionNone {
 					log.Printf("[Anti-Abuse] Score %.1f for %s, action=none, block cancelled",
