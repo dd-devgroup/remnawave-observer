@@ -15,8 +15,10 @@ RUN apk --no-cache add ca-certificates tzdata
 
 WORKDIR /app
 
-# Создаем директории для данных и конфигов
-RUN mkdir -p /app/data /app/config
+# Create directories for data and configs with proper permissions
+RUN mkdir -p /app/data /app/config && \
+    chmod 777 /app/data && \
+    chmod 755 /app/config
 
 COPY --from=builder /app/observer_service .
 
