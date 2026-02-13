@@ -33,9 +33,9 @@ func main() {
 	asnDB := asn.NewIPtoASNDatabase()
 	asnUpdater := asn.NewASNUpdater(asnDB, cfg.IPtoASNDownloadURL, cfg.IPtoASNUpdateInterval)
 	if err := asnUpdater.Start(ctx); err != nil {
-		log.Fatalf("Critical error: failed to load initial ASN database: %v", err)
+		log.Fatalf("[Updater] Critical error: failed to load initial ASN database: %v", err)
 	}
-	log.Printf("✅ ASN updater initialized (interval: %v, records: %d)", cfg.IPtoASNUpdateInterval, asnDB.Count())
+	log.Printf("[Updater] ✅ ASN updater initialized (interval: %v, records: %d)", cfg.IPtoASNUpdateInterval, asnDB.Count())
 
 	// ============================================
 	// 2. CAIDA AS2Org Updater
@@ -48,9 +48,9 @@ func main() {
 			time.Duration(cfg.CAIDARefreshHours)*time.Hour,
 		)
 		if err := as2orgLoader.InitialLoad(); err != nil {
-			log.Printf("Warning: CAIDA initial load failed: %v (will retry on next interval)", err)
+			log.Printf("[Updater] Warning: CAIDA initial load failed: %v (will retry on next interval)", err)
 		} else {
-			log.Printf("✅ CAIDA AS2Org updater initialized (interval: %dh)", cfg.CAIDARefreshHours)
+			log.Printf("[Updater] ✅ CAIDA AS2Org updater initialized (interval: %dh)", cfg.CAIDARefreshHours)
 		}
 	}
 
@@ -68,9 +68,9 @@ func main() {
 			nil, // no hot-reload callback in updater service
 		)
 		if err := geoLiteUpdater.InitialLoad(); err != nil {
-			log.Printf("Warning: GeoLite initial download failed: %v (will retry on next interval)", err)
+			log.Printf("[Updater] Warning: GeoLite initial download failed: %v (will retry on next interval)", err)
 		} else {
-			log.Printf("✅ GeoLite updater initialized (interval: %v)", cfg.GeoLiteUpdateInterval)
+			log.Printf("[Updater] ✅ GeoLite updater initialized (interval: %v)", cfg.GeoLiteUpdateInterval)
 		}
 	}
 
@@ -98,8 +98,8 @@ func main() {
 		go geoLiteUpdater.RunRefresh(ctx, &wg)
 	}
 
-	log.Printf("✅ All updaters running (ASN: always, CAIDA: %v, GeoLite: %v)", as2orgLoader != nil, geoLiteUpdater != nil)
-	log.Println("Observer Data Updater is now running. Press Ctrl+C to stop.")
+	log.Printf("[Updater] ✅ All updaters running (ASN: always, CAIDA: %v, GeoLite: %v)", as2orgLoader != nil, geoLiteUpdater != nil)
+	log.Println("[Updater] Observer Data Updater is now running. Press Ctrl+C to stop.")
 
 	// ============================================
 	// Wait for Shutdown Signal
@@ -108,9 +108,9 @@ func main() {
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 	<-quit
 
-	log.Println("Shutdown signal received, stopping updaters...")
+	log.Println("[Updater] Shutdown signal received, stopping updaters...")
 	cancel()
 	asnUpdater.Stop() // Stop ASN updater's internal goroutine
 	wg.Wait()         // Wait for CAIDA and GeoLite updaters
-	log.Println("All updaters stopped. Goodbye!")
+	log.Println("[Updater] All updaters stopped. Goodbye!")
 }

@@ -79,18 +79,17 @@ func main() {
 
 	webhookAlerter := alerter.NewWebhookAlerter(cfg.AlertWebhookURL)
 
-	// Initialize ASN lookup service
-	asnLookup, err := asn.NewASNLookup(cfg.IPtoASNDownloadURL, cfg.IPtoASNUpdateInterval)
+	// Initialize ASN lookup service (read-only mode - files provided by observer-updater)
+	asnLookup, err := asn.NewASNLookupReadOnly(cfg.GeoDataDataDir)
 	if err != nil {
 		log.Fatalf("Critical error: failed to load ASN database: %v", err)
 	}
 	defer asnLookup.Close()
-	log.Printf("ASN lookup initialized (records: %d)", asnLookup.Count())
+	log.Printf("[Observer] ASN lookup loaded from file (records: %d)", asnLookup.Count())
 
 	// Initialize GeoData loader (optional)
 	var geoDataLoader *geodata.GeoDataLoader
 	var geoService *geoip.GeoIPService
-	var geoLiteUpdater *geoip.GeoLiteUpdater
 	var geoAnalyzer *geoip.GeoAnalyzer
 	var asnClassifier *asn.ASNClassifier
 	var scorer *scoring.Scorer
@@ -117,23 +116,9 @@ func main() {
 		// Initialize GeoIP service
 		geoService = geoip.NewGeoIPService(asnLookup, mmdbReader, redisStore.GetClient(), cfg.GeoIPCacheTTL)
 		geoAnalyzer = geoip.NewGeoAnalyzer(geoService, geoDataLoader)
-		log.Printf("GeoIP service initialized (cache TTL: %v, MMDB: %v)", cfg.GeoIPCacheTTL, mmdbReader != nil)
+		log.Printf("[Observer] GeoIP service initialized (cache TTL: %v, MMDB: %v)", cfg.GeoIPCacheTTL, mmdbReader != nil)
 
-		// Initialize GeoLite auto-updater (optional)
-		if cfg.GeoLiteASNDownloadURL != "" || cfg.GeoLiteCityDownloadURL != "" {
-			geoLiteUpdater = geoip.NewGeoLiteUpdater(
-				cfg.GeoDataDataDir,
-				cfg.GeoLiteASNDownloadURL,
-				cfg.GeoLiteCityDownloadURL,
-				cfg.GeoLiteUpdateInterval,
-				geoService,
-			)
-			if err := geoLiteUpdater.InitialLoad(); err != nil {
-				log.Printf("Warning: GeoLite initial download failed: %v (continuing with existing files)", err)
-			} else {
-				log.Printf("✅ GeoLite updater initialized (interval: %v)", cfg.GeoLiteUpdateInterval)
-			}
-		}
+		// Note: GeoLite files are managed by observer-updater service
 
 		// Initialize ASN classifier
 		asnClassifier = asn.NewASNClassifier(geoDataLoader)
@@ -175,15 +160,16 @@ func main() {
 	poolMonitor := monitor.NewPoolMonitor(redisStore, repo, cfg, geoService)
 	apiServer := api.NewServer(cfg.Port, logProcessor, redisStore, cfg)
 
-	// Initialize CAIDA AS2Org (optional, synchronous initial load)
+	// Initialize CAIDA AS2Org (read-only mode - files provided by observer-updater)
 	var as2orgLoader *geodata.AS2OrgLoader
 	if cfg.CAIDAEnabled && cfg.GeoIPEnabled {
-		as2orgLoader = geodata.NewAS2OrgLoader(cfg.GeoDataDataDir, cfg.CAIDADownloadURL, time.Duration(cfg.CAIDARefreshHours)*time.Hour)
-		if err := as2orgLoader.InitialLoad(); err != nil {
-			log.Printf("Warning: CAIDA initial load failed: %v (running without CAIDA)", err)
+		as2orgLoader = geodata.NewAS2OrgLoader(cfg.GeoDataDataDir, "", 0)
+		// Load from local file (no download - observer-updater handles downloads)
+		if err := as2orgLoader.LoadFromLocalFile(); err != nil {
+			log.Printf("[Observer] Warning: CAIDA file not found: %v (running without CAIDA)", err)
 			as2orgLoader = nil
 		} else {
-			log.Printf("✅ CAIDA AS2Org loaded (%d records, refresh every %dh)", as2orgLoader.Count(), cfg.CAIDARefreshHours)
+			log.Printf("[Observer] CAIDA AS2Org loaded from file (%d records)", as2orgLoader.Count())
 		}
 	}
 
@@ -234,12 +220,7 @@ func main() {
 	if autoLearner != nil {
 		goroutineCount++
 	}
-	if as2orgLoader != nil {
-		goroutineCount++ // RunRefresh
-	}
-	if geoLiteUpdater != nil {
-		goroutineCount++ // GeoLite auto-updater
-	}
+	// Note: as2orgLoader and geoLiteUpdater background refresh removed - observer-updater handles downloads
 	if reenableScheduler != nil {
 		goroutineCount++ // Re-enable scheduler
 	}
@@ -256,15 +237,7 @@ func main() {
 		go autoLearner.Run(ctx, &wg)
 	}
 
-	// Background CAIDA refresh
-	if as2orgLoader != nil {
-		go as2orgLoader.RunRefresh(ctx, &wg)
-	}
-
-	// Background GeoLite updater
-	if geoLiteUpdater != nil {
-		go geoLiteUpdater.RunRefresh(ctx, &wg)
-	}
+	// Note: CAIDA and GeoLite background refresh removed - observer-updater handles downloads
 
 	// Start Re-enable Scheduler if configured
 	if reenableScheduler != nil {
