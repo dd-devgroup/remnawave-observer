@@ -135,7 +135,7 @@ services:
     networks:
       - observer-net
     healthcheck:
-      test: ['CMD-SHELL', 'pg_isready -U observer']
+      test: ['CMD-SHELL', 'pg_isready -U ${POSTGRES_USER:-observer}']
       interval: 5s
       timeout: 3s
       retries: 5
