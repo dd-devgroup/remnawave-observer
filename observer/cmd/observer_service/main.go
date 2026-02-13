@@ -90,6 +90,7 @@ func main() {
 	// Initialize GeoData loader (optional)
 	var geoDataLoader *geodata.GeoDataLoader
 	var geoService *geoip.GeoIPService
+	var geoLiteUpdater *geoip.GeoLiteUpdater
 	var geoAnalyzer *geoip.GeoAnalyzer
 	var asnClassifier *asn.ASNClassifier
 	var scorer *scoring.Scorer
@@ -117,6 +118,22 @@ func main() {
 		geoService = geoip.NewGeoIPService(asnLookup, mmdbReader, redisStore.GetClient(), cfg.GeoIPCacheTTL)
 		geoAnalyzer = geoip.NewGeoAnalyzer(geoService, geoDataLoader)
 		log.Printf("GeoIP service initialized (cache TTL: %v, MMDB: %v)", cfg.GeoIPCacheTTL, mmdbReader != nil)
+
+		// Initialize GeoLite auto-updater (optional)
+		if cfg.GeoLiteASNDownloadURL != "" || cfg.GeoLiteCityDownloadURL != "" {
+			geoLiteUpdater = geoip.NewGeoLiteUpdater(
+				cfg.GeoDataDataDir,
+				cfg.GeoLiteASNDownloadURL,
+				cfg.GeoLiteCityDownloadURL,
+				cfg.GeoLiteUpdateInterval,
+				geoService,
+			)
+			if err := geoLiteUpdater.InitialLoad(); err != nil {
+				log.Printf("Warning: GeoLite initial download failed: %v (continuing with existing files)", err)
+			} else {
+				log.Printf("✅ GeoLite updater initialized (interval: %v)", cfg.GeoLiteUpdateInterval)
+			}
+		}
 
 		// Initialize ASN classifier
 		asnClassifier = asn.NewASNClassifier(geoDataLoader)
@@ -220,6 +237,9 @@ func main() {
 	if as2orgLoader != nil {
 		goroutineCount++ // RunRefresh
 	}
+	if geoLiteUpdater != nil {
+		goroutineCount++ // GeoLite auto-updater
+	}
 	if reenableScheduler != nil {
 		goroutineCount++ // Re-enable scheduler
 	}
@@ -239,6 +259,11 @@ func main() {
 	// Background CAIDA refresh
 	if as2orgLoader != nil {
 		go as2orgLoader.RunRefresh(ctx, &wg)
+	}
+
+	// Background GeoLite updater
+	if geoLiteUpdater != nil {
+		go geoLiteUpdater.RunRefresh(ctx, &wg)
 	}
 
 	// Start Re-enable Scheduler if configured

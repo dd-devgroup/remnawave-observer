@@ -41,10 +41,13 @@ type Config struct {
 	// --- ПАРАМЕТРЫ GEOIP ---
 	GeoIPEnabled        bool          // Включить GeoIP анализ
 	GeoIPCacheTTL       time.Duration // TTL для кэша GeoIP (default: 24 часа)
-	GeoLiteASNPath      string        // Path to GeoLite2-ASN.mmdb (default: /app/data/GeoLite2-ASN.mmdb)
-	GeoLiteCityPath     string        // Path to GeoLite2-City.mmdb (default: /app/data/GeoLite2-City.mmdb)
-	GeoDataConfigDir    string        // Директория с конфигами (agglomerations.yaml, providers.yaml)
-	GeoDataDataDir      string        // Директория для записываемых данных (unknown_providers.json, backups)
+	GeoLiteASNPath             string        // Path to GeoLite2-ASN.mmdb (default: /app/data/GeoLite2-ASN.mmdb)
+	GeoLiteCityPath            string        // Path to GeoLite2-City.mmdb (default: /app/data/GeoLite2-City.mmdb)
+	GeoLiteASNDownloadURL      string        // P3TERX GitHub mirror URL for GeoLite2-ASN.mmdb auto-download
+	GeoLiteCityDownloadURL     string        // P3TERX GitHub mirror URL for GeoLite2-City.mmdb auto-download
+	GeoLiteUpdateInterval      time.Duration // Auto-update interval for GeoLite2 MMDB files (default: 168 hours = 7 days)
+	GeoDataConfigDir           string        // Директория с конфигами (agglomerations.yaml, providers.yaml)
+	GeoDataDataDir             string        // Директория для записываемых данных (unknown_providers.json, backups)
 
 	// --- ПАРАМЕТРЫ СКОРИНГА ---
 	ScoringEnabled      bool    // Включить систему скоринга
@@ -118,12 +121,15 @@ func New() *Config {
 		ExcludedASNs:          parseSet(getEnv("EXCLUDED_ASNS", "")),
 
 		// --- Загрузка параметров GeoIP ---
-		GeoIPEnabled:        getEnvBool("GEOIP_ENABLED", false),
-		GeoIPCacheTTL:       time.Duration(getEnvInt("GEOIP_CACHE_TTL_HOURS", 24)) * time.Hour,
-		GeoLiteASNPath:      getEnv("GEOLITE_ASN_PATH", "/app/data/GeoLite2-ASN.mmdb"),
-		GeoLiteCityPath:     getEnv("GEOLITE_CITY_PATH", "/app/data/GeoLite2-City.mmdb"),
-		GeoDataConfigDir:    getEnv("GEODATA_CONFIG_DIR", "/app/config"),
-		GeoDataDataDir:      getEnv("GEODATA_DATA_DIR", "/app/data"),
+		GeoIPEnabled:           getEnvBool("GEOIP_ENABLED", false),
+		GeoIPCacheTTL:          time.Duration(getEnvInt("GEOIP_CACHE_TTL_HOURS", 24)) * time.Hour,
+		GeoLiteASNPath:         getEnv("GEOLITE_ASN_PATH", "/app/data/GeoLite2-ASN.mmdb"),
+		GeoLiteCityPath:        getEnv("GEOLITE_CITY_PATH", "/app/data/GeoLite2-City.mmdb"),
+		GeoLiteASNDownloadURL:  getEnv("GEOLITE_ASN_DOWNLOAD_URL", "https://raw.githubusercontent.com/P3TERX/GeoLite.mmdb/download/GeoLite2-ASN.mmdb"),
+		GeoLiteCityDownloadURL: getEnv("GEOLITE_CITY_DOWNLOAD_URL", "https://raw.githubusercontent.com/P3TERX/GeoLite.mmdb/download/GeoLite2-City.mmdb"),
+		GeoLiteUpdateInterval:  time.Duration(getEnvInt("GEOLITE_UPDATE_INTERVAL_HOURS", 168)) * time.Hour,
+		GeoDataConfigDir:       getEnv("GEODATA_CONFIG_DIR", "/app/config"),
+		GeoDataDataDir:         getEnv("GEODATA_DATA_DIR", "/app/data"),
 
 		// --- Загрузка параметров скоринга ---
 		ScoringEnabled:      getEnvBool("SCORING_ENABLED", false),

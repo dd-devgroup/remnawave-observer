@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"strings"
+	"sync"
 	"time"
 
 	"observer_service/internal/services/asn"
@@ -34,6 +35,7 @@ type GeoIPService struct {
 	mmdbReader  *MMDBReader
 	redisClient *redis.Client
 	cacheTTL    time.Duration
+	mu          sync.RWMutex // protects mmdbReader for hot-reload
 }
 
 // NewGeoIPService creates a new GeoIP service using local MMDB files.
@@ -74,10 +76,14 @@ func (s *GeoIPService) Lookup(ctx context.Context, ip string) (*GeoLocation, err
 		Confidence:   0.5,
 	}
 
-	// Enrich with MMDB data if available
-	if s.mmdbReader != nil {
+	// Enrich with MMDB data if available (use read lock for hot-reload safety)
+	s.mu.RLock()
+	reader := s.mmdbReader
+	s.mu.RUnlock()
+
+	if reader != nil {
 		// City/geo lookup
-		mmdbCountry, city, region, lat, lon, err := s.mmdbReader.LookupCity(ip)
+		mmdbCountry, city, region, lat, lon, err := reader.LookupCity(ip)
 		if err == nil {
 			location.City = city
 			location.Region = region
@@ -91,7 +97,7 @@ func (s *GeoIPService) Lookup(ctx context.Context, ip string) (*GeoLocation, err
 		}
 
 		// ASN double-check: compare iptoasn ASN with GeoLite2-ASN
-		mmdbASN, mmdbOrg, err := s.mmdbReader.LookupASN(ip)
+		mmdbASN, mmdbOrg, err := reader.LookupASN(ip)
 		if err == nil && mmdbASN != "" {
 			if asnStr != "" && mmdbASN == asnStr {
 				location.ASNAgreement = true
@@ -144,9 +150,28 @@ func (s *GeoIPService) saveToCache(ctx context.Context, ip string, location *Geo
 
 // Close closes the service and its resources.
 func (s *GeoIPService) Close() {
-	if s.mmdbReader != nil {
-		s.mmdbReader.Close()
+	s.mu.Lock()
+	reader := s.mmdbReader
+	s.mu.Unlock()
+
+	if reader != nil {
+		reader.Close()
 	}
+}
+
+// UpdateMMDBReader atomically swaps the MMDB reader for hot-reload.
+// Closes the old reader after swapping.
+func (s *GeoIPService) UpdateMMDBReader(newReader *MMDBReader) error {
+	s.mu.Lock()
+	oldReader := s.mmdbReader
+	s.mmdbReader = newReader
+	s.mu.Unlock()
+
+	if oldReader != nil {
+		oldReader.Close()
+	}
+
+	return nil
 }
 
 // NormalizeCity normalizes city names for comparison.
