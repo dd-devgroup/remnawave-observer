@@ -6,11 +6,14 @@ import (
 
 // ASNClassification результат классификации ASN
 type ASNClassification struct {
-	ASN          string
-	Organization string
-	ProviderType string  // "mobile", "hosting", "vpn_proxy", "isp" и т.д.
-	Modifier     float64 // 0.3 - 1.8
-	Country      string
+	ASN             string
+	Organization    string
+	ProviderType    string   // "mobile", "hosting", "vpn_proxy", "isp" и т.д.
+	Modifier        float64  // 0.3 - 1.8
+	Country         string
+	Confidence      float64  // 0.0–1.0 classification confidence
+	Evidence        string   // "token_match", "heuristic", "default"
+	MatchedKeywords []string // keywords that triggered the match
 }
 
 // ASNClassifier классификатор провайдеров
@@ -32,17 +35,20 @@ func (c *ASNClassifier) Classify(asn string, org string) *ASNClassification {
 
 // ClassifyWithCountry классифицирует провайдера с учетом страны
 func (c *ASNClassifier) ClassifyWithCountry(asn string, org string, country string) *ASNClassification {
-	providerType, modifier := c.geoData.GetProviderTypeWithCountry(org, country)
+	result := c.geoData.GetProviderTypeWithCountry(org, country)
 
 	// Если провайдер попал в unknown log — записываем ASN для AutoLearner (no-op если не unknown)
 	geodata.UpdateUnknownProviderASN(asn, org)
 
 	return &ASNClassification{
-		ASN:          asn,
-		Organization: org,
-		ProviderType: providerType,
-		Modifier:     modifier,
-		Country:      country,
+		ASN:             asn,
+		Organization:    org,
+		ProviderType:    result.ProviderType,
+		Modifier:        result.Modifier,
+		Country:         country,
+		Confidence:      result.Confidence,
+		Evidence:        result.Evidence,
+		MatchedKeywords: result.MatchedKeywords,
 	}
 }
 

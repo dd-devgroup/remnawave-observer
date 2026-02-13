@@ -34,6 +34,23 @@ func NewASNLookup(downloadURL string, updateInterval time.Duration) (*ASNLookup,
 	}, nil
 }
 
+// NewASNLookupReadOnly создает ASN lookup сервис в read-only режиме (без скачивания)
+// Загружает базу из локального файла ip2asn-v4.tsv.gz в dataDir
+// Используется когда observer-updater сервис отвечает за скачивание файлов
+func NewASNLookupReadOnly(dataDir string) (*ASNLookup, error) {
+	db := NewIPtoASNDatabase()
+	updater := NewASNUpdater(db, "", 0) // dummy updater, no download
+
+	if err := updater.LoadFromLocalFile(dataDir); err != nil {
+		return nil, fmt.Errorf("failed to load ASN database from file: %w", err)
+	}
+
+	return &ASNLookup{
+		db:      db,
+		updater: updater,
+	}, nil
+}
+
 // Lookup returns ASN and organization name for IP address
 func (a *ASNLookup) Lookup(ipStr string) (uint, string, error) {
 	asn, org, err := a.db.Lookup(ipStr)

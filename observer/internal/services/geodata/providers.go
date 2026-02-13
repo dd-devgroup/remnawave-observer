@@ -170,58 +170,225 @@ func contains(slice []string, item string) bool {
 	return false
 }
 
-// GetProviderType определяет тип провайдера по названию организации
-// Возвращает тип провайдера и его модификатор
-func (l *GeoDataLoader) GetProviderType(organization string) (string, float64) {
+// ClassificationResult represents the result of provider classification.
+type ClassificationResult struct {
+	ProviderType    string
+	Modifier        float64
+	Confidence      float64  // 0.0–1.0
+	Evidence        string   // "token_match", "heuristic", "default"
+	MatchedKeywords []string
+}
+
+// legalSuffixes to strip from organization names during normalization.
+var legalSuffixes = map[string]bool{
+	"llc": true, "ltd": true, "inc": true, "gmbh": true, "ag": true,
+	"sa": true, "pjsc": true, "ojsc": true, "jsc": true, "ooo": true,
+	"zao": true, "pao": true, "corp": true, "corporation": true, "co": true,
+}
+
+// tokenStopwords are common words filtered during tokenization.
+var tokenStopwords = map[string]bool{
+	"the": true, "and": true, "or": true, "of": true, "for": true, "in": true,
+	"de": true, "des": true, "du": true, "la": true, "le": true,
+}
+
+// normalizeOrgName normalizes an organization name for classification:
+// casefold, remove legal suffixes, strip trailing punctuation/digits.
+func normalizeOrgName(org string) string {
+	org = strings.ToLower(strings.TrimSpace(org))
+	words := strings.Fields(org)
+
+	var filtered []string
+	for _, w := range words {
+		clean := strings.Trim(w, ".,;:\"'()")
+		if legalSuffixes[clean] {
+			continue
+		}
+		if clean != "" {
+			filtered = append(filtered, clean)
+		}
+	}
+
+	result := strings.Join(filtered, " ")
+	result = strings.TrimRight(result, ".,;: 0123456789")
+	return strings.TrimSpace(result)
+}
+
+// tokenizeOrg splits an organization name into tokens.
+// Splits on spaces, hyphens, dots, underscores. Filters empty tokens and stopwords.
+func tokenizeOrg(org string) []string {
+	f := func(c rune) bool {
+		return c == ' ' || c == '-' || c == '.' || c == '_' || c == ',' || c == ';'
+	}
+	parts := strings.FieldsFunc(org, f)
+
+	var tokens []string
+	for _, p := range parts {
+		p = strings.Trim(p, ".,;:!?()[]{}\"'")
+		if p == "" || len(p) < 2 {
+			continue
+		}
+		if tokenStopwords[p] {
+			continue
+		}
+		tokens = append(tokens, p)
+	}
+	return tokens
+}
+
+// matchTokens checks if all keyword tokens appear in the org tokens.
+func matchTokens(orgTokens, keywordTokens []string) bool {
+	if len(keywordTokens) == 0 {
+		return false
+	}
+	orgSet := make(map[string]bool, len(orgTokens))
+	for _, t := range orgTokens {
+		orgSet[t] = true
+	}
+	for _, kt := range keywordTokens {
+		if !orgSet[kt] {
+			return false
+		}
+	}
+	return true
+}
+
+// containsAnyToken checks if any needle token appears in the tokens slice.
+func containsAnyToken(tokens []string, needles []string) bool {
+	for _, t := range tokens {
+		for _, n := range needles {
+			if t == n {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// classificationPriorityOrder defines the order in which provider types are checked.
+var classificationPriorityOrder = []string{
+	"mobile",
+	"vpn_proxy",
+	"hosting",
+	"business",
+	"infrastructure",
+	"mobile_isp",
+	"fixed",
+	"isp",
+	"regional_isp",
+	"education",
+	"cdn",
+	"satellite",
+}
+
+// GetProviderType classifies a provider by organization name.
+func (l *GeoDataLoader) GetProviderType(organization string) *ClassificationResult {
 	return l.GetProviderTypeWithCountry(organization, "")
 }
 
-// GetProviderTypeWithCountry определяет тип провайдера с учетом страны
-// Возвращает тип провайдера и его модификатор
-func (l *GeoDataLoader) GetProviderTypeWithCountry(organization string, country string) (string, float64) {
-	orgLower := strings.ToLower(organization)
+// GetProviderTypeWithCountry classifies a provider by organization name and country.
+// Uses normalized token matching instead of substring matching.
+func (l *GeoDataLoader) GetProviderTypeWithCountry(organization string, country string) *ClassificationResult {
+	normalized := normalizeOrgName(organization)
+	orgTokens := tokenizeOrg(normalized)
 
 	l.mu.RLock()
 	defer l.mu.RUnlock()
 
 	if l.providers == nil {
-		return "isp", 1.0
+		return &ClassificationResult{
+			ProviderType: "isp",
+			Modifier:     1.0,
+			Confidence:   0.3,
+			Evidence:     "default",
+		}
 	}
 
-	// Приоритетный порядок проверки
-	priorityOrder := []string{
-		"mobile",        // Сначала мобильные пулы (самый низкий риск)
-		"vpn_proxy",     // VPN важнее хостинга
-		"hosting",
-		"business",
-		"infrastructure",
-		"mobile_isp",
-		"fixed",
-		"isp",
-		"regional_isp",
-	}
-
-	for _, provType := range priorityOrder {
+	for _, provType := range classificationPriorityOrder {
 		keywords, ok := l.providers.Keywords[provType]
 		if !ok {
 			continue
 		}
 
 		for _, keyword := range keywords {
-			if strings.Contains(orgLower, strings.ToLower(keyword)) {
+			kwNormalized := strings.ToLower(strings.TrimSpace(keyword))
+			kwTokens := tokenizeOrg(kwNormalized)
+
+			if matchTokens(orgTokens, kwTokens) {
+				modifier := 1.0
 				if typeInfo, exists := l.providers.ProviderTypes[provType]; exists {
-					return provType, typeInfo.Modifier
+					modifier = typeInfo.Modifier
 				}
-				// Если тип не найден в ProviderTypes, используем дефолт
-				return provType, 1.0
+
+				confidence := 0.8
+				if provType == "vpn_proxy" || provType == "hosting" {
+					confidence = 0.9
+				}
+
+				return &ClassificationResult{
+					ProviderType:    provType,
+					Modifier:        modifier,
+					Confidence:      confidence,
+					Evidence:        "token_match",
+					MatchedKeywords: []string{keyword},
+				}
 			}
 		}
 	}
 
-	// По умолчанию - ISP с модификатором 1.0
-	// Логируем неизвестного провайдера для последующего анализа
+	// Heuristic analysis on normalized text
+	if strings.Contains(normalized, "cloud") || strings.Contains(normalized, "server") ||
+		strings.Contains(normalized, "datacenter") || strings.Contains(normalized, "data center") {
+		modifier := 1.5
+		if typeInfo, exists := l.providers.ProviderTypes["hosting"]; exists {
+			modifier = typeInfo.Modifier
+		}
+		return &ClassificationResult{
+			ProviderType:    "hosting",
+			Modifier:        modifier,
+			Confidence:      0.5,
+			Evidence:        "heuristic",
+			MatchedKeywords: []string{"pattern:cloud/server/datacenter"},
+		}
+	}
+
+	if strings.Contains(normalized, "mobile") || strings.Contains(normalized, "cellular") ||
+		strings.Contains(normalized, "wireless") {
+		modifier := 0.5
+		if typeInfo, exists := l.providers.ProviderTypes["mobile_isp"]; exists {
+			modifier = typeInfo.Modifier
+		}
+		return &ClassificationResult{
+			ProviderType:    "mobile_isp",
+			Modifier:        modifier,
+			Confidence:      0.5,
+			Evidence:        "heuristic",
+			MatchedKeywords: []string{"pattern:mobile/cellular/wireless"},
+		}
+	}
+
+	if strings.Contains(normalized, "telecom") || strings.Contains(normalized, "telekom") {
+		modifier := 1.0
+		if typeInfo, exists := l.providers.ProviderTypes["isp"]; exists {
+			modifier = typeInfo.Modifier
+		}
+		return &ClassificationResult{
+			ProviderType:    "isp",
+			Modifier:        modifier,
+			Confidence:      0.5,
+			Evidence:        "heuristic",
+			MatchedKeywords: []string{"pattern:telecom"},
+		}
+	}
+
+	// Default — unknown provider
 	l.logUnknownProvider(organization, country)
-	return "isp", 1.0
+	return &ClassificationResult{
+		ProviderType: "isp",
+		Modifier:     1.0,
+		Confidence:   0.3,
+		Evidence:     "default",
+	}
 }
 
 // GetProviderTypeInfo возвращает информацию о типе провайдера

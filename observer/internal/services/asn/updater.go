@@ -7,6 +7,8 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"os"
+	"path/filepath"
 	"time"
 )
 
@@ -157,4 +159,31 @@ func (u *ASNUpdater) ForceReload() error {
 // GetDatabase возвращает текущую базу данных
 func (u *ASNUpdater) GetDatabase() *IPtoASNDatabase {
 	return u.db
+}
+
+// LoadFromLocalFile загружает ASN базу из локального файла (read-only, без скачивания)
+// Используется в режиме когда observer-updater сервис скачивает файлы
+func (u *ASNUpdater) LoadFromLocalFile(dataDir string) error {
+	filePath := filepath.Join(dataDir, "ip2asn-v4.tsv.gz")
+
+	log.Printf("[Observer] Loading ASN database from local file: %s", filePath)
+
+	f, err := os.Open(filePath)
+	if err != nil {
+		return fmt.Errorf("open file: %w", err)
+	}
+	defer f.Close()
+
+	gz, err := gzip.NewReader(f)
+	if err != nil {
+		return fmt.Errorf("gzip reader: %w", err)
+	}
+	defer gz.Close()
+
+	if err := u.db.LoadFromReader(gz); err != nil {
+		return fmt.Errorf("load from reader: %w", err)
+	}
+
+	log.Printf("[Observer] ASN database loaded from file: %d records", u.db.Count())
+	return nil
 }

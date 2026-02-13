@@ -6,6 +6,7 @@ import (
 	"log"
 	"math"
 	"observer_service/internal/config"
+	"observer_service/internal/database"
 	"observer_service/internal/models"
 	"observer_service/internal/services/geoip"
 	"observer_service/internal/services/storage"
@@ -20,21 +21,23 @@ type geoCacheEntry struct {
 	err error
 }
 
-// PoolMonitor выполняет периодический мониторинг пулов IP.
+// PoolMonitor performs periodic ASN pool monitoring.
 type PoolMonitor struct {
-	storage       storage.IPStorage
-	cfg           *config.Config
-	geoService    *geoip.GeoIPService
-	geoCache      map[string]*geoCacheEntry
-	geoCacheMu    sync.Mutex
+	storage    storage.Storage
+	repo       database.Repository
+	cfg        *config.Config
+	geoService *geoip.GeoIPService
+	geoCache   map[string]*geoCacheEntry
+	geoCacheMu sync.Mutex
 }
 
-// NewPoolMonitor создает новый экземпляр PoolMonitor.
-func NewPoolMonitor(s storage.IPStorage, cfg *config.Config, geoService *geoip.GeoIPService) *PoolMonitor {
+// NewPoolMonitor creates a new PoolMonitor instance.
+func NewPoolMonitor(s storage.Storage, repo database.Repository, cfg *config.Config, geoService *geoip.GeoIPService) *PoolMonitor {
 	return &PoolMonitor{
-		storage:     s,
-		cfg:         cfg,
-		geoService:  geoService,
+		storage:    s,
+		repo:       repo,
+		cfg:        cfg,
+		geoService: geoService,
 	}
 }
 
@@ -62,25 +65,25 @@ func (m *PoolMonitor) performMonitoring(ctx context.Context) {
 	m.geoCache = make(map[string]*geoCacheEntry)
 	m.geoCacheMu.Unlock()
 
-	userEmails, err := m.storage.GetAllUserEmails(ctx)
+	// Get active users from Postgres (no Redis SCAN)
+	userEmails, err := m.getActiveUserEmails(ctx)
 	if err != nil {
-		log.Printf("Monitoring error (GetAllUserEmails): %v", err)
+		log.Printf("Monitoring error (getActiveUserEmails): %v", err)
 		return
 	}
 	now := time.Now().Format("2006-01-02 15:04:05")
-	modeName := m.getMonitoringModeName()
 	if len(userEmails) == 0 {
-		fmt.Printf("[%s] === %s MONITORING === NO ACTIVE USERS\n", now, modeName)
+		fmt.Printf("[%s] === ASN POOLS MONITORING === NO ACTIVE USERS\n", now)
 		return
 	}
 
 	// Use strings.Builder for atomic output (prevents log interruptions)
 	var buf strings.Builder
-	buf.WriteString(fmt.Sprintf("\n[%s] === %s MONITORING START ===\n", now, modeName))
+	buf.WriteString(fmt.Sprintf("\n[%s] === ASN POOLS MONITORING START ===\n", now))
 
 	var allStats []models.UserIPStats
 	for _, email := range userEmails {
-		stats, err := m.buildUserStats(ctx, email)
+		stats, err := m.buildUserStatsByASN(ctx, email)
 		if err != nil {
 			log.Printf("Error collecting stats for %s: %v", email, err)
 			continue
@@ -97,126 +100,29 @@ func (m *PoolMonitor) performMonitoring(ctx context.Context) {
 	m.printTopUsers(ctx, &buf, allStats)
 	m.printOverLimitUsers(ctx, &buf, allStats)
 
-	buf.WriteString(fmt.Sprintf("[%s] === %s MONITORING END ===\n\n", time.Now().Format("2006-01-02 15:04:05"), modeName))
+	buf.WriteString(fmt.Sprintf("[%s] === ASN POOLS MONITORING END ===\n\n", time.Now().Format("2006-01-02 15:04:05")))
 
 	// Atomic output - prevents interruption by log.Printf
 	fmt.Print(buf.String())
 }
 
-func (m *PoolMonitor) getMonitoringModeName() string {
-	if m.cfg.DetectByASN {
-		return "ASN POOLS"
+// getActiveUserEmails returns active user emails from Postgres.
+func (m *PoolMonitor) getActiveUserEmails(ctx context.Context) ([]string, error) {
+	if m.repo == nil {
+		return nil, fmt.Errorf("repository not available for monitoring")
 	}
-	if m.cfg.DetectBySubnet {
-		return "SUBNET POOLS"
-	}
-	return "IP POOLS"
-}
 
-func (m *PoolMonitor) buildUserStats(ctx context.Context, email string) (*models.UserIPStats, error) {
-	if m.cfg.DetectByASN {
-		return m.buildUserStatsByASN(ctx, email)
-	}
-	if m.cfg.DetectBySubnet {
-		return m.buildUserStatsBySubnet(ctx, email)
-	}
-	return m.buildUserStatsByIP(ctx, email)
-}
-
-func (m *PoolMonitor) buildUserStatsByIP(ctx context.Context, email string) (*models.UserIPStats, error) {
-	activeIPs, err := m.storage.GetUserActiveIPs(ctx, email)
+	since := time.Now().Add(-24 * time.Hour)
+	stats, err := m.repo.GetActiveUsersForMonitor(ctx, since)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("postgres monitor query: %w", err)
 	}
-	if len(activeIPs) == 0 {
-		return nil, nil
-	}
-	userLimit := m.getUserLimit(email)
-	ipCount := len(activeIPs)
-	status := "NORMAL"
-	if float64(ipCount) >= float64(userLimit)*0.8 {
-		status = "NEAR_LIMIT"
-	}
-	if ipCount > userLimit {
-		status = "OVER_LIMIT"
-	}
-	hasCooldown, _ := m.storage.HasAlertCooldown(ctx, email)
-	var ips, ipsWithTTL []string
-	var ttlValues []int
-	for ip, ttl := range activeIPs {
-		ips = append(ips, ip)
-		ipsWithTTL = append(ipsWithTTL, fmt.Sprintf("%s(%.1fh)", ip, float64(ttl)/3600.0))
-		ttlValues = append(ttlValues, ttl)
-	}
-	sort.Strings(ips)
-	sort.Strings(ipsWithTTL)
-	minTTL, maxTTL := 0.0, 0.0
-	if len(ttlValues) > 0 {
-		sort.Ints(ttlValues)
-		minTTL = float64(ttlValues[0]) / 3600.0
-		maxTTL = float64(ttlValues[len(ttlValues)-1]) / 3600.0
-	}
-	return &models.UserIPStats{
-		Email:            email,
-		IPCount:          ipCount,
-		Limit:            userLimit,
-		IPs:              ips,
-		IPsWithTTL:       ipsWithTTL,
-		MinTTLHours:      math.Round(minTTL*10) / 10,
-		MaxTTLHours:      math.Round(maxTTL*10) / 10,
-		Status:           status,
-		HasAlertCooldown: hasCooldown,
-		IsExcluded:       m.cfg.ExcludedUsers[email],
-		IsDebug:          m.cfg.DebugEmail != "" && email == m.cfg.DebugEmail,
-	}, nil
-}
 
-func (m *PoolMonitor) buildUserStatsBySubnet(ctx context.Context, email string) (*models.UserIPStats, error) {
-	activeSubnets, err := m.storage.GetUserActiveSubnets(ctx, email)
-	if err != nil {
-		return nil, err
+	emails := make([]string, 0, len(stats))
+	for _, s := range stats {
+		emails = append(emails, s.UserID)
 	}
-	if len(activeSubnets) == 0 {
-		return nil, nil
-	}
-	userLimit := m.getUserLimit(email)
-	itemCount := len(activeSubnets)
-	status := "NORMAL"
-	if float64(itemCount) >= float64(userLimit)*0.8 {
-		status = "NEAR_LIMIT"
-	}
-	if itemCount > userLimit {
-		status = "OVER_LIMIT"
-	}
-	hasCooldown, _ := m.storage.HasAlertCooldown(ctx, email)
-	var items, itemsWithTTL []string
-	var ttlValues []int
-	for item, ttl := range activeSubnets {
-		items = append(items, item)
-		itemsWithTTL = append(itemsWithTTL, fmt.Sprintf("%s(%.1fh)", item, float64(ttl)/3600.0))
-		ttlValues = append(ttlValues, ttl)
-	}
-	sort.Strings(items)
-	sort.Strings(itemsWithTTL)
-	minTTL, maxTTL := 0.0, 0.0
-	if len(ttlValues) > 0 {
-		sort.Ints(ttlValues)
-		minTTL = float64(ttlValues[0]) / 3600.0
-		maxTTL = float64(ttlValues[len(ttlValues)-1]) / 3600.0
-	}
-	return &models.UserIPStats{
-		Email:            email,
-		IPCount:          itemCount,
-		Limit:            userLimit,
-		IPs:              items,
-		IPsWithTTL:       itemsWithTTL,
-		MinTTLHours:      math.Round(minTTL*10) / 10,
-		MaxTTLHours:      math.Round(maxTTL*10) / 10,
-		Status:           status,
-		HasAlertCooldown: hasCooldown,
-		IsExcluded:       m.cfg.ExcludedUsers[email],
-		IsDebug:          m.cfg.DebugEmail != "" && email == m.cfg.DebugEmail,
-	}, nil
+	return emails, nil
 }
 
 func (m *PoolMonitor) buildUserStatsByASN(ctx context.Context, email string) (*models.UserIPStats, error) {
@@ -240,7 +146,6 @@ func (m *PoolMonitor) buildUserStatsByASN(ctx context.Context, email string) (*m
 	var items, itemsWithTTL []string
 	var ttlValues []int
 
-	// Собираем ASN и их TTL
 	for asn, info := range activeASNs {
 		items = append(items, asn)
 		itemsWithTTL = append(itemsWithTTL, fmt.Sprintf("%s(%.1fh)[%d IPs]", asn, float64(info.TTLSeconds)/3600.0, len(info.IPs)))
@@ -287,97 +192,20 @@ func (m *PoolMonitor) printSummary(buf *strings.Builder, stats []models.UserIPSt
 			debug++
 		}
 	}
-	buf.WriteString("📊 SUMMARY:\n")
-	buf.WriteString(fmt.Sprintf("   👥 Total active users: %d\n", total))
-	buf.WriteString(fmt.Sprintf("   ⚠️  Near limit: %d\n", nearLimit))
-	buf.WriteString(fmt.Sprintf("   🚨 Over limit: %d\n", overLimit))
-	buf.WriteString(fmt.Sprintf("   🛡️  Excluded users: %d\n", excluded))
+	buf.WriteString("SUMMARY:\n")
+	buf.WriteString(fmt.Sprintf("   Total active users: %d\n", total))
+	buf.WriteString(fmt.Sprintf("   Near limit: %d\n", nearLimit))
+	buf.WriteString(fmt.Sprintf("   Over limit: %d\n", overLimit))
+	buf.WriteString(fmt.Sprintf("   Excluded users: %d\n", excluded))
 	if m.cfg.DebugEmail != "" {
-		buf.WriteString(fmt.Sprintf("   🐛 Debug users: %d\n", debug))
-	}
-}
-
-func (m *PoolMonitor) printUserGeo(ctx context.Context, user models.UserIPStats, indent string) {
-	if !m.cfg.GeoIPEnabled || m.geoService == nil {
-		return
-	}
-
-	ips := m.collectUserIPs(user)
-	if len(ips) == 0 {
-		fmt.Printf("%s🌍 Geo: no data\n", indent)
-		return
-	}
-
-	countriesMap := make(map[string]bool)
-	citiesMap := make(map[string]bool)
-	locations := make([]*geoip.GeoLocation, 0, len(ips))
-	type ipGeo struct {
-		ip  string
-		loc *geoip.GeoLocation
-	}
-	ipRows := make([]ipGeo, 0, len(ips))
-
-	for _, ip := range ips {
-		loc, err := m.cachedLookup(ctx, ip)
-		if err != nil || loc == nil {
-			ipRows = append(ipRows, ipGeo{ip: ip, loc: nil})
-			continue
-		}
-		ipRows = append(ipRows, ipGeo{ip: ip, loc: loc})
-		locations = append(locations, loc)
-		if loc.CountryCode != "" {
-			countriesMap[loc.CountryCode] = true
-		}
-		if loc.City != "" {
-			citiesMap[loc.City] = true
-		}
-	}
-
-	if len(locations) == 0 {
-		fmt.Printf("%s🌍 Geo: no data\n", indent)
-		return
-	}
-
-	countries := formatGeoList(mapKeysToSlice(countriesMap), 3)
-	cities := formatGeoList(mapKeysToSlice(citiesMap), 3)
-	maxDistance := maxDistanceKM(locations)
-
-	fmt.Printf("%s🌍 Geo: countries: %s, cities: %s, max: %.0fkm\n",
-		indent, countries, cities, maxDistance)
-	fmt.Printf("%s   └─ IP geo:\n", indent)
-	for _, row := range ipRows {
-		if row.loc == nil {
-			fmt.Printf("%s      • %s -> no data\n", indent, row.ip)
-			continue
-		}
-		country := row.loc.CountryCode
-		if country == "" {
-			country = "??"
-		}
-		city := row.loc.City
-		if city == "" {
-			city = "-"
-		}
-		fmt.Printf("%s      • %s -> %s, %s (%.2f, %.2f)\n",
-			indent, row.ip, country, city, row.loc.Latitude, row.loc.Longitude)
+		buf.WriteString(fmt.Sprintf("   Debug users: %d\n", debug))
 	}
 }
 
 func (m *PoolMonitor) collectUserIPs(user models.UserIPStats) []string {
 	unique := make(map[string]struct{})
-	switch {
-	case m.cfg.DetectByASN:
-		for _, info := range user.ASNDetails {
-			for _, ip := range info.IPs {
-				if ip != "" {
-					unique[ip] = struct{}{}
-				}
-			}
-		}
-	case m.cfg.DetectBySubnet:
-		return []string{}
-	default:
-		for _, ip := range user.IPs {
+	for _, info := range user.ASNDetails {
+		for _, ip := range info.IPs {
 			if ip != "" {
 				unique[ip] = struct{}{}
 			}
@@ -526,21 +354,7 @@ func maxDistanceKM(locations []*geoip.GeoLocation) float64 {
 }
 
 func (m *PoolMonitor) printTopUsers(ctx context.Context, buf *strings.Builder, stats []models.UserIPStats) {
-	var title, itemLabel, itemsLabel string
-	if m.cfg.DetectByASN {
-		title = "📈 TOP USERS BY PROVIDER COUNT (ASN):"
-		itemLabel = "Providers"
-		itemsLabel = "ASNs"
-	} else if m.cfg.DetectBySubnet {
-		title = "📈 TOP USERS BY SUBNET COUNT:"
-		itemLabel = "Subnets"
-		itemsLabel = "Subnets"
-	} else {
-		title = "📈 TOP USERS BY IP COUNT:"
-		itemLabel = "IPs"
-		itemsLabel = "IPs"
-	}
-	buf.WriteString("\n" + title + "\n")
+	buf.WriteString("\nTOP USERS BY PROVIDER COUNT (ASN):\n")
 	limit := 10
 	if len(stats) < limit {
 		limit = len(stats)
@@ -548,8 +362,8 @@ func (m *PoolMonitor) printTopUsers(ctx context.Context, buf *strings.Builder, s
 	for i := 0; i < limit; i++ {
 		user := stats[i]
 		buf.WriteString(fmt.Sprintf("   %2d. %s %s%s\n", i+1, getStatusEmoji(user.Status), user.Email, getMarkers(user)))
-		buf.WriteString(fmt.Sprintf("       %s: %d/%d | TTL: %.1f-%.1fh\n", itemLabel, user.IPCount, user.Limit, user.MinTTLHours, user.MaxTTLHours))
-		buf.WriteString(fmt.Sprintf("       %s: %s\n", itemsLabel, strings.Join(user.IPsWithTTL, ", ")))
+		buf.WriteString(fmt.Sprintf("       Providers: %d/%d | TTL: %.1f-%.1fh\n", user.IPCount, user.Limit, user.MinTTLHours, user.MaxTTLHours))
+		buf.WriteString(fmt.Sprintf("       ASNs: %s\n", strings.Join(user.IPsWithTTL, ", ")))
 		var geoSummary *geoSummary
 		var geoByIP map[string]*geoip.GeoLocation
 		if m.cfg.GeoIPEnabled && m.geoService != nil {
@@ -557,15 +371,14 @@ func (m *PoolMonitor) printTopUsers(ctx context.Context, buf *strings.Builder, s
 			if geoSummary != nil {
 				countries := formatGeoList(geoSummary.countries, 3)
 				cities := formatGeoList(geoSummary.cities, 3)
-				buf.WriteString(fmt.Sprintf("       🌍 Geo: countries: %s, cities: %s\n", countries, cities))
+				buf.WriteString(fmt.Sprintf("       Geo: countries: %s, cities: %s\n", countries, cities))
 			} else {
-				buf.WriteString("       🌍 Geo: no data\n")
+				buf.WriteString("       Geo: no data\n")
 			}
 		}
 
-		// For ASN mode, show IP details under each provider
-		if m.cfg.DetectByASN && user.ASNDetails != nil && len(user.ASNDetails) > 0 {
-			buf.WriteString("       └─ Details:\n")
+		if user.ASNDetails != nil && len(user.ASNDetails) > 0 {
+			buf.WriteString("       Details:\n")
 			asnKeys := make([]string, 0, len(user.ASNDetails))
 			for asn := range user.ASNDetails {
 				asnKeys = append(asnKeys, asn)
@@ -573,7 +386,7 @@ func (m *PoolMonitor) printTopUsers(ctx context.Context, buf *strings.Builder, s
 			sort.Strings(asnKeys)
 			for _, asn := range asnKeys {
 				info := user.ASNDetails[asn]
-				buf.WriteString(fmt.Sprintf("          • %s: %d IP -> %s\n", asn, len(info.IPs), formatIPsWithGeo(info.IPs, geoByIP)))
+				buf.WriteString(fmt.Sprintf("          %s: %d IP -> %s\n", asn, len(info.IPs), formatIPsWithGeo(info.IPs, geoByIP)))
 			}
 		}
 	}
@@ -587,22 +400,11 @@ func (m *PoolMonitor) printOverLimitUsers(ctx context.Context, buf *strings.Buil
 		}
 	}
 	if len(overLimitUsers) > 0 {
-		var itemLabel, itemsLabel string
-		if m.cfg.DetectByASN {
-			itemLabel = "Providers"
-			itemsLabel = "ASNs"
-		} else if m.cfg.DetectBySubnet {
-			itemLabel = "Subnets"
-			itemsLabel = "Subnets"
-		} else {
-			itemLabel = "IPs"
-			itemsLabel = "IPs"
-		}
-		buf.WriteString("\n🚨 USERS OVER LIMIT:\n")
+		buf.WriteString("\nUSERS OVER LIMIT:\n")
 		for _, user := range overLimitUsers {
-			buf.WriteString(fmt.Sprintf("   • %s%s\n", user.Email, getMarkers(user)))
-			buf.WriteString(fmt.Sprintf("     %s: %d/%d | TTL: %.1f-%.1fh\n", itemLabel, user.IPCount, user.Limit, user.MinTTLHours, user.MaxTTLHours))
-			buf.WriteString(fmt.Sprintf("     %s: %s\n", itemsLabel, strings.Join(user.IPsWithTTL, ", ")))
+			buf.WriteString(fmt.Sprintf("   %s%s\n", user.Email, getMarkers(user)))
+			buf.WriteString(fmt.Sprintf("     Providers: %d/%d | TTL: %.1f-%.1fh\n", user.IPCount, user.Limit, user.MinTTLHours, user.MaxTTLHours))
+			buf.WriteString(fmt.Sprintf("     ASNs: %s\n", strings.Join(user.IPsWithTTL, ", ")))
 			var geoSummary *geoSummary
 			var geoByIP map[string]*geoip.GeoLocation
 			if m.cfg.GeoIPEnabled && m.geoService != nil {
@@ -610,15 +412,14 @@ func (m *PoolMonitor) printOverLimitUsers(ctx context.Context, buf *strings.Buil
 				if geoSummary != nil {
 					countries := formatGeoList(geoSummary.countries, 3)
 					cities := formatGeoList(geoSummary.cities, 3)
-					buf.WriteString(fmt.Sprintf("     🌍 Geo: countries: %s, cities: %s\n", countries, cities))
+					buf.WriteString(fmt.Sprintf("     Geo: countries: %s, cities: %s\n", countries, cities))
 				} else {
-					buf.WriteString("     🌍 Geo: no data\n")
+					buf.WriteString("     Geo: no data\n")
 				}
 			}
 
-			// For ASN mode, show IP details
-			if m.cfg.DetectByASN && user.ASNDetails != nil && len(user.ASNDetails) > 0 {
-				buf.WriteString("     └─ Details:\n")
+			if user.ASNDetails != nil && len(user.ASNDetails) > 0 {
+				buf.WriteString("     Details:\n")
 				asnKeys := make([]string, 0, len(user.ASNDetails))
 				for asn := range user.ASNDetails {
 					asnKeys = append(asnKeys, asn)
@@ -626,7 +427,7 @@ func (m *PoolMonitor) printOverLimitUsers(ctx context.Context, buf *strings.Buil
 				sort.Strings(asnKeys)
 				for _, asn := range asnKeys {
 					info := user.ASNDetails[asn]
-					buf.WriteString(fmt.Sprintf("        • %s: %d IP -> %s\n", asn, len(info.IPs), formatIPsWithGeo(info.IPs, geoByIP)))
+					buf.WriteString(fmt.Sprintf("        %s: %d IP -> %s\n", asn, len(info.IPs), formatIPsWithGeo(info.IPs, geoByIP)))
 				}
 			}
 		}
@@ -637,25 +438,19 @@ func (m *PoolMonitor) getUserLimit(userEmail string) int {
 	if m.cfg.DebugEmail != "" && userEmail == m.cfg.DebugEmail {
 		return m.cfg.DebugIPLimit
 	}
-	if m.cfg.DetectByASN {
-		return m.cfg.MaxASNsPerUser
-	}
-	if m.cfg.DetectBySubnet {
-		return m.cfg.MaxSubnetsPerUser
-	}
-	return m.cfg.MaxIPsPerUser
+	return m.cfg.MaxASNsPerUser
 }
 
 func getStatusEmoji(status string) string {
 	switch status {
 	case "NORMAL":
-		return "✅"
+		return "[OK]"
 	case "NEAR_LIMIT":
-		return "⚠️"
+		return "[WARN]"
 	case "OVER_LIMIT":
-		return "🚨"
+		return "[OVER]"
 	default:
-		return "❓"
+		return "[?]"
 	}
 }
 

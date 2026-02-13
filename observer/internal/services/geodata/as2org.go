@@ -270,3 +270,10 @@ func (l *AS2OrgLoader) loadFromFile() error {
 	log.Printf("[AS2Org] Loaded: %d ASNs, %d organizations", len(asnMap), len(orgMap))
 	return nil
 }
+
+// LoadFromLocalFile загружает CAIDA данные из локального файла (read-only, без скачивания)
+// Используется в режиме когда observer-updater сервис скачивает файлы
+func (l *AS2OrgLoader) LoadFromLocalFile() error {
+	log.Printf("[Observer] Loading CAIDA AS2Org from local file...")
+	return l.loadFromFile()
+}

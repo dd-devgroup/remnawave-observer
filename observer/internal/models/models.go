@@ -13,20 +13,19 @@ type AlertPayload struct {
 	BlockDuration    string                `json:"block_duration"`
 	ViolationType    string                `json:"violation_type"`
 
-	// Поля для режима по IP и подсетям (violation_type: ip_limit_exceeded, subnet_limit_exceeded)
-	DetectedIPsCount *int                  `json:"detected_ips_count,omitempty"` // Кол-во IP/подсетей
-	AllUserIPs       []string              `json:"all_user_ips,omitempty"`       // Список IP/подсетей
-
 	// Поля для режима по ASN (violation_type: asn_limit_exceeded)
 	DetectedASNCount *int                  `json:"detected_asn_count,omitempty"` // Количество уникальных провайдеров (ASN)
 	AllUserASNs      []string              `json:"all_user_asns,omitempty"`      // Список ASN (например: ["AS31133", "AS3267"])
 	ASNDetails       map[string]*ASNInfo   `json:"asn_details,omitempty"`        // Детальная информация по каждому ASN
 
-	// Поля для скоринга и GeoIP анализа
-	Score           *float64              `json:"score,omitempty"`            // Финальный скор нарушения (0-100)
-	ScoreAction     string                `json:"score_action,omitempty"`     // Действие на основе скора (none, monitor, warn, soft_block, block)
-	GeoAnalysis     *GeoAnalysisResult    `json:"geo_analysis,omitempty"`     // Результат географического анализа
-	ProviderTypes   map[string]string     `json:"provider_types,omitempty"`   // ASN -> тип провайдера
+	// Scoring and GeoIP analysis fields
+	Score           *float64              `json:"score,omitempty"`
+	ScoreAction     string                `json:"score_action,omitempty"`
+	ScoreConfidence *float64              `json:"score_confidence,omitempty"`
+	ScoreBreakdown  []ScoreFeatureResult  `json:"score_breakdown,omitempty"`
+	ScoreModifiers  []string              `json:"score_modifiers,omitempty"`
+	GeoAnalysis     *GeoAnalysisResult    `json:"geo_analysis,omitempty"`
+	ProviderTypes   map[string]string     `json:"provider_types,omitempty"`
 }
 
 // UserIPStats содержит статистику по IP-адресам пользователя для мониторинга.
@@ -55,6 +54,15 @@ type ASNInfo struct {
 	IPCount      int      `json:"ip_count"`       // Количество IP в этом ASN
 	ProviderType string   `json:"provider_type,omitempty"` // Тип провайдера (mobile, hosting, vpn_proxy, isp)
 	Modifier     float64  `json:"modifier,omitempty"`      // Модификатор подозрительности (0.3-1.8)
+}
+
+// ScoreFeatureResult represents a single scoring feature result in the alert payload.
+type ScoreFeatureResult struct {
+	Name       string  `json:"name"`
+	Score      float64 `json:"score"`
+	Weight     float64 `json:"weight"`
+	Confidence float64 `json:"confidence"`
+	Details    string  `json:"details,omitempty"`
 }
 
 // GeoAnalysisResult результат географического анализа (для AlertPayload)

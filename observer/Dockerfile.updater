@@ -1,0 +1,37 @@
+FROM golang:1.24-alpine AS builder
+
+WORKDIR /app
+
+# Copy go mod files
+COPY go.mod go.sum ./
+RUN go mod download
+
+# Copy source code
+COPY . .
+
+# Build observer_updater binary
+RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-w -s" \
+    -o observer_updater ./cmd/observer_updater
+
+# Final stage
+FROM alpine:3.22
+
+# Install ca-certificates for HTTPS downloads
+RUN apk --no-cache add ca-certificates tzdata
+
+WORKDIR /app
+
+# Create data directory for downloaded files
+RUN mkdir -p /app/data
+
+# Copy binary from builder
+COPY --from=builder /app/observer_updater .
+
+# Run as non-root user
+RUN addgroup -g 1000 observer && \
+    adduser -D -u 1000 -G observer observer && \
+    chown -R observer:observer /app
+
+USER observer
+
+CMD ["/app/observer_updater"]

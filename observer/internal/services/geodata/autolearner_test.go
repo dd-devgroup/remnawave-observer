@@ -355,3 +355,82 @@ func TestAutoLearner_CAIDADrivenClassification(t *testing.T) {
 		t.Errorf("expected keyword 'randomcorp' under vpn_proxy, overlay: %v", overlay.Keywords)
 	}
 }
+
+// --- PR6: Jaccard clustering and confidence conversion tests ---
+
+func TestJaccardSimilarity(t *testing.T) {
+	tests := []struct {
+		name     string
+		a, b     []string
+		expected float64
+	}{
+		{"identical", []string{"mega", "telecom"}, []string{"mega", "telecom"}, 1.0},
+		{"disjoint", []string{"foo"}, []string{"bar"}, 0.0},
+		{"partial", []string{"mega", "telecom", "net"}, []string{"mega", "telecom"}, 2.0 / 3.0},
+		{"empty_both", nil, nil, 0.0},
+		{"empty_a", nil, []string{"foo"}, 0.0},
+		{"single_overlap", []string{"cloud", "net"}, []string{"cloud", "host"}, 1.0 / 3.0},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := jaccardSimilarity(tt.a, tt.b)
+			if diff := got - tt.expected; diff > 0.001 || diff < -0.001 {
+				t.Errorf("jaccardSimilarity(%v, %v) = %.4f, want %.4f", tt.a, tt.b, got, tt.expected)
+			}
+		})
+	}
+}
+
+func TestGroupSimilarOrgs(t *testing.T) {
+	orgs := []string{
+		"MegaTelecom LLC",
+		"MegaTelecom Inc",
+		"TotallyDifferent Corp",
+		"MegaTelecom Networks",
+	}
+
+	clusters := groupSimilarOrgs(orgs, 0.5)
+
+	// MegaTelecom variants should cluster together
+	if len(clusters) != 2 {
+		t.Errorf("expected 2 clusters, got %d: %v", len(clusters), clusters)
+		for i, c := range clusters {
+			t.Logf("  cluster[%d]: canonical=%q members=%v", i, c.CanonicalName, c.Members)
+		}
+		return
+	}
+
+	// First cluster should have the 3 MegaTelecom variants
+	megaCluster := clusters[0]
+	if len(megaCluster.Members) != 3 {
+		t.Errorf("expected MegaTelecom cluster with 3 members, got %d: %v", len(megaCluster.Members), megaCluster.Members)
+	}
+}
+
+func TestGroupSimilarOrgs_AllDifferent(t *testing.T) {
+	orgs := []string{"Alpha Corp", "Beta Corp", "Gamma Corp"}
+	clusters := groupSimilarOrgs(orgs, 0.7)
+
+	// With threshold 0.7, all should be separate (they only share stopwords removed by normalize)
+	if len(clusters) != 3 {
+		t.Errorf("expected 3 clusters for dissimilar orgs, got %d", len(clusters))
+	}
+}
+
+func TestConfidenceToFloat(t *testing.T) {
+	tests := []struct {
+		input string
+		want  float64
+	}{
+		{"high", 0.9},
+		{"medium", 0.6},
+		{"low", 0.4},
+		{"very_low", 0.2},
+		{"unknown", 0.2},
+	}
+	for _, tt := range tests {
+		if got := confidenceToFloat(tt.input); got != tt.want {
+			t.Errorf("confidenceToFloat(%q) = %.1f, want %.1f", tt.input, got, tt.want)
+		}
+	}
+}

@@ -12,6 +12,7 @@ import (
 
 	"observer_service/internal/api"
 	"observer_service/internal/config"
+	"observer_service/internal/database"
 	"observer_service/internal/metrics"
 	"observer_service/internal/monitor"
 	"observer_service/internal/processor"
@@ -44,6 +45,21 @@ func main() {
 	redisStore.SetScanCount(cfg.ScanCount)
 	redisStore.SetScanTimeBudget(time.Duration(cfg.ScanTimeBudgetSeconds) * time.Second)
 
+	// Initialize PostgreSQL
+	if cfg.PostgresDSN == "" {
+		log.Fatalf("Critical error: POSTGRES_DSN is required but not set")
+	}
+	db, err := database.NewPostgresDB(cfg.PostgresDSN)
+	if err != nil {
+		log.Fatalf("Critical error: failed to connect to PostgreSQL: %v", err)
+	}
+	if err := database.AutoMigrate(db); err != nil {
+		log.Fatalf("Critical error: database migration failed: %v", err)
+	}
+	repo := database.NewGormRepository(db)
+	defer repo.Close()
+	log.Println("PostgreSQL initialized and migrated")
+
 	// MIG-9: RabbitMQ publisher removed, using Remnawave enforcement
 	var enforcer enforcement.Enforcer
 	if cfg.RemnawaveBaseURL != "" && cfg.RemnawaveAPIToken != "" {
@@ -63,16 +79,13 @@ func main() {
 
 	webhookAlerter := alerter.NewWebhookAlerter(cfg.AlertWebhookURL)
 
-	// Initialize ASN lookup service (optional)
-	var asnLookup *asn.ASNLookup
-	if cfg.DetectByASN {
-		asnLookup, err = asn.NewASNLookup(cfg.IPtoASNDownloadURL, cfg.IPtoASNUpdateInterval)
-		if err != nil {
-			log.Fatalf("Critical error: failed to load ASN database: %v", err)
-		}
-		defer asnLookup.Close()
-		log.Printf("✅ ASN mode activated (records: %d)", asnLookup.Count())
+	// Initialize ASN lookup service (read-only mode - files provided by observer-updater)
+	asnLookup, err := asn.NewASNLookupReadOnly(cfg.GeoDataDataDir)
+	if err != nil {
+		log.Fatalf("Critical error: failed to load ASN database: %v", err)
 	}
+	defer asnLookup.Close()
+	log.Printf("[Observer] ASN lookup loaded from file (records: %d)", asnLookup.Count())
 
 	// Initialize GeoData loader (optional)
 	var geoDataLoader *geodata.GeoDataLoader
@@ -92,12 +105,20 @@ func main() {
 		}
 		log.Printf("✅ GeoData loaded (agglomerations: %d)", len(geoDataLoader.GetAgglomerations()))
 
-		// Initialize GeoIP service if ASN lookup is available
-		if asnLookup != nil {
-			geoService = geoip.NewGeoIPService(asnLookup, redisStore.GetClient(), cfg.GeoIPCacheTTL, cfg.GeoIPTimeout, cfg.GeoIPRateIntervalMs)
-			geoAnalyzer = geoip.NewGeoAnalyzer(geoService, geoDataLoader)
-			log.Printf("✅ GeoIP service initialized (cache TTL: %v)", cfg.GeoIPCacheTTL)
+		// Initialize MMDB reader (optional — files may not exist)
+		var mmdbReader *geoip.MMDBReader
+		mmdbReader, err = geoip.NewMMDBReader(cfg.GeoLiteASNPath, cfg.GeoLiteCityPath)
+		if err != nil {
+			log.Printf("Warning: MMDB files not available, GeoIP enrichment will be limited: %v", err)
+			mmdbReader = nil
 		}
+
+		// Initialize GeoIP service
+		geoService = geoip.NewGeoIPService(asnLookup, mmdbReader, redisStore.GetClient(), cfg.GeoIPCacheTTL)
+		geoAnalyzer = geoip.NewGeoAnalyzer(geoService, geoDataLoader)
+		log.Printf("[Observer] GeoIP service initialized (cache TTL: %v, MMDB: %v)", cfg.GeoIPCacheTTL, mmdbReader != nil)
+
+		// Note: GeoLite files are managed by observer-updater service
 
 		// Initialize ASN classifier
 		asnClassifier = asn.NewASNClassifier(geoDataLoader)
@@ -106,13 +127,14 @@ func main() {
 		// Initialize scoring system
 		if cfg.ScoringEnabled {
 			thresholds := scoring.ScoreThresholds{
-				MonitorThreshold:   30,
-				WarnThreshold:      cfg.ScoreThresholdWarn,
-				SoftBlockThreshold: 70,
-				BlockThreshold:     cfg.ScoreThresholdBlock,
+				MonitorThreshold:       25,
+				WarnThreshold:          cfg.ScoreThresholdWarn,
+				SoftChallengeThreshold: 60,
+				TempDisableThreshold:   75,
+				HardDisableThreshold:   cfg.ScoreThresholdBlock,
 			}
 			scorer = scoring.NewScorer(thresholds)
-			log.Printf("✅ Scoring system initialized (warn: %.1f, block: %.1f)",
+			log.Printf("✅ Scoring system initialized (warn: %.1f, hard_disable: %.1f)",
 				cfg.ScoreThresholdWarn, cfg.ScoreThresholdBlock)
 		}
 	}
@@ -123,6 +145,7 @@ func main() {
 		webhookAlerter,
 		cfg,
 		asnLookup,
+		repo,
 		geoService,
 		geoAnalyzer,
 		asnClassifier,
@@ -134,18 +157,19 @@ func main() {
 		defer geoService.Close()
 	}
 
-	poolMonitor := monitor.NewPoolMonitor(redisStore, cfg, geoService)
+	poolMonitor := monitor.NewPoolMonitor(redisStore, repo, cfg, geoService)
 	apiServer := api.NewServer(cfg.Port, logProcessor, redisStore, cfg)
 
-	// Initialize CAIDA AS2Org (optional, synchronous initial load)
+	// Initialize CAIDA AS2Org (read-only mode - files provided by observer-updater)
 	var as2orgLoader *geodata.AS2OrgLoader
 	if cfg.CAIDAEnabled && cfg.GeoIPEnabled {
-		as2orgLoader = geodata.NewAS2OrgLoader(cfg.GeoDataDataDir, cfg.CAIDADownloadURL, time.Duration(cfg.CAIDARefreshHours)*time.Hour)
-		if err := as2orgLoader.InitialLoad(); err != nil {
-			log.Printf("Warning: CAIDA initial load failed: %v (running without CAIDA)", err)
+		as2orgLoader = geodata.NewAS2OrgLoader(cfg.GeoDataDataDir, "", 0)
+		// Load from local file (no download - observer-updater handles downloads)
+		if err := as2orgLoader.LoadFromLocalFile(); err != nil {
+			log.Printf("[Observer] Warning: CAIDA file not found: %v (running without CAIDA)", err)
 			as2orgLoader = nil
 		} else {
-			log.Printf("✅ CAIDA AS2Org loaded (%d records, refresh every %dh)", as2orgLoader.Count(), cfg.CAIDARefreshHours)
+			log.Printf("[Observer] CAIDA AS2Org loaded from file (%d records)", as2orgLoader.Count())
 		}
 	}
 
@@ -163,7 +187,11 @@ func main() {
 			cfg.AutoLearningOutputFile,
 			as2orgLoader,
 		)
-		log.Printf("✅ Auto-Learner initialized")
+		autoLearner.SetRepo(repo)
+		autoLearner.SetMinDistinctUsers(cfg.AutoLearnMinDistinctUsers)
+		autoLearner.SetAutoApproveThreshold(cfg.AutoLearnAutoApproveThreshold)
+		log.Printf("✅ Auto-Learner initialized (Postgres-backed, min_distinct_users: %d, auto_approve: %.2f)",
+			cfg.AutoLearnMinDistinctUsers, cfg.AutoLearnAutoApproveThreshold)
 	}
 
 	// MIG-7: Initialize Re-enable Scheduler
@@ -188,13 +216,11 @@ func main() {
 	}
 
 	// Tell WaitGroup how many goroutines we'll launch
-	goroutineCount := 4 // poolMonitor + workerPool + sideEffectPool + metricsDumper
+	goroutineCount := 5 // poolMonitor + workerPool + sideEffectPool + metricsDumper + batchWriter
 	if autoLearner != nil {
 		goroutineCount++
 	}
-	if as2orgLoader != nil {
-		goroutineCount++ // RunRefresh
-	}
+	// Note: as2orgLoader and geoLiteUpdater background refresh removed - observer-updater handles downloads
 	if reenableScheduler != nil {
 		goroutineCount++ // Re-enable scheduler
 	}
@@ -203,6 +229,7 @@ func main() {
 	go poolMonitor.Run(ctx, &wg)
 	go logProcessor.StartWorkerPool(ctx, &wg)
 	go logProcessor.StartSideEffectWorkerPool(ctx, &wg)
+	go logProcessor.StartBatchWriter(ctx, &wg)
 	go metrics.StartDumper(ctx, &wg, 60*time.Second)
 
 	// Start Auto-Learner if enabled
@@ -210,10 +237,7 @@ func main() {
 		go autoLearner.Run(ctx, &wg)
 	}
 
-	// Background CAIDA refresh
-	if as2orgLoader != nil {
-		go as2orgLoader.RunRefresh(ctx, &wg)
-	}
+	// Note: CAIDA and GeoLite background refresh removed - observer-updater handles downloads
 
 	// Start Re-enable Scheduler if configured
 	if reenableScheduler != nil {

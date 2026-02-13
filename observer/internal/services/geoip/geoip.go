@@ -5,8 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
-	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"observer_service/internal/services/asn"
@@ -14,7 +14,7 @@ import (
 	"github.com/redis/go-redis/v9"
 )
 
-// GeoLocation представляет геолокацию IP адреса
+// GeoLocation represents the geolocation of an IP address.
 type GeoLocation struct {
 	IP           string
 	CountryCode  string
@@ -24,59 +24,41 @@ type GeoLocation struct {
 	Longitude    float64
 	ASN          string
 	Organization string
+	Source       string  // "mmdb", "iptoasn", "cache"
+	Confidence   float64 // 0.0–1.0
+	ASNAgreement bool    // true if iptoasn and GeoLite2-ASN agree on ASN
 }
 
-// GeoIPService сервис геолокации
+// GeoIPService provides geolocation using local MMDB files.
 type GeoIPService struct {
 	asnLookup   *asn.ASNLookup
+	mmdbReader  *MMDBReader
 	redisClient *redis.Client
 	cacheTTL    time.Duration
-	httpClient  *http.Client
-	rateLimiter *time.Ticker
-	timeout     time.Duration // таймаут на один запрос к ip-api.com
+	mu          sync.RWMutex // protects mmdbReader for hot-reload
 }
 
-// IPAPIResponse структура ответа от ip-api.com
-type IPAPIResponse struct {
-	Status      string  `json:"status"`
-	Country     string  `json:"country"`
-	CountryCode string  `json:"countryCode"`
-	Region      string  `json:"region"`
-	RegionName  string  `json:"regionName"`
-	City        string  `json:"city"`
-	Lat         float64 `json:"lat"`
-	Lon         float64 `json:"lon"`
-	ISP         string  `json:"isp"`
-	AS          string  `json:"as"`
-	Message     string  `json:"message,omitempty"`
-}
-
-// NewGeoIPService создает новый GeoIP сервис.
-// rateIntervalMs — минимальный интервал между запросами к ip-api.com в миллисекундах.
-// timeout — таймаут на один HTTP-запрос.
-func NewGeoIPService(asnLookup *asn.ASNLookup, redisClient *redis.Client, cacheTTL time.Duration, timeout time.Duration, rateIntervalMs int) *GeoIPService {
-	if rateIntervalMs <= 0 {
-		rateIntervalMs = 1350
-	}
+// NewGeoIPService creates a new GeoIP service using local MMDB files.
+func NewGeoIPService(asnLookup *asn.ASNLookup, mmdbReader *MMDBReader, redisClient *redis.Client, cacheTTL time.Duration) *GeoIPService {
 	return &GeoIPService{
 		asnLookup:   asnLookup,
+		mmdbReader:  mmdbReader,
 		redisClient: redisClient,
 		cacheTTL:    cacheTTL,
-		httpClient:  &http.Client{},
-		timeout:     timeout,
-		rateLimiter: time.NewTicker(time.Duration(rateIntervalMs) * time.Millisecond),
 	}
 }
 
-// Lookup выполняет геолокацию IP адреса с учётом контекста.
+// Lookup performs geolocation for an IP address.
 func (s *GeoIPService) Lookup(ctx context.Context, ip string) (*GeoLocation, error) {
 	if s.redisClient != nil {
 		cached, err := s.getFromCache(ctx, ip)
 		if err == nil && cached != nil {
+			cached.Source = "cache"
 			return cached, nil
 		}
 	}
 
+	// Start with iptoasn data
 	asnStr, countryCode, org, err := s.asnLookup.LookupFull(ip)
 	if err != nil {
 		log.Printf("[GeoIP] ASN lookup failed for %s: %v", ip, err)
@@ -90,15 +72,47 @@ func (s *GeoIPService) Lookup(ctx context.Context, ip string) (*GeoLocation, err
 		CountryCode:  countryCode,
 		ASN:          asnStr,
 		Organization: org,
+		Source:       "iptoasn",
+		Confidence:   0.5,
 	}
 
-	if apiData := s.fetchFromIPAPI(ctx, ip); apiData != nil {
-		location.City = apiData.City
-		location.Region = apiData.RegionName
-		location.Latitude = apiData.Lat
-		location.Longitude = apiData.Lon
-		if apiData.CountryCode != "" {
-			location.CountryCode = apiData.CountryCode
+	// Enrich with MMDB data if available (use read lock for hot-reload safety)
+	s.mu.RLock()
+	reader := s.mmdbReader
+	s.mu.RUnlock()
+
+	if reader != nil {
+		// City/geo lookup
+		mmdbCountry, city, region, lat, lon, err := reader.LookupCity(ip)
+		if err == nil {
+			location.City = city
+			location.Region = region
+			location.Latitude = lat
+			location.Longitude = lon
+			if mmdbCountry != "" {
+				location.CountryCode = mmdbCountry
+			}
+			location.Source = "mmdb"
+			location.Confidence = 0.8
+		}
+
+		// ASN double-check: compare iptoasn ASN with GeoLite2-ASN
+		mmdbASN, mmdbOrg, err := reader.LookupASN(ip)
+		if err == nil && mmdbASN != "" {
+			if asnStr != "" && mmdbASN == asnStr {
+				location.ASNAgreement = true
+				location.Confidence = 0.95
+			} else if asnStr == "" {
+				// iptoasn had no result, use MMDB ASN
+				location.ASN = mmdbASN
+				location.Organization = mmdbOrg
+				location.ASNAgreement = false
+				location.Confidence = 0.7
+			} else {
+				// Disagreement — prefer iptoasn but note it
+				location.ASNAgreement = false
+				location.Confidence = 0.6
+			}
 		}
 	}
 
@@ -107,54 +121,6 @@ func (s *GeoIPService) Lookup(ctx context.Context, ip string) (*GeoLocation, err
 	}
 
 	return location, nil
-}
-
-// fetchFromIPAPI получает данные от ip-api.com с rate limiting без глобального мьютекса.
-// Тикер-канал потоко-безопасен: каждый <-s.rateLimiter.C забирает ровно один тик,
-// поэтому параллельные горутины ожидают свой тик независимо друг от друга.
-func (s *GeoIPService) fetchFromIPAPI(ctx context.Context, ip string) *IPAPIResponse {
-	select {
-	case <-s.rateLimiter.C:
-	case <-ctx.Done():
-		log.Printf("[GeoIP] rate-limit wait cancelled for %s: %v", ip, ctx.Err())
-		return nil
-	}
-
-	url := fmt.Sprintf("http://ip-api.com/json/%s?fields=status,message,country,countryCode,region,regionName,city,lat,lon,isp,as", ip)
-
-	reqCtx, cancel := context.WithTimeout(ctx, s.timeout)
-	defer cancel()
-
-	req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, url, nil)
-	if err != nil {
-		log.Printf("[GeoIP] request creation failed for %s: %v", ip, err)
-		return nil
-	}
-
-	resp, err := s.httpClient.Do(req)
-	if err != nil {
-		log.Printf("[GeoIP] ip-api.com request failed for %s: %v", ip, err)
-		return nil
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		log.Printf("[GeoIP] ip-api.com returned status %d for %s", resp.StatusCode, ip)
-		return nil
-	}
-
-	var apiResp IPAPIResponse
-	if err := json.NewDecoder(resp.Body).Decode(&apiResp); err != nil {
-		log.Printf("[GeoIP] Failed to decode ip-api.com response for %s: %v", ip, err)
-		return nil
-	}
-
-	if apiResp.Status != "success" {
-		log.Printf("[GeoIP] ip-api.com returned error for %s: %s", ip, apiResp.Message)
-		return nil
-	}
-
-	return &apiResp
 }
 
 func (s *GeoIPService) getFromCache(ctx context.Context, ip string) (*GeoLocation, error) {
@@ -182,14 +148,33 @@ func (s *GeoIPService) saveToCache(ctx context.Context, ip string, location *Geo
 	}
 }
 
-// Close закрывает сервис
+// Close closes the service and its resources.
 func (s *GeoIPService) Close() {
-	if s.rateLimiter != nil {
-		s.rateLimiter.Stop()
+	s.mu.Lock()
+	reader := s.mmdbReader
+	s.mu.Unlock()
+
+	if reader != nil {
+		reader.Close()
 	}
 }
 
-// NormalizeCity нормализует название города для сравнения
+// UpdateMMDBReader atomically swaps the MMDB reader for hot-reload.
+// Closes the old reader after swapping.
+func (s *GeoIPService) UpdateMMDBReader(newReader *MMDBReader) error {
+	s.mu.Lock()
+	oldReader := s.mmdbReader
+	s.mmdbReader = newReader
+	s.mu.Unlock()
+
+	if oldReader != nil {
+		oldReader.Close()
+	}
+
+	return nil
+}
+
+// NormalizeCity normalizes city names for comparison.
 func NormalizeCity(city string) string {
 	city = strings.ToLower(strings.TrimSpace(city))
 	city = strings.TrimPrefix(city, "г.")
