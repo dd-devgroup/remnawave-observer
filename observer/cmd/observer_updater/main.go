@@ -31,7 +31,7 @@ func main() {
 	// 1. ASN Updater (iptoasn.com)
 	// ============================================
 	asnDB := asn.NewIPtoASNDatabase()
-	asnUpdater := asn.NewASNUpdater(asnDB, cfg.IPtoASNDownloadURL, cfg.IPtoASNUpdateInterval)
+	asnUpdater := asn.NewASNUpdater(asnDB, cfg.IPtoASNDownloadURL, cfg.IPtoASNUpdateInterval, cfg.GeoDataDataDir)
 	if err := asnUpdater.Start(ctx); err != nil {
 		log.Fatalf("[Updater] Critical error: failed to load initial ASN database: %v", err)
 	}

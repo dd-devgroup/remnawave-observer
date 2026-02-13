@@ -30,10 +30,11 @@ type ASNUpdater struct {
 	interval    time.Duration
 	httpClient  *http.Client
 	stopCh      chan struct{}
+	dataDir     string // Directory to save downloaded files
 }
 
 // NewASNUpdater создает новый экземпляр ASNUpdater
-func NewASNUpdater(db *IPtoASNDatabase, downloadURL string, interval time.Duration) *ASNUpdater {
+func NewASNUpdater(db *IPtoASNDatabase, downloadURL string, interval time.Duration, dataDir string) *ASNUpdater {
 	if downloadURL == "" {
 		downloadURL = DefaultDownloadURL
 	}
@@ -48,7 +49,8 @@ func NewASNUpdater(db *IPtoASNDatabase, downloadURL string, interval time.Durati
 		httpClient: &http.Client{
 			Timeout: httpTimeout,
 		},
-		stopCh: make(chan struct{}),
+		stopCh:  make(chan struct{}),
+		dataDir: dataDir,
 	}
 }
 
@@ -97,14 +99,14 @@ func (u *ASNUpdater) runBackgroundUpdates(ctx context.Context) {
 	}
 }
 
-// downloadAndReload скачивает и загружает базу данных
+// downloadAndReload скачивает, сохраняет в файл и загружает базу данных
 func (u *ASNUpdater) downloadAndReload() error {
 	startTime := time.Now()
 
 	// Создаем HTTP запрос
 	req, err := http.NewRequest(http.MethodGet, u.downloadURL, nil)
 	if err != nil {
-		return fmt.Errorf("ошибка создания запроса: %w", err)
+		return fmt.Errorf("create request: %w", err)
 	}
 
 	// Добавляем User-Agent
@@ -113,40 +115,94 @@ func (u *ASNUpdater) downloadAndReload() error {
 	// Выполняем запрос
 	resp, err := u.httpClient.Do(req)
 	if err != nil {
-		return fmt.Errorf("ошибка скачивания: %w", err)
+		return fmt.Errorf("download: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("неожиданный статус код: %d", resp.StatusCode)
+		return fmt.Errorf("unexpected status code: %d", resp.StatusCode)
 	}
 
-	// Определяем нужна ли распаковка gzip
-	var reader io.Reader = resp.Body
-
-	// Проверяем Content-Type или расширение URL для определения gzip
-	contentType := resp.Header.Get("Content-Type")
-	isGzip := contentType == "application/gzip" ||
-		contentType == "application/x-gzip" ||
-		len(u.downloadURL) > 3 && u.downloadURL[len(u.downloadURL)-3:] == ".gz"
-
-	if isGzip {
-		gzipReader, err := gzip.NewReader(resp.Body)
-		if err != nil {
-			return fmt.Errorf("ошибка создания gzip reader: %w", err)
+	// If dataDir is set, save to file (updater mode)
+	if u.dataDir != "" {
+		if err := u.saveToFile(resp.Body); err != nil {
+			return fmt.Errorf("save to file: %w", err)
 		}
-		defer gzipReader.Close()
-		reader = gzipReader
-	}
 
-	// Загружаем в базу данных
-	if err := u.db.LoadFromReader(reader); err != nil {
-		return fmt.Errorf("ошибка загрузки данных: %w", err)
+		// Load from saved file
+		filePath := filepath.Join(u.dataDir, "ip2asn-v4.tsv.gz")
+		f, err := os.Open(filePath)
+		if err != nil {
+			return fmt.Errorf("open saved file: %w", err)
+		}
+		defer f.Close()
+
+		gz, err := gzip.NewReader(f)
+		if err != nil {
+			return fmt.Errorf("gzip reader: %w", err)
+		}
+		defer gz.Close()
+
+		if err := u.db.LoadFromReader(gz); err != nil {
+			return fmt.Errorf("load from file: %w", err)
+		}
+	} else {
+		// In-memory mode (legacy, no file saving)
+		var reader io.Reader = resp.Body
+
+		// Проверяем Content-Type или расширение URL для определения gzip
+		contentType := resp.Header.Get("Content-Type")
+		isGzip := contentType == "application/gzip" ||
+			contentType == "application/x-gzip" ||
+			len(u.downloadURL) > 3 && u.downloadURL[len(u.downloadURL)-3:] == ".gz"
+
+		if isGzip {
+			gzipReader, err := gzip.NewReader(resp.Body)
+			if err != nil {
+				return fmt.Errorf("create gzip reader: %w", err)
+			}
+			defer gzipReader.Close()
+			reader = gzipReader
+		}
+
+		// Загружаем в базу данных
+		if err := u.db.LoadFromReader(reader); err != nil {
+			return fmt.Errorf("load from reader: %w", err)
+		}
 	}
 
 	duration := time.Since(startTime)
 	log.Printf("ASN database successfully loaded: %d records in %v", u.db.Count(), duration)
 
+	return nil
+}
+
+// saveToFile atomically saves downloaded content to disk
+func (u *ASNUpdater) saveToFile(r io.Reader) error {
+	targetPath := filepath.Join(u.dataDir, "ip2asn-v4.tsv.gz")
+	tmpPath := targetPath + ".tmp"
+
+	// Create temp file
+	tmpFile, err := os.Create(tmpPath)
+	if err != nil {
+		return fmt.Errorf("create tmp: %w", err)
+	}
+	defer os.Remove(tmpPath) // Cleanup on error
+
+	// Copy downloaded data to temp file
+	written, err := io.Copy(tmpFile, r)
+	if err != nil {
+		tmpFile.Close()
+		return fmt.Errorf("copy data: %w", err)
+	}
+	tmpFile.Close()
+
+	// Atomic rename
+	if err := os.Rename(tmpPath, targetPath); err != nil {
+		return fmt.Errorf("atomic rename: %w", err)
+	}
+
+	log.Printf("[Updater] Saved ASN database to %s (%d bytes)", targetPath, written)
 	return nil
 }
 
