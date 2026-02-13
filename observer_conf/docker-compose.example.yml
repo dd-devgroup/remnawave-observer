@@ -6,20 +6,20 @@ services:
     expose:
       - '9000'
     volumes:
-      - ./data:/app/data # Данные для записи (unknown_providers.json, backups) - read-write
-      - ./config:/app/config:ro # Конфиги Anti-Abuse (agglomerations.yaml, providers.yaml) - read-only
-      - ./geodata:/app/geodata # Geodata для n8n updater (caida_as2org, geoip, iptoasn)
+      - ./data:/app/data # Writable data (unknown_providers.json, MMDB files, backups)
+      - ./config:/app/config:ro # Anti-Abuse configs (agglomerations.yaml, providers.yaml)
     env_file:
       - .env
-      - .env.antiabuse # Переменные для GeoIP и Scoring (опционально)
     depends_on:
       vector-aggregator:
         condition: service_healthy
       redis:
         condition: service_healthy
+      postgres:
+        condition: service_healthy
     networks:
       - observer-net
-      - remnawave-network # Подключение к панели Remnawave (если в одном Docker)
+      - remnawave-network
     logging:
       driver: json-file
       options:
@@ -71,7 +71,7 @@ services:
         condition: service_healthy
     networks:
       - observer-net
-      - remnawave-network # Подключение к панели Remnawave (если в одном Docker)
+      - remnawave-network
     logging:
       driver: json-file
       options:
@@ -100,11 +100,38 @@ services:
         max-size: '8m'
         max-file: '3'
 
+  postgres:
+    image: postgres:17-alpine
+    container_name: observer-postgres
+    restart: unless-stopped
+    expose:
+      - '5432'
+    environment:
+      POSTGRES_DB: observer
+      POSTGRES_USER: observer
+      POSTGRES_PASSWORD: observer_password
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    networks:
+      - observer-net
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U observer -d observer']
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
+    logging:
+      driver: json-file
+      options:
+        max-size: '8m'
+        max-file: '3'
+
 networks:
   observer-net:
     driver: bridge
   remnawave-network:
-    external: true # Если панель Remnawave в отдельном Docker Compose
+    external: true
 
 volumes:
   redis-data:
+  postgres-data:
