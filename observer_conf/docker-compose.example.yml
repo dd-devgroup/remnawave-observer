@@ -127,15 +127,15 @@ services:
     expose:
       - '5432'
     environment:
-      POSTGRES_DB: observer
-      POSTGRES_USER: observer
-      POSTGRES_PASSWORD: observer_password
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
     volumes:
       - postgres-data:/var/lib/postgresql/data
     networks:
       - observer-net
     healthcheck:
-      test: ['CMD-SHELL', 'pg_isready -U observer -d observer']
+      test: ['CMD-SHELL', 'pg_isready -U observer']
       interval: 5s
       timeout: 3s
       retries: 5
