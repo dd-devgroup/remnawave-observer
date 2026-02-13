@@ -28,7 +28,7 @@ end
 return redis.call('DEL', unpack(keysToDelete))
 `
 
-// Storage определяет интерфейс для работы с хранилищем.
+// Storage defines the interface for the hot-window store (real-time ASN tracking).
 type Storage interface {
 	CheckAndAddASN(ctx context.Context, email, asn string, limit int, ttl, cooldown time.Duration) (*models.CheckResult, error)
 	AddIPToASNMapping(ctx context.Context, email, asn, ip string, ttl time.Duration) error
@@ -36,8 +36,6 @@ type Storage interface {
 	GetIPsForUserASN(ctx context.Context, email, asn string) ([]string, error)
 	GetASNOrgName(ctx context.Context, asn string) (string, error)
 	GetUserActiveASNs(ctx context.Context, userEmail string) (map[string]*models.ASNInfo, error)
-	GetAllUserEmails(ctx context.Context) ([]string, error)
-	GetAllIPsForUser(ctx context.Context, email string) ([]string, error)
 	HasAlertCooldown(ctx context.Context, userEmail string) (bool, error)
 	ClearUserASNData(ctx context.Context, email string) (int, error)
 	Ping(ctx context.Context) error

@@ -41,8 +41,6 @@ func (t *testStorage) GetASNOrgName(_ context.Context, _ string) (string, error)
 func (t *testStorage) GetUserActiveASNs(_ context.Context, _ string) (map[string]*models.ASNInfo, error) {
 	return nil, nil
 }
-func (t *testStorage) GetAllUserEmails(_ context.Context) ([]string, error)    { return nil, nil }
-func (t *testStorage) GetAllIPsForUser(_ context.Context, _ string) ([]string, error) { return nil, nil }
 func (t *testStorage) HasAlertCooldown(_ context.Context, _ string) (bool, error) { return false, nil }
 func (t *testStorage) ClearUserASNData(_ context.Context, _ string) (int, error) { return 0, nil }
 func (t *testStorage) Ping(_ context.Context) error                            { return nil }

@@ -155,7 +155,7 @@ func main() {
 		defer geoService.Close()
 	}
 
-	poolMonitor := monitor.NewPoolMonitor(redisStore, cfg, geoService)
+	poolMonitor := monitor.NewPoolMonitor(redisStore, repo, cfg, geoService)
 	apiServer := api.NewServer(cfg.Port, logProcessor, redisStore, cfg)
 
 	// Initialize CAIDA AS2Org (optional, synchronous initial load)

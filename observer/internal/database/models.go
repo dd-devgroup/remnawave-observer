@@ -86,6 +86,14 @@ type ASNOrgStats struct {
 	TotalConns    int64
 }
 
+// MonitorUserStats holds aggregated stats for monitoring (query result, not a table).
+type MonitorUserStats struct {
+	UserID          string
+	UniqueASNs      int64
+	UniqueIPs       int64
+	UniqueCountries int64
+}
+
 // IPEnrichmentCache stores enrichment data for IP addresses.
 type IPEnrichmentCache struct {
 	IP         string    `gorm:"primaryKey;not null"`

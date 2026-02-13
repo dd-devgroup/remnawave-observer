@@ -49,7 +49,10 @@ func (m *mockRepo) GetPendingCandidates(_ context.Context) ([]database.LearningC
 	return nil, nil
 }
 func (m *mockRepo) UpdateCandidateStatus(_ context.Context, _ uint, _ string) error { return nil }
-func (m *mockRepo) Close() error                                                     { return nil }
+func (m *mockRepo) GetActiveUsersForMonitor(_ context.Context, _ time.Time) ([]database.MonitorUserStats, error) {
+	return nil, nil
+}
+func (m *mockRepo) Close() error { return nil }
 
 func (m *mockRepo) totalRecords() int {
 	m.mu.Lock()

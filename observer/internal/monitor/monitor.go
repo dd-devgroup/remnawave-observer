@@ -6,6 +6,7 @@ import (
 	"log"
 	"math"
 	"observer_service/internal/config"
+	"observer_service/internal/database"
 	"observer_service/internal/models"
 	"observer_service/internal/services/geoip"
 	"observer_service/internal/services/storage"
@@ -20,21 +21,23 @@ type geoCacheEntry struct {
 	err error
 }
 
-// PoolMonitor выполняет периодический мониторинг пулов ASN.
+// PoolMonitor performs periodic ASN pool monitoring.
 type PoolMonitor struct {
-	storage       storage.Storage
-	cfg           *config.Config
-	geoService    *geoip.GeoIPService
-	geoCache      map[string]*geoCacheEntry
-	geoCacheMu    sync.Mutex
+	storage    storage.Storage
+	repo       database.Repository
+	cfg        *config.Config
+	geoService *geoip.GeoIPService
+	geoCache   map[string]*geoCacheEntry
+	geoCacheMu sync.Mutex
 }
 
-// NewPoolMonitor создает новый экземпляр PoolMonitor.
-func NewPoolMonitor(s storage.Storage, cfg *config.Config, geoService *geoip.GeoIPService) *PoolMonitor {
+// NewPoolMonitor creates a new PoolMonitor instance.
+func NewPoolMonitor(s storage.Storage, repo database.Repository, cfg *config.Config, geoService *geoip.GeoIPService) *PoolMonitor {
 	return &PoolMonitor{
-		storage:     s,
-		cfg:         cfg,
-		geoService:  geoService,
+		storage:    s,
+		repo:       repo,
+		cfg:        cfg,
+		geoService: geoService,
 	}
 }
 
@@ -62,9 +65,10 @@ func (m *PoolMonitor) performMonitoring(ctx context.Context) {
 	m.geoCache = make(map[string]*geoCacheEntry)
 	m.geoCacheMu.Unlock()
 
-	userEmails, err := m.storage.GetAllUserEmails(ctx)
+	// Get active users from Postgres (no Redis SCAN)
+	userEmails, err := m.getActiveUserEmails(ctx)
 	if err != nil {
-		log.Printf("Monitoring error (GetAllUserEmails): %v", err)
+		log.Printf("Monitoring error (getActiveUserEmails): %v", err)
 		return
 	}
 	now := time.Now().Format("2006-01-02 15:04:05")
@@ -100,6 +104,25 @@ func (m *PoolMonitor) performMonitoring(ctx context.Context) {
 
 	// Atomic output - prevents interruption by log.Printf
 	fmt.Print(buf.String())
+}
+
+// getActiveUserEmails returns active user emails from Postgres.
+func (m *PoolMonitor) getActiveUserEmails(ctx context.Context) ([]string, error) {
+	if m.repo == nil {
+		return nil, fmt.Errorf("repository not available for monitoring")
+	}
+
+	since := time.Now().Add(-24 * time.Hour)
+	stats, err := m.repo.GetActiveUsersForMonitor(ctx, since)
+	if err != nil {
+		return nil, fmt.Errorf("postgres monitor query: %w", err)
+	}
+
+	emails := make([]string, 0, len(stats))
+	for _, s := range stats {
+		emails = append(emails, s.UserID)
+	}
+	return emails, nil
 }
 
 func (m *PoolMonitor) buildUserStatsByASN(ctx context.Context, email string) (*models.UserIPStats, error) {

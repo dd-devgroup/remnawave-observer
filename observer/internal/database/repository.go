@@ -24,6 +24,7 @@ type Repository interface {
 	InsertCandidate(ctx context.Context, candidate *LearningCandidate) error
 	GetPendingCandidates(ctx context.Context) ([]LearningCandidate, error)
 	UpdateCandidateStatus(ctx context.Context, id uint, status string) error
+	GetActiveUsersForMonitor(ctx context.Context, since time.Time) ([]MonitorUserStats, error)
 	Close() error
 }
 
@@ -150,6 +151,21 @@ func (r *GormRepository) UpdateCandidateStatus(ctx context.Context, id uint, sta
 		Model(&LearningCandidate{}).
 		Where("id = ?", id).
 		Update("status", status).Error
+}
+
+func (r *GormRepository) GetActiveUsersForMonitor(ctx context.Context, since time.Time) ([]MonitorUserStats, error) {
+	var stats []MonitorUserStats
+	err := r.db.WithContext(ctx).
+		Model(&UserConnection{}).
+		Select("user_id, COUNT(DISTINCT asn) as unique_asns, COUNT(DISTINCT source_ip) as unique_ips, COUNT(DISTINCT country) as unique_countries").
+		Where("created_at >= ?", since).
+		Group("user_id").
+		Order("unique_asns DESC").
+		Find(&stats).Error
+	if err != nil {
+		return nil, fmt.Errorf("get active users for monitor: %w", err)
+	}
+	return stats, nil
 }
 
 func (r *GormRepository) Close() error {

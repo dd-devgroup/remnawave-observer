@@ -27,8 +27,6 @@ func (m *MockStorage) GetASNOrgName(_ context.Context, _ string) (string, error)
 func (m *MockStorage) GetUserActiveASNs(_ context.Context, _ string) (map[string]*models.ASNInfo, error) {
 	return make(map[string]*models.ASNInfo), nil
 }
-func (m *MockStorage) GetAllUserEmails(_ context.Context) ([]string, error)    { return []string{}, nil }
-func (m *MockStorage) GetAllIPsForUser(_ context.Context, _ string) ([]string, error) { return nil, nil }
 func (m *MockStorage) HasAlertCooldown(_ context.Context, _ string) (bool, error) { return false, nil }
 func (m *MockStorage) ClearUserASNData(_ context.Context, _ string) (int, error) { return 0, nil }
 func (m *MockStorage) Ping(_ context.Context) error                            { return nil }
