@@ -37,6 +37,14 @@ func main() {
 	// WaitGroup for waiting on all background goroutines
 	var wg sync.WaitGroup
 
+	log.Println("[Startup] Stage 1/5: starting updater bootstrap")
+	updaterManager := updater.NewManager(cfg, nil)
+	if err := updaterManager.Start(ctx); err != nil {
+		log.Fatalf("Critical error: updater bootstrap failed: %v", err)
+	}
+	log.Println("[Startup] Stage 1/5 complete: updater bootstrap finished")
+
+	log.Println("[Startup] Stage 2/5: connecting Redis and PostgreSQL")
 	redisStore, err := storage.NewRedisStore(ctx, cfg.RedisURL)
 	if err != nil {
 		log.Fatalf("Critical error: failed to connect to Redis: %v", err)
@@ -61,6 +69,7 @@ func main() {
 	defer repo.Close()
 	log.Println("PostgreSQL initialized and migrated")
 
+	log.Println("[Startup] Stage 3/5: initializing observer core")
 	// MIG-9: RabbitMQ publisher removed, using Remnawave enforcement
 	var enforcer enforcement.Enforcer
 	if cfg.RemnawaveBaseURL != "" && cfg.RemnawaveAPIToken != "" {
@@ -88,10 +97,7 @@ func main() {
 	defer asnLookup.Close()
 	log.Printf("[Observer] ASN lookup loaded from file (records: %d)", asnLookup.Count())
 
-	// Initialize Data Updater Manager (integrated background updater)
-	// This will be started later as a goroutine to manage ASN/CAIDA/GeoLite updates
-	var updaterManager *updater.Manager
-
+	log.Println("[Startup] Stage 4/5: initializing optional GeoIP/Scoring services")
 	// Initialize GeoData loader (optional)
 	var geoDataLoader *geodata.GeoDataLoader
 	var geoService *geoip.GeoIPService
@@ -122,12 +128,7 @@ func main() {
 		geoService = geoip.NewGeoIPService(asnLookup, mmdbReader, redisStore.GetClient(), cfg.GeoIPCacheTTL)
 		geoAnalyzer = geoip.NewGeoAnalyzer(geoService, geoDataLoader)
 		log.Printf("[Observer] GeoIP service initialized (cache TTL: %v, MMDB: %v)", cfg.GeoIPCacheTTL, mmdbReader != nil)
-
-		// Initialize Data Updater Manager (for background updates of ASN/CAIDA/GeoLite)
-		updaterManager = updater.NewManager(cfg, geoService)
-		if err := updaterManager.Start(ctx); err != nil {
-			log.Fatalf("Critical error: data updater failed to start: %v", err)
-		}
+		updaterManager.SetGeoService(geoService)
 
 		// Initialize ASN classifier
 		asnClassifier = asn.NewASNClassifier(geoDataLoader)
@@ -145,12 +146,6 @@ func main() {
 			scorer = scoring.NewScorer(thresholds)
 			log.Printf("✅ Scoring system initialized (warn: %.1f, hard_disable: %.1f)",
 				cfg.ScoreThresholdWarn, cfg.ScoreThresholdBlock)
-		}
-	} else {
-		// If GeoIP/Scoring disabled, still initialize updater for ASN updates
-		updaterManager = updater.NewManager(cfg, nil)
-		if err := updaterManager.Start(ctx); err != nil {
-			log.Printf("Warning: data updater failed to start: %v (continuing without background updates)", err)
 		}
 	}
 
@@ -231,18 +226,16 @@ func main() {
 	}
 
 	// Tell WaitGroup how many goroutines we'll launch
-	goroutineCount := 5 // poolMonitor + workerPool + sideEffectPool + metricsDumper + batchWriter
+	goroutineCount := 6 // poolMonitor + workerPool + sideEffectPool + metricsDumper + batchWriter + updaterManager
 	if autoLearner != nil {
 		goroutineCount++
 	}
 	if reenableScheduler != nil {
 		goroutineCount++
 	}
-	if updaterManager != nil {
-		goroutineCount++ // Data updater manager
-	}
 
 	wg.Add(goroutineCount)
+	log.Println("[Startup] Stage 5/5: launching background workers")
 	go poolMonitor.Run(ctx, &wg)
 	go logProcessor.StartWorkerPool(ctx, &wg)
 	go logProcessor.StartSideEffectWorkerPool(ctx, &wg)
@@ -255,9 +248,7 @@ func main() {
 	}
 
 	// Start Data Updater Manager (ASN, CAIDA, GeoLite background updates)
-	if updaterManager != nil {
-		go updaterManager.Run(ctx, &wg)
-	}
+	go updaterManager.Run(ctx, &wg)
 
 	// Start Re-enable Scheduler if configured
 	if reenableScheduler != nil {
@@ -265,8 +256,8 @@ func main() {
 	}
 
 	srv := &http.Server{
-		Addr:    ":" + cfg.Port,
-		Handler: apiServer.GetRouter(), // Get router from our api.Server
+		Addr:              ":" + cfg.Port,
+		Handler:           apiServer.GetRouter(), // Get router from our api.Server
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       15 * time.Second,
 		WriteTimeout:      15 * time.Second,

@@ -46,6 +46,13 @@ func NewGeoLiteUpdater(dataDir, asnURL, cityURL string, refreshInterval time.Dur
 	}
 }
 
+// SetGeoService attaches GeoIPService for MMDB hot-reload callbacks.
+func (u *GeoLiteUpdater) SetGeoService(geoService *GeoIPService) {
+	u.mu.Lock()
+	u.geoService = geoService
+	u.mu.Unlock()
+}
+
 // InitialLoad downloads MMDB files if they are missing or stale, then triggers hot-reload.
 // Non-fatal: returns error but service can continue with existing files.
 func (u *GeoLiteUpdater) InitialLoad() error {

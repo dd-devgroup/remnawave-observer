@@ -35,8 +35,7 @@ func NewASNLookup(downloadURL string, updateInterval time.Duration) (*ASNLookup,
 }
 
 // NewASNLookupReadOnly создает ASN lookup сервис в read-only режиме (без скачивания)
-// Загружает базу из локального файла ip2asn-v4.tsv.gz в dataDir
-// Используется когда observer-updater сервис отвечает за скачивание файлов
+// Загружает базу из локального файла ip2asn-v4.tsv.gz в dataDir.
 func NewASNLookupReadOnly(dataDir string) (*ASNLookup, error) {
 	db := NewIPtoASNDatabase()
 	updater := NewASNUpdater(db, "", 0, "") // dummy updater, no download, no file saving
