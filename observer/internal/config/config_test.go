@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"testing"
+	"time"
 )
 
 // --- REMNAWAVE CONFIG tests (MIG-3) ---
@@ -83,5 +84,46 @@ func TestRemnawaveConfigValidation(t *testing.T) {
 	}
 	if cfg.ReenableBatchSize != 100 {
 		t.Errorf("expected ReenableBatchSize clamp to 100, got %d", cfg.ReenableBatchSize)
+	}
+}
+
+func TestGeoFallbackConfigDefaults(t *testing.T) {
+	os.Clearenv()
+	cfg := New()
+
+	if cfg.GeoFallbackEnabled {
+		t.Errorf("expected GeoFallbackEnabled default false, got true")
+	}
+	if cfg.GeoFallbackTimeout != 3*time.Second {
+		t.Errorf("expected GeoFallbackTimeout default 3s, got %v", cfg.GeoFallbackTimeout)
+	}
+	if cfg.TwoIPToken != "" {
+		t.Errorf("expected TwoIPToken default empty, got %q", cfg.TwoIPToken)
+	}
+	if cfg.TwoIPBaseURL != "https://api.2ip.io" {
+		t.Errorf("expected TwoIPBaseURL default https://api.2ip.io, got %q", cfg.TwoIPBaseURL)
+	}
+}
+
+func TestGeoFallbackConfigCustomValues(t *testing.T) {
+	os.Clearenv()
+	os.Setenv("GEO_FALLBACK_ENABLED", "true")
+	os.Setenv("GEO_FALLBACK_TIMEOUT_SECONDS", "7")
+	os.Setenv("TWOIP_TOKEN", "test-token")
+	os.Setenv("TWOIP_BASE_URL", "https://api.test-2ip.local")
+
+	cfg := New()
+
+	if !cfg.GeoFallbackEnabled {
+		t.Errorf("expected GeoFallbackEnabled=true")
+	}
+	if cfg.GeoFallbackTimeout != 7*time.Second {
+		t.Errorf("expected GeoFallbackTimeout=7s, got %v", cfg.GeoFallbackTimeout)
+	}
+	if cfg.TwoIPToken != "test-token" {
+		t.Errorf("expected TwoIPToken=test-token, got %q", cfg.TwoIPToken)
+	}
+	if cfg.TwoIPBaseURL != "https://api.test-2ip.local" {
+		t.Errorf("expected TwoIPBaseURL custom value, got %q", cfg.TwoIPBaseURL)
 	}
 }

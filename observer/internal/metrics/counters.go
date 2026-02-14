@@ -11,13 +11,16 @@ import (
 // Все счётчики — глобальные атомики. Инкрементируются в точках наблюдения;
 // периодически сливаются в лог через StartDumper.
 var (
-	RequestsTotal          atomic.Int64
-	RejectedRequestsTotal  atomic.Int64
-	GeoIPLookupSuccess     atomic.Int64
-	GeoIPLookupFail        atomic.Int64
-	GeoIPLookupTimeout     atomic.Int64
-	SideEffectTimeoutCount atomic.Int64
-	ScanPartialRunsCount   atomic.Int64
+	RequestsTotal              atomic.Int64
+	RejectedRequestsTotal      atomic.Int64
+	GeoIPLookupSuccess         atomic.Int64
+	GeoIPLookupFail            atomic.Int64
+	GeoIPLookupTimeout         atomic.Int64
+	GeoIPFallbackLookupSuccess atomic.Int64
+	GeoIPFallbackLookupFail    atomic.Int64
+	GeoIPFallbackLookupTimeout atomic.Int64
+	SideEffectTimeoutCount     atomic.Int64
+	ScanPartialRunsCount       atomic.Int64
 
 	// Remnawave Enforcement метрики (MIG-5)
 	RemnawaveDisableOk   atomic.Int64
@@ -37,9 +40,10 @@ func StartDumper(ctx context.Context, wg *sync.WaitGroup, interval time.Duration
 	for {
 		select {
 		case <-ticker.C:
-			log.Printf("[metrics] requests_total=%d rejected=%d geoip_ok=%d geoip_fail=%d geoip_timeout=%d sideeffect_timeout=%d scan_partial=%d rw_disable_ok=%d rw_disable_fail=%d rw_enable_ok=%d rw_enable_fail=%d uuid_cache_hit=%d uuid_cache_miss=%d",
+			log.Printf("[metrics] requests_total=%d rejected=%d geoip_ok=%d geoip_fail=%d geoip_timeout=%d geo_fallback_ok=%d geo_fallback_fail=%d geo_fallback_timeout=%d sideeffect_timeout=%d scan_partial=%d rw_disable_ok=%d rw_disable_fail=%d rw_enable_ok=%d rw_enable_fail=%d uuid_cache_hit=%d uuid_cache_miss=%d",
 				RequestsTotal.Load(), RejectedRequestsTotal.Load(),
 				GeoIPLookupSuccess.Load(), GeoIPLookupFail.Load(), GeoIPLookupTimeout.Load(),
+				GeoIPFallbackLookupSuccess.Load(), GeoIPFallbackLookupFail.Load(), GeoIPFallbackLookupTimeout.Load(),
 				SideEffectTimeoutCount.Load(), ScanPartialRunsCount.Load(),
 				RemnawaveDisableOk.Load(), RemnawaveDisableFail.Load(),
 				RemnawaveEnableOk.Load(), RemnawaveEnableFail.Load(),
