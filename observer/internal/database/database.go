@@ -3,6 +3,7 @@ package database
 import (
 	"fmt"
 	"log"
+	"os"
 	"time"
 
 	"gorm.io/driver/postgres"
@@ -16,8 +17,18 @@ func NewPostgresDB(dsn string) (*gorm.DB, error) {
 		return nil, fmt.Errorf("POSTGRES_DSN is required but empty")
 	}
 
+	gormLogger := logger.New(
+		log.New(os.Stdout, "", log.LstdFlags),
+		logger.Config{
+			SlowThreshold:             500 * time.Millisecond,
+			LogLevel:                  logger.Warn,
+			IgnoreRecordNotFoundError: true,
+			Colorful:                  false,
+		},
+	)
+
 	db, err := gorm.Open(postgres.Open(dsn), &gorm.Config{
-		Logger: logger.Default.LogMode(logger.Warn),
+		Logger: gormLogger,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect to PostgreSQL: %w", err)

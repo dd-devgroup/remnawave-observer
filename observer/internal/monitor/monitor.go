@@ -31,6 +31,8 @@ type PoolMonitor struct {
 	geoCacheMu sync.Mutex
 }
 
+const monitoringCycleTimeout = 60 * time.Second
+
 // NewPoolMonitor creates a new PoolMonitor instance.
 func NewPoolMonitor(s storage.Storage, repo database.Repository, cfg *config.Config, geoService *geoip.GeoIPService) *PoolMonitor {
 	return &PoolMonitor{
@@ -51,7 +53,9 @@ func (m *PoolMonitor) Run(ctx context.Context, wg *sync.WaitGroup) {
 	for {
 		select {
 		case <-ticker.C:
-			m.performMonitoring(context.Background())
+			cycleCtx, cancel := context.WithTimeout(ctx, monitoringCycleTimeout)
+			m.performMonitoring(cycleCtx)
+			cancel()
 		case <-ctx.Done():
 			log.Println("Pool monitoring stopped")
 			return
@@ -172,20 +176,20 @@ func (m *PoolMonitor) buildUserStatsByASN(ctx context.Context, email string) (*m
 	}
 
 	return &models.UserIPStats{
-		Email:            email,
-		IPCount:          itemCount,
-		Limit:            userLimit,
-		IPs:              items,
-		IPsWithTTL:       itemsWithTTL,
-		MinTTLHours:      math.Round(minTTL*10) / 10,
-		MaxTTLHours:      math.Round(maxTTL*10) / 10,
-		Status:           status,
-		HasAlertCooldown: hasCooldown,
-		IsExcluded:       m.cfg.ExcludedUsers[email],
-		IsDebug:          m.cfg.DebugEmail != "" && email == m.cfg.DebugEmail,
-		LatestScore:      latestScore,
+		Email:             email,
+		IPCount:           itemCount,
+		Limit:             userLimit,
+		IPs:               items,
+		IPsWithTTL:        itemsWithTTL,
+		MinTTLHours:       math.Round(minTTL*10) / 10,
+		MaxTTLHours:       math.Round(maxTTL*10) / 10,
+		Status:            status,
+		HasAlertCooldown:  hasCooldown,
+		IsExcluded:        m.cfg.ExcludedUsers[email],
+		IsDebug:           m.cfg.DebugEmail != "" && email == m.cfg.DebugEmail,
+		LatestScore:       latestScore,
 		LatestScoreAction: latestScoreAction,
-		ASNDetails:       activeASNs,
+		ASNDetails:        activeASNs,
 	}, nil
 }
 

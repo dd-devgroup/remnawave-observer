@@ -28,17 +28,17 @@ type LogProcessor struct {
 	enforcer          enforcement.Enforcer
 	alerter           alerter.Notifier
 	cfg               *config.Config
-	asnLookup         *asn.ASNLookup         // Сервис для lookup ASN
-	repo              database.Repository    // PostgreSQL repository (optional)
-	batchWriter       *BatchWriter           // Batched connection writer (optional)
-	logChannel        chan []models.LogEntry  // Канал для получения пачек логов
+	asnLookup         *asn.ASNLookup             // Сервис для lookup ASN
+	repo              database.Repository        // PostgreSQL repository (optional)
+	batchWriter       *BatchWriter               // Batched connection writer (optional)
+	logChannel        chan []models.LogEntry     // Канал для получения пачек логов
 	sideEffectChannel chan func(context.Context) // Канал для побочных задач (алерты, очистка)
 
 	// Сервисы для Anti-Abuse системы
-	geoService    *geoip.GeoIPService   // Сервис геолокации
-	geoAnalyzer   *geoip.GeoAnalyzer    // Анализатор географии
-	asnClassifier *asn.ASNClassifier    // Классификатор провайдеров
-	scorer        *scoring.Scorer       // Система скоринга
+	geoService    *geoip.GeoIPService // Сервис геолокации
+	geoAnalyzer   *geoip.GeoAnalyzer  // Анализатор географии
+	asnClassifier *asn.ASNClassifier  // Классификатор провайдеров
+	scorer        *scoring.Scorer     // Система скоринга
 
 	excludedIPsParsed []*net.IPNet // Для случаев когда в ExcludedIPs указан CIDR
 }
@@ -175,10 +175,11 @@ func (p *LogProcessor) StartBatchWriter(ctx context.Context, wg *sync.WaitGroup)
 }
 
 // EnqueueEntries adds a batch of logs to the processing queue.
-func (p *LogProcessor) EnqueueEntries(entries []models.LogEntry) error {
+func (p *LogProcessor) EnqueueEntries(entries []models.LogEntry) (err error) {
 	defer func() {
 		if r := recover(); r != nil {
 			log.Println("Attempted to write to closed log channel. Service is shutting down")
+			err = errors.New("log channel is closed, service is shutting down")
 		}
 	}()
 
@@ -393,7 +394,12 @@ func (p *LogProcessor) processEntryByASN(ctx context.Context, entry models.LogEn
 		// Calculate and persist scoring for the new ASN
 		// This enables progressive enforcement (monitor/warn/temp_disable) based on score
 		if p.cfg.ScoringEnabled && p.scorer != nil && p.repo != nil {
-			_, _, _ = p.calculateAndPersistScore(ctx, entry, identifier, orgName, true, res.AllUserItems)
+			scoreASNs := res.AllUserItems
+			if len(scoreASNs) == 0 && identifier != "" {
+				scoreASNs = []string{identifier}
+				log.Printf("[Scoring] AllUserItems is empty for %s, using current ASN fallback: %s", entry.UserEmail, identifier)
+			}
+			_, _, _ = p.calculateAndPersistScore(ctx, entry, identifier, orgName, true, scoreASNs)
 		}
 	}
 

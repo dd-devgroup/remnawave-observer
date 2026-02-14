@@ -34,8 +34,6 @@ type Server struct {
 func NewServer(port string, enqueuer EntryEnqueuer, storage storage.Storage, cfg *config.Config) *Server {
 	gin.SetMode(gin.ReleaseMode)
 	router := gin.Default()
-	router.Use(gin.Logger())
-	router.Use(gin.Recovery())
 
 	s := &Server{
 		router:   router,

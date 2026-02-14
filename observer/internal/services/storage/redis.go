@@ -135,20 +135,41 @@ func parseCheckResult(result interface{}, identifier string) (*models.CheckResul
 	switch statusCode {
 	case 0: // OK
 		checkResult.CurrentCount, _ = resSlice[1].(int64)
-		isNew, _ := resSlice[2].(int64)
-		checkResult.IsNew = isNew == 1
-	case 1: // Limit exceeded, block
-		itemsInterfaces, _ := resSlice[1].([]interface{})
-		for _, itemInt := range itemsInterfaces {
-			if itemStr, ok := itemInt.(string); ok {
-				checkResult.AllUserItems = append(checkResult.AllUserItems, itemStr)
+		if len(resSlice) > 2 {
+			if isNew, ok := resSlice[2].(int64); ok {
+				checkResult.IsNew = isNew == 1
+			} else if items, ok := resSlice[2].([]interface{}); ok {
+				// Compatibility path if Lua script returns items at index 2.
+				checkResult.AllUserItems = parseStringList(items)
 			}
 		}
+		if len(resSlice) > 3 {
+			checkResult.AllUserItems = parseStringList(resSlice[3])
+		}
+		if checkResult.CurrentCount == 0 && len(checkResult.AllUserItems) > 0 {
+			checkResult.CurrentCount = int64(len(checkResult.AllUserItems))
+		}
+	case 1: // Limit exceeded, block
+		checkResult.AllUserItems = parseStringList(resSlice[1])
 		checkResult.CurrentCount = int64(len(checkResult.AllUserItems))
 	case 2: // Limit exceeded, on cooldown
 		checkResult.CurrentCount, _ = resSlice[1].(int64)
 	}
 	return checkResult, nil
+}
+
+func parseStringList(value interface{}) []string {
+	itemsInterfaces, ok := value.([]interface{})
+	if !ok {
+		return nil
+	}
+	items := make([]string, 0, len(itemsInterfaces))
+	for _, itemInt := range itemsInterfaces {
+		if itemStr, ok := itemInt.(string); ok && itemStr != "" {
+			items = append(items, itemStr)
+		}
+	}
+	return items
 }
 
 // GetAllUserEmails сканирует ключи Redis для получения всех username (email) пользователей.
