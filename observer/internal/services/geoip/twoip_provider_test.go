@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 )
@@ -60,7 +61,9 @@ func TestTwoIPProviderLookup_Success(t *testing.T) {
 
 func TestTwoIPProviderLookup_HTTPError(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = w.Write([]byte(`{"error":"Unauthorized","message":"token is invalid"}`))
 	}))
 	defer server.Close()
 
@@ -68,6 +71,12 @@ func TestTwoIPProviderLookup_HTTPError(t *testing.T) {
 	_, err := provider.Lookup(context.Background(), "9.9.9.9")
 	if err == nil {
 		t.Fatal("expected error for non-200 response")
+	}
+	if !isHTTPStatusCode(err, http.StatusUnauthorized) {
+		t.Fatalf("expected unauthorized status error, got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "token is invalid") {
+		t.Fatalf("expected response body in error, got: %v", err)
 	}
 }
 

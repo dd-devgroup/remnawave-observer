@@ -3,7 +3,9 @@ package geoip
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -58,6 +60,31 @@ type twoIPResponse struct {
 	ASN      twoIPASN        `json:"asn"`
 }
 
+type httpStatusError struct {
+	Provider   string
+	StatusCode int
+	Body       string
+}
+
+func (e *httpStatusError) Error() string {
+	if e == nil {
+		return "fallback lookup: bad status"
+	}
+	provider := strings.TrimSpace(e.Provider)
+	if provider == "" {
+		provider = "fallback"
+	}
+	if strings.TrimSpace(e.Body) == "" {
+		return fmt.Sprintf("%s lookup: bad status: %d", provider, e.StatusCode)
+	}
+	return fmt.Sprintf("%s lookup: bad status: %d (%s)", provider, e.StatusCode, e.Body)
+}
+
+func isHTTPStatusCode(err error, statusCode int) bool {
+	var statusErr *httpStatusError
+	return errors.As(err, &statusErr) && statusErr.StatusCode == statusCode
+}
+
 // NewTwoIPProvider creates 2IP fallback provider.
 func NewTwoIPProvider(baseURL, token string, timeout time.Duration) *TwoIPProvider {
 	if strings.TrimSpace(baseURL) == "" {
@@ -107,7 +134,16 @@ func (p *TwoIPProvider) Lookup(ctx context.Context, ip string) (*FallbackLocatio
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("2ip lookup: bad status: %d", resp.StatusCode)
+		bodyPreview := ""
+		rawBody, readErr := io.ReadAll(io.LimitReader(resp.Body, 512))
+		if readErr == nil {
+			bodyPreview = strings.TrimSpace(string(rawBody))
+		}
+		return nil, &httpStatusError{
+			Provider:   p.Name(),
+			StatusCode: resp.StatusCode,
+			Body:       bodyPreview,
+		}
 	}
 
 	var payload twoIPResponse

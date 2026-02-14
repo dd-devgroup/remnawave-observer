@@ -2,6 +2,7 @@ package geoip
 
 import (
 	"context"
+	"net/http"
 	"testing"
 )
 
@@ -163,6 +164,53 @@ func TestLookup_WithoutASNLookup_ContinuesGracefully(t *testing.T) {
 	// ASN should be empty when asnLookup is nil
 	if loc.ASN != "" {
 		t.Errorf("expected empty ASN with nil asnLookup, got %q", loc.ASN)
+	}
+}
+
+type fallbackProviderStub struct {
+	name  string
+	err   error
+	calls int
+}
+
+func (s *fallbackProviderStub) Name() string {
+	if s.name == "" {
+		return "stub"
+	}
+	return s.name
+}
+
+func (s *fallbackProviderStub) Lookup(ctx context.Context, ip string) (*FallbackLocation, error) {
+	s.calls++
+	return nil, s.err
+}
+
+func TestLookup_DisablesFallbackAfterUnauthorized(t *testing.T) {
+	svc := NewGeoIPService(nil, nil, nil, 0)
+	defer svc.Close()
+
+	fallback := &fallbackProviderStub{
+		name: "2ip",
+		err: &httpStatusError{
+			Provider:   "2ip",
+			StatusCode: http.StatusUnauthorized,
+			Body:       `{"error":"Unauthorized"}`,
+		},
+	}
+	svc.SetFallbackProvider(fallback)
+
+	if _, err := svc.Lookup(context.Background(), "8.8.8.8"); err != nil {
+		t.Fatalf("unexpected lookup error on first call: %v", err)
+	}
+	if fallback.calls != 1 {
+		t.Fatalf("expected 1 fallback call after first lookup, got %d", fallback.calls)
+	}
+
+	if _, err := svc.Lookup(context.Background(), "1.1.1.1"); err != nil {
+		t.Fatalf("unexpected lookup error on second call: %v", err)
+	}
+	if fallback.calls != 1 {
+		t.Fatalf("expected fallback to be disabled after 401, calls=%d", fallback.calls)
 	}
 }
 
