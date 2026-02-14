@@ -58,13 +58,21 @@ func (s *GeoIPService) Lookup(ctx context.Context, ip string) (*GeoLocation, err
 		}
 	}
 
-	// Start with iptoasn data
-	asnStr, countryCode, org, err := s.asnLookup.LookupFull(ip)
-	if err != nil {
-		log.Printf("[GeoIP] ASN lookup failed for %s: %v", ip, err)
-		asnStr = ""
-		countryCode = ""
-		org = ""
+	// Start with iptoasn data (with defensive nil check)
+	var asnStr, countryCode, org string
+	var err error
+
+	if s.asnLookup != nil {
+		asnStr, countryCode, org, err = s.asnLookup.LookupFull(ip)
+		if err != nil {
+			log.Printf("[GeoIP] ASN lookup failed for %s: %v", ip, err)
+			asnStr = ""
+			countryCode = ""
+			org = ""
+		}
+	} else {
+		// ASN lookup service unavailable - continue with MMDB only
+		log.Printf("[GeoIP] ASN lookup service unavailable for %s", ip)
 	}
 
 	location := &GeoLocation{

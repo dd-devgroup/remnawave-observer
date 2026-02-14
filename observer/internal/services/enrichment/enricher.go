@@ -2,11 +2,14 @@ package enrichment
 
 import (
 	"context"
+	"errors"
 	"log"
 	"time"
 
 	"observer_service/internal/database"
 	"observer_service/internal/services/geoip"
+
+	"gorm.io/gorm"
 )
 
 // EnrichmentResult represents the result of IP enrichment.
@@ -48,7 +51,16 @@ func (e *Enricher) Enrich(ctx context.Context, ip string) (*EnrichmentResult, er
 	// Tier 2: Postgres persistent cache
 	if e.repo != nil {
 		cached, err := e.repo.GetEnrichment(ctx, ip)
-		if err == nil && cached != nil {
+		if err != nil {
+			// Distinguish between "not found" (cache miss) vs real database errors
+			if !errors.Is(err, gorm.ErrRecordNotFound) {
+				// Real database error - log it but continue with degraded mode
+				log.Printf("[Enricher] Postgres cache error for %s: %v", ip, err)
+				// TODO: add metric postgres_cache_errors_total
+			}
+			// For both "not found" and "error" cases, continue to next tier
+		} else if cached != nil {
+			// Cache hit - return immediately
 			return &EnrichmentResult{
 				ASN:        cached.ASN,
 				Org:        cached.Org,

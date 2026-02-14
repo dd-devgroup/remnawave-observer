@@ -46,6 +46,9 @@ func (m *mockRepo) UpdateCandidateStatus(_ context.Context, _ uint, _ string) er
 func (m *mockRepo) GetActiveUsersForMonitor(_ context.Context, _ time.Time) ([]database.MonitorUserStats, error) {
 	return m.users, nil
 }
+func (m *mockRepo) GetLatestScoreEvent(_ context.Context, _ string) (*database.UserScoreEvent, error) {
+	return nil, nil
+}
 func (m *mockRepo) Close() error { return nil }
 
 func TestGetActiveUserEmails_Postgres(t *testing.T) {

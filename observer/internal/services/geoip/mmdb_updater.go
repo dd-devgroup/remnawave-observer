@@ -181,25 +181,29 @@ func (u *GeoLiteUpdater) triggerHotReload() error {
 	asnPath := u.getFilePath("asn")
 	cityPath := u.getFilePath("city")
 
-	// Check if files exist before trying to open
-	if _, err := os.Stat(asnPath); err != nil {
-		asnPath = ""
-	}
-	if _, err := os.Stat(cityPath); err != nil {
-		cityPath = ""
-	}
-
+	// Try to open MMDB reader with current file paths
+	// Don't check file existence beforehand to avoid TOCTOU race
+	// NewMMDBReader will return error if both paths are empty or if files can't be opened
 	newReader, err := NewMMDBReader(asnPath, cityPath)
 	if err != nil {
-		return fmt.Errorf("failed to open MMDB files: %w", err)
+		return fmt.Errorf("MMDB files not ready for hot-reload: %w", err)
 	}
 
+	// Swap the reader atomically
 	if err := u.geoService.UpdateMMDBReader(newReader); err != nil {
 		newReader.Close()
 		return fmt.Errorf("failed to update MMDB reader: %w", err)
 	}
 
-	log.Println("[GeoLiteUpdater] MMDB hot-reload successful")
+	// Log which databases were loaded
+	var loadedDBs []string
+	if newReader.asnDB != nil {
+		loadedDBs = append(loadedDBs, "ASN")
+	}
+	if newReader.cityDB != nil {
+		loadedDBs = append(loadedDBs, "City")
+	}
+	log.Printf("[GeoLiteUpdater] MMDB hot-reload successful (loaded: %v)", loadedDBs)
 	return nil
 }
 

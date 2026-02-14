@@ -16,17 +16,16 @@ func TestGeoIPService_Close_NilMMDB(t *testing.T) {
 // --- MMDBReader construction ---
 
 func TestNewMMDBReader_EmptyPaths(t *testing.T) {
+	// Empty paths should return an error (validation added to prevent empty reader)
 	reader, err := NewMMDBReader("", "")
-	if err != nil {
-		t.Fatalf("expected no error for empty paths, got %v", err)
+	if err == nil {
+		if reader != nil {
+			reader.Close()
+		}
+		t.Fatal("expected error for empty paths, got nil")
 	}
-	defer reader.Close()
-
-	if reader.asnDB != nil {
-		t.Error("expected nil asnDB for empty path")
-	}
-	if reader.cityDB != nil {
-		t.Error("expected nil cityDB for empty path")
+	if reader != nil {
+		t.Error("expected nil reader when error is returned")
 	}
 }
 
@@ -149,15 +148,20 @@ func TestNewGeoIPService_NilMMDB(t *testing.T) {
 
 // --- Lookup requires asnLookup ---
 
-func TestLookup_WithoutASNLookup_Panics(t *testing.T) {
+func TestLookup_WithoutASNLookup_ContinuesGracefully(t *testing.T) {
+	// Test that Lookup handles nil asnLookup gracefully instead of panicking
 	svc := NewGeoIPService(nil, nil, nil, 0)
 	defer svc.Close()
 
-	defer func() {
-		if r := recover(); r == nil {
-			t.Fatal("expected panic when asnLookup is nil")
-		}
-	}()
-
-	_, _ = svc.Lookup(context.Background(), "8.8.8.8")
+	loc, err := svc.Lookup(context.Background(), "8.8.8.8")
+	if err != nil {
+		t.Fatalf("unexpected error with nil asnLookup: %v", err)
+	}
+	if loc == nil {
+		t.Fatal("expected non-nil location even with nil asnLookup")
+	}
+	// ASN should be empty when asnLookup is nil
+	if loc.ASN != "" {
+		t.Errorf("expected empty ASN with nil asnLookup, got %q", loc.ASN)
+	}
 }
