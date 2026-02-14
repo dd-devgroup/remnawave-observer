@@ -175,10 +175,11 @@ func (p *LogProcessor) StartBatchWriter(ctx context.Context, wg *sync.WaitGroup)
 }
 
 // EnqueueEntries adds a batch of logs to the processing queue.
-func (p *LogProcessor) EnqueueEntries(entries []models.LogEntry) error {
+func (p *LogProcessor) EnqueueEntries(entries []models.LogEntry) (err error) {
 	defer func() {
 		if r := recover(); r != nil {
 			log.Println("Attempted to write to closed log channel. Service is shutting down")
+			err = errors.New("log channel is closed, service is shutting down")
 		}
 	}()
 
