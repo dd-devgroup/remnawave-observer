@@ -38,6 +38,11 @@ type cityRecord struct {
 
 // NewMMDBReader opens GeoLite2 MMDB files. Either path can be empty to skip that database.
 func NewMMDBReader(asnPath, cityPath string) (*MMDBReader, error) {
+	// Validate that at least one path is provided
+	if asnPath == "" && cityPath == "" {
+		return nil, fmt.Errorf("both ASN and City MMDB paths are empty")
+	}
+
 	r := &MMDBReader{}
 
 	if asnPath != "" {

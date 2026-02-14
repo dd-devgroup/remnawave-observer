@@ -389,6 +389,12 @@ func (p *LogProcessor) processEntryByASN(ctx context.Context, entry models.LogEn
 				Lon:          lon,
 			})
 		}
+
+		// Calculate and persist scoring for the new ASN
+		// This enables progressive enforcement (monitor/warn/temp_disable) based on score
+		if p.cfg.ScoringEnabled && p.scorer != nil && p.repo != nil {
+			_, _, _ = p.calculateAndPersistScore(ctx, entry, identifier, orgName, true, res.AllUserItems)
+		}
 	}
 
 	if res.StatusCode == 1 { // Limit exceeded, enforcement
@@ -407,21 +413,22 @@ func (p *LogProcessor) processEntryByASN(ctx context.Context, entry models.LogEn
 		alertPayload.AllUserASNs = res.AllUserItems
 		alertPayload.ASNDetails = p.collectASNDetails(ctx, entry.UserEmail, res.AllUserItems, identifier, entry.SourceIP)
 
-		// Perform enhanced analytics if enabled
-		if p.cfg.ScoringEnabled || p.cfg.GeoIPEnabled {
-			geoResult, providerTypes, violationScore := p.performEnhancedAnalytics(
-				ctx,
-				entry.UserEmail,
-				res.AllUserItems,
-				alertPayload.ASNDetails,
-			)
+		// Calculate and persist scoring (this also handles enforcement for high scores)
+		var geoResult *models.GeoAnalysisResult
+		var providerTypes map[string]string
+		var violationScore *scoring.ViolationScore
+		if p.cfg.ScoringEnabled && p.scorer != nil && p.repo != nil {
+			geoResult, providerTypes, violationScore = p.calculateAndPersistScore(ctx, entry, identifier, orgName, res.IsNew, res.AllUserItems)
 
+			// Populate alert payload with geo and provider data
 			if geoResult != nil {
 				alertPayload.GeoAnalysis = geoResult
 			}
 			if providerTypes != nil {
 				alertPayload.ProviderTypes = providerTypes
 			}
+
+			// Populate alert payload with scoring data
 			if violationScore != nil {
 				score := violationScore.FinalScore
 				alertPayload.Score = &score
@@ -430,7 +437,7 @@ func (p *LogProcessor) processEntryByASN(ctx context.Context, entry models.LogEn
 				alertPayload.ScoreConfidence = &conf
 				alertPayload.ScoreModifiers = violationScore.Modifiers
 
-				// Convert feature results to model
+				// Convert feature results to model for alert
 				breakdown := make([]models.ScoreFeatureResult, 0, len(violationScore.Features))
 				for _, f := range violationScore.Features {
 					breakdown = append(breakdown, models.ScoreFeatureResult{
@@ -443,28 +450,35 @@ func (p *LogProcessor) processEntryByASN(ctx context.Context, entry models.LogEn
 				}
 				alertPayload.ScoreBreakdown = breakdown
 
-				// Persist scoring event to database
-				if p.repo != nil {
-					breakdownJSON, _ := json.Marshal(breakdown)
-					scoreEvent := &database.UserScoreEvent{
-						UserID:         entry.UserEmail,
-						SourceIP:       entry.SourceIP,
-						ASN:            identifier,
-						IsNewASN:       res.IsNew,
-						ScoreTotal:     violationScore.FinalScore,
-						ScoreAction:    string(violationScore.Action),
-						ScoreBreakdown: string(breakdownJSON),
-					}
-					if err := p.repo.InsertScoreEvent(ctx, scoreEvent); err != nil {
-						log.Printf("Error saving score event for %s: %v", entry.UserEmail, err)
-					}
-				}
-
+				// If score says "none" action, cancel the limit-based block
 				if violationScore.Action == scoring.ActionNone {
-					log.Printf("[Anti-Abuse] Score %.1f for %s, action=none, block cancelled",
+					log.Printf("[Anti-Abuse] Score %.1f for %s, action=none, limit-based block cancelled",
 						violationScore.FinalScore, entry.UserEmail)
 					return
 				}
+			}
+		}
+
+		// Perform geo analysis for alert payload (if GeoIP enabled but scoring disabled)
+		if p.cfg.GeoIPEnabled && p.geoService != nil && p.geoAnalyzer != nil && geoResult == nil {
+			geoResultInternal, provTypes, _ := p.performEnhancedAnalytics(
+				ctx,
+				entry.UserEmail,
+				res.AllUserItems,
+				alertPayload.ASNDetails,
+			)
+			if geoResultInternal != nil {
+				alertPayload.GeoAnalysis = &models.GeoAnalysisResult{
+					UniqueCountries: geoResultInternal.UniqueCountries,
+					UniqueCities:    geoResultInternal.UniqueCities,
+					Agglomerations:  geoResultInternal.Agglomerations,
+					MaxDistanceKM:   geoResultInternal.MaxDistanceKM,
+					GeoScore:        geoResultInternal.GeoScore,
+					GeoFlags:        geoResultInternal.GeoFlags,
+				}
+			}
+			if provTypes != nil {
+				alertPayload.ProviderTypes = provTypes
 			}
 		}
 
@@ -735,6 +749,127 @@ func (p *LogProcessor) performEnhancedAnalytics(
 	log.Printf("[Anti-Abuse] Analysis for %s: GeoScore=%d, ASNScore=%.1f, FinalScore=%.1f, Confidence=%.2f, Action=%s",
 		email, geoResult.GeoScore, violationScore.GetFeatureScore("asn"),
 		violationScore.FinalScore, violationScore.Confidence, violationScore.Action)
+
+	return geoResult, providerTypes, violationScore
+}
+
+// calculateAndPersistScore performs scoring analysis for a user ASN event,
+// persists the result to database, and applies progressive enforcement actions.
+// Returns: geoResult, providerTypes, violationScore
+func (p *LogProcessor) calculateAndPersistScore(
+	ctx context.Context,
+	entry models.LogEntry,
+	identifier string, // ASN
+	orgName string,
+	isNewASN bool,
+	allASNs []string,
+) (*models.GeoAnalysisResult, map[string]string, *scoring.ViolationScore) {
+	// Skip if scoring disabled or components not initialized
+	if !p.cfg.ScoringEnabled || p.scorer == nil || p.repo == nil {
+		return nil, nil, nil
+	}
+
+	// Collect ASN details for analytics
+	asnDetails := p.collectASNDetails(ctx, entry.UserEmail, allASNs, identifier, entry.SourceIP)
+	if len(asnDetails) == 0 {
+		log.Printf("[Scoring] No ASN details available for %s", entry.UserEmail)
+		return nil, nil, nil
+	}
+
+	// Perform enhanced analytics (geo analysis + provider classification + scoring)
+	geoResultInternal, providerTypes, violationScore := p.performEnhancedAnalytics(
+		ctx,
+		entry.UserEmail,
+		allASNs,
+		asnDetails,
+	)
+
+	if violationScore == nil {
+		return nil, nil, nil
+	}
+
+	// Convert geoResult to model type
+	var geoResult *models.GeoAnalysisResult
+	if geoResultInternal != nil {
+		geoResult = &models.GeoAnalysisResult{
+			UniqueCountries: geoResultInternal.UniqueCountries,
+			UniqueCities:    geoResultInternal.UniqueCities,
+			Agglomerations:  geoResultInternal.Agglomerations,
+			MaxDistanceKM:   geoResultInternal.MaxDistanceKM,
+			GeoScore:        geoResultInternal.GeoScore,
+			GeoFlags:        geoResultInternal.GeoFlags,
+		}
+	}
+
+	// Convert feature results to model for persistence
+	breakdown := make([]models.ScoreFeatureResult, 0, len(violationScore.Features))
+	for _, f := range violationScore.Features {
+		breakdown = append(breakdown, models.ScoreFeatureResult{
+			Name:       f.Name,
+			Score:      f.Score,
+			Weight:     f.Weight,
+			Confidence: f.Confidence,
+			Details:    f.Details,
+		})
+	}
+
+	// Persist scoring event to user_score_events table
+	breakdownJSON, _ := json.Marshal(breakdown)
+	scoreEvent := &database.UserScoreEvent{
+		UserID:         entry.UserEmail,
+		SourceIP:       entry.SourceIP,
+		ASN:            identifier,
+		IsNewASN:       isNewASN,
+		ScoreTotal:     violationScore.FinalScore,
+		ScoreAction:    string(violationScore.Action),
+		ScoreBreakdown: string(breakdownJSON),
+	}
+	if err := p.repo.InsertScoreEvent(ctx, scoreEvent); err != nil {
+		log.Printf("[Scoring] Error saving score event for %s: %v", entry.UserEmail, err)
+	}
+
+	log.Printf("[Scoring] User %s: Score=%.1f, Confidence=%.2f, Action=%s (isNew=%v)",
+		entry.UserEmail, violationScore.FinalScore, violationScore.Confidence,
+		violationScore.Action, isNewASN)
+
+	// Persist antiabuse action if action is significant (>= monitor)
+	// Actions: none < monitor < warn < soft_challenge < temp_disable < hard_disable
+	if violationScore.Action != scoring.ActionNone {
+		actionRecord := &database.AntiAbuseAction{
+			UserID:         entry.UserEmail,
+			ActionType:     string(violationScore.Action),
+			Reason:         fmt.Sprintf("new_asn_scoring: ASN=%s, score=%.1f", identifier, violationScore.FinalScore),
+			Score:          violationScore.FinalScore,
+			ScoreBreakdown: string(breakdownJSON),
+		}
+		if err := p.repo.InsertAction(ctx, actionRecord); err != nil {
+			log.Printf("[Scoring] Error saving antiabuse action for %s: %v", entry.UserEmail, err)
+		}
+	}
+
+	// Apply enforcement for temp_disable or hard_disable actions
+	if violationScore.Action == scoring.ActionTempDisable || violationScore.Action == scoring.ActionHardDisable {
+		enfReason := fmt.Sprintf("scoring_threshold_exceeded: ASN=%s, score=%.1f, action=%s",
+			identifier, violationScore.FinalScore, violationScore.Action)
+		enfScore := int(violationScore.FinalScore)
+
+		if err := p.disableUser(ctx, entry.UserEmail, enfReason, enfScore); err != nil {
+			log.Printf("[Scoring] Enforcement error for %s: %v", entry.UserEmail, err)
+		} else {
+			log.Printf("[Scoring] User %s disabled due to score=%.1f, action=%s",
+				entry.UserEmail, violationScore.FinalScore, violationScore.Action)
+		}
+
+		// Log for debugging (include geo/provider info if available)
+		debugInfo := fmt.Sprintf("ASN=%s", identifier)
+		if geoResult != nil {
+			debugInfo += fmt.Sprintf(", GeoScore=%d, Countries=%d", geoResult.GeoScore, len(geoResult.UniqueCountries))
+		}
+		if providerTypes != nil && len(providerTypes) > 0 {
+			debugInfo += fmt.Sprintf(", Providers=%v", providerTypes)
+		}
+		log.Printf("[Scoring] Enforcement details for %s: %s", entry.UserEmail, debugInfo)
+	}
 
 	return geoResult, providerTypes, violationScore
 }
