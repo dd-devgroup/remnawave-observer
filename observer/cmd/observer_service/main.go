@@ -126,6 +126,15 @@ func main() {
 
 		// Initialize GeoIP service
 		geoService = geoip.NewGeoIPService(asnLookup, mmdbReader, redisStore.GetClient(), cfg.GeoIPCacheTTL)
+		if cfg.GeoFallbackEnabled {
+			if cfg.TwoIPToken == "" {
+				log.Printf("[Observer] Geo fallback requested but TWOIP_TOKEN is empty; fallback disabled")
+			} else {
+				fallbackProvider := geoip.NewTwoIPProvider(cfg.TwoIPBaseURL, cfg.TwoIPToken, cfg.GeoFallbackTimeout)
+				geoService.SetFallbackProvider(fallbackProvider)
+				log.Printf("[Observer] Geo fallback enabled via %s", fallbackProvider.Name())
+			}
+		}
 		geoAnalyzer = geoip.NewGeoAnalyzer(geoService, geoDataLoader)
 		log.Printf("[Observer] GeoIP service initialized (cache TTL: %v, MMDB: %v)", cfg.GeoIPCacheTTL, mmdbReader != nil)
 		updaterManager.SetGeoService(geoService)

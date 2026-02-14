@@ -306,8 +306,14 @@ func (m *PoolMonitor) buildUserGeo(ctx context.Context, user models.UserIPStats)
 
 func formatIPWithGeo(ip string, loc *geoip.GeoLocation) string {
 	if loc == nil {
-		return fmt.Sprintf("%s -> no data", ip)
+		return fmt.Sprintf("%s -> no data [src:none]", ip)
 	}
+
+	source := loc.Source
+	if source == "" {
+		source = "unknown"
+	}
+
 	country := loc.CountryCode
 	if country == "" {
 		country = "??"
@@ -316,7 +322,10 @@ func formatIPWithGeo(ip string, loc *geoip.GeoLocation) string {
 	if city == "" {
 		city = "-"
 	}
-	return fmt.Sprintf("%s -> %s, %s (%.2f, %.2f)", ip, country, city, loc.Latitude, loc.Longitude)
+	if loc.Latitude == 0 && loc.Longitude == 0 {
+		return fmt.Sprintf("%s -> %s, %s (no geo position) [src:%s]", ip, country, city, source)
+	}
+	return fmt.Sprintf("%s -> %s, %s (%.2f, %.2f) [src:%s]", ip, country, city, loc.Latitude, loc.Longitude, source)
 }
 
 func formatIPsWithGeo(ips []string, geoByIP map[string]*geoip.GeoLocation) string {

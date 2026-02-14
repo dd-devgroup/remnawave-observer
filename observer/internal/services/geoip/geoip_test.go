@@ -165,3 +165,42 @@ func TestLookup_WithoutASNLookup_ContinuesGracefully(t *testing.T) {
 		t.Errorf("expected empty ASN with nil asnLookup, got %q", loc.ASN)
 	}
 }
+
+func TestMergeFallbackLocation_FillsMissingFields(t *testing.T) {
+	location := &GeoLocation{
+		Source:      "mmdb",
+		CountryCode: "RU",
+	}
+	fallback := &FallbackLocation{
+		City:           "Samara",
+		Latitude:       53.1959,
+		Longitude:      50.1008,
+		HasCoordinates: true,
+		Source:         "2ip",
+		Confidence:     0.85,
+	}
+
+	mergeFallbackLocation(location, fallback)
+
+	if location.City != "Samara" {
+		t.Fatalf("expected city Samara, got %q", location.City)
+	}
+	if location.Latitude == 0 || location.Longitude == 0 {
+		t.Fatalf("expected coordinates from fallback, got %.4f, %.4f", location.Latitude, location.Longitude)
+	}
+	if location.Source != "mmdb+2ip" {
+		t.Fatalf("expected merged source mmdb+2ip, got %q", location.Source)
+	}
+}
+
+func TestNeedsFallbackGeo(t *testing.T) {
+	if !needsFallbackGeo(&GeoLocation{City: "", Latitude: 10, Longitude: 10}) {
+		t.Fatal("expected fallback when city is empty")
+	}
+	if !needsFallbackGeo(&GeoLocation{City: "Moscow", Latitude: 0, Longitude: 0}) {
+		t.Fatal("expected fallback when coordinates are missing")
+	}
+	if needsFallbackGeo(&GeoLocation{City: "Moscow", Latitude: 55.7, Longitude: 37.6}) {
+		t.Fatal("did not expect fallback for complete geo")
+	}
+}

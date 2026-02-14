@@ -13,9 +13,9 @@ type Config struct {
 	Port                        string
 	PostgresDSN                 string // DSN for PostgreSQL (required, fatal if empty)
 	RedisURL                    string
-	ScanMaxKeys                 int    // Макс. количество ключей при SCAN (default: 10000)
-	ScanCount                   int    // Hint COUNT для Redis SCAN (default: 100)
-	ScanTimeBudgetSeconds       int    // Макс. время одной SCAN операции в секундах (default: 30)
+	ScanMaxKeys                 int // Макс. количество ключей при SCAN (default: 10000)
+	ScanCount                   int // Hint COUNT для Redis SCAN (default: 100)
+	ScanTimeBudgetSeconds       int // Макс. время одной SCAN операции в секундах (default: 30)
 	AlertWebhookURL             string
 	AlertCooldown               time.Duration
 	ClearIPsDelay               time.Duration
@@ -29,25 +29,29 @@ type Config struct {
 	LogChannelBufferSize        int
 	SideEffectWorkerPoolSize    int
 	SideEffectChannelBufferSize int
-	SideEffectTimeout          time.Duration // Таймаут на одну побочную задачу (default: 10s)
+	SideEffectTimeout           time.Duration // Таймаут на одну побочную задачу (default: 10s)
 
 	// --- ПАРАМЕТРЫ ДЛЯ РЕЖИМА ASN ---
-	IPtoASNDownloadURL   string          // URL для скачивания базы iptoasn.com
-	IPtoASNUpdateInterval time.Duration  // Интервал обновления базы ASN
-	MaxASNsPerUser       int             // Лимит уникальных ASN на пользователя
-	UserASNTTL           time.Duration   // TTL для ASN записей пользователя
-	ExcludedASNs         map[string]bool // ASN которые не считаются (например Cloudflare, Google)
+	IPtoASNDownloadURL    string          // URL для скачивания базы iptoasn.com
+	IPtoASNUpdateInterval time.Duration   // Интервал обновления базы ASN
+	MaxASNsPerUser        int             // Лимит уникальных ASN на пользователя
+	UserASNTTL            time.Duration   // TTL для ASN записей пользователя
+	ExcludedASNs          map[string]bool // ASN которые не считаются (например Cloudflare, Google)
 
 	// --- ПАРАМЕТРЫ GEOIP ---
-	GeoIPEnabled        bool          // Включить GeoIP анализ
-	GeoIPCacheTTL       time.Duration // TTL для кэша GeoIP (default: 24 часа)
-	GeoLiteASNPath             string        // Path to GeoLite2-ASN.mmdb (default: /app/data/GeoLite2-ASN.mmdb)
-	GeoLiteCityPath            string        // Path to GeoLite2-City.mmdb (default: /app/data/GeoLite2-City.mmdb)
-	GeoLiteASNDownloadURL      string        // P3TERX GitHub mirror URL for GeoLite2-ASN.mmdb auto-download
-	GeoLiteCityDownloadURL     string        // P3TERX GitHub mirror URL for GeoLite2-City.mmdb auto-download
-	GeoLiteUpdateInterval      time.Duration // Auto-update interval for GeoLite2 MMDB files (default: 168 hours = 7 days)
-	GeoDataConfigDir           string        // Директория с конфигами (agglomerations.yaml, providers.yaml)
-	GeoDataDataDir             string        // Директория для записываемых данных (unknown_providers.json, backups)
+	GeoIPEnabled           bool          // Включить GeoIP анализ
+	GeoIPCacheTTL          time.Duration // TTL для кэша GeoIP (default: 24 часа)
+	GeoFallbackEnabled     bool          // Enable fallback Geo API (2IP)
+	GeoFallbackTimeout     time.Duration // Timeout for fallback API requests (default: 3s)
+	TwoIPToken             string        // API token for 2IP fallback lookups
+	TwoIPBaseURL           string        // Base URL for 2IP API (default: https://api.2ip.io)
+	GeoLiteASNPath         string        // Path to GeoLite2-ASN.mmdb (default: /app/data/GeoLite2-ASN.mmdb)
+	GeoLiteCityPath        string        // Path to GeoLite2-City.mmdb (default: /app/data/GeoLite2-City.mmdb)
+	GeoLiteASNDownloadURL  string        // P3TERX GitHub mirror URL for GeoLite2-ASN.mmdb auto-download
+	GeoLiteCityDownloadURL string        // P3TERX GitHub mirror URL for GeoLite2-City.mmdb auto-download
+	GeoLiteUpdateInterval  time.Duration // Auto-update interval for GeoLite2 MMDB files (default: 168 hours = 7 days)
+	GeoDataConfigDir       string        // Директория с конфигами (agglomerations.yaml, providers.yaml)
+	GeoDataDataDir         string        // Директория для записываемых данных (unknown_providers.json, backups)
 
 	// --- ПАРАМЕТРЫ СКОРИНГА ---
 	ScoringEnabled      bool    // Включить систему скоринга
@@ -62,14 +66,14 @@ type Config struct {
 	UnknownProvidersLogEnabled bool // Включить логирование неизвестных провайдеров (default: false)
 
 	// Автоматическое обучение
-	AutoLearningEnabled       bool          // Включить автоматическое обучение (default: false)
-	AutoLearningInterval      time.Duration // Интервал проверки (default: 24 часа)
-	AutoLearningMinCount      int           // Минимальное количество встреч для автодобавления (default: 10)
-	AutoLearningMinConfidence string        // Минимальный уровень уверенности: high, medium (default: high)
-	AutoLearningMaxAddsPerRun        int           // Макс. добавлений за один цикл (default: 20)
-	AutoLearningOutputFile           string        // Имя overlay файла в dataDir (default: providers.learned.yaml)
-	AutoLearnMinDistinctUsers        int           // Min distinct users per ASN for Postgres learning (default: 3)
-	AutoLearnAutoApproveThreshold    float64       // Auto-approve confidence threshold (default: 0.8)
+	AutoLearningEnabled           bool          // Включить автоматическое обучение (default: false)
+	AutoLearningInterval          time.Duration // Интервал проверки (default: 24 часа)
+	AutoLearningMinCount          int           // Минимальное количество встреч для автодобавления (default: 10)
+	AutoLearningMinConfidence     string        // Минимальный уровень уверенности: high, medium (default: high)
+	AutoLearningMaxAddsPerRun     int           // Макс. добавлений за один цикл (default: 20)
+	AutoLearningOutputFile        string        // Имя overlay файла в dataDir (default: providers.learned.yaml)
+	AutoLearnMinDistinctUsers     int           // Min distinct users per ASN for Postgres learning (default: 3)
+	AutoLearnAutoApproveThreshold float64       // Auto-approve confidence threshold (default: 0.8)
 
 	// --- ПАРАМЕТРЫ CAIDA AS2Org ---
 	CAIDAEnabled      bool   // Включить загрузку CAIDA AS-Organizations (default: true)
@@ -77,12 +81,12 @@ type Config struct {
 	CAIDARefreshHours int    // Интервал обновления в часах (default: 168 = 7 дней)
 
 	// --- ПАРАМЕТРЫ REMNAWAVE ENFORCEMENT ---
-	RemnawaveBaseURL         string        // Base URL Remnawave панели (например: https://panel.example.com)
-	RemnawaveAPIToken        string        // API токен для аутентификации (X-Api-Key)
-	RemnawaveTimeoutSeconds  int           // Таймаут HTTP запросов к Remnawave (default: 5)
-	UserIDUUIDCacheTTLHours  int           // TTL кэша internal_id→uuid в часах (default: 24)
-	ReenableTickSeconds      int           // Интервал проверки просроченных disable в секундах (default: 10)
-	ReenableBatchSize        int           // Максимальное количество enable за одну итерацию (default: 100)
+	RemnawaveBaseURL        string // Base URL Remnawave панели (например: https://panel.example.com)
+	RemnawaveAPIToken       string // API токен для аутентификации (X-Api-Key)
+	RemnawaveTimeoutSeconds int    // Таймаут HTTP запросов к Remnawave (default: 5)
+	UserIDUUIDCacheTTLHours int    // TTL кэша internal_id→uuid в часах (default: 24)
+	ReenableTickSeconds     int    // Интервал проверки просроченных disable в секундах (default: 10)
+	ReenableBatchSize       int    // Максимальное количество enable за одну итерацию (default: 100)
 }
 
 // New загружает конфигурацию из переменных окружения.
@@ -107,7 +111,7 @@ func New() *Config {
 		LogChannelBufferSize:        getEnvInt("LOG_CHANNEL_BUFFER_SIZE", 100),
 		SideEffectWorkerPoolSize:    getEnvInt("SIDE_EFFECT_WORKER_POOL_SIZE", 10),
 		SideEffectChannelBufferSize: getEnvInt("SIDE_EFFECT_CHANNEL_BUFFER_SIZE", 50),
-		SideEffectTimeout:          time.Duration(getEnvInt("SIDE_EFFECT_TIMEOUT_SECONDS", 10)) * time.Second,
+		SideEffectTimeout:           time.Duration(getEnvInt("SIDE_EFFECT_TIMEOUT_SECONDS", 10)) * time.Second,
 
 		// --- Загрузка параметров входящих запросов ---
 		MaxRequestBytes:         int64(getEnvInt("MAX_REQUEST_BYTES", 2*1024*1024)),
@@ -123,6 +127,10 @@ func New() *Config {
 		// --- Загрузка параметров GeoIP ---
 		GeoIPEnabled:           getEnvBool("GEOIP_ENABLED", false),
 		GeoIPCacheTTL:          time.Duration(getEnvInt("GEOIP_CACHE_TTL_HOURS", 24)) * time.Hour,
+		GeoFallbackEnabled:     getEnvBool("GEO_FALLBACK_ENABLED", false),
+		GeoFallbackTimeout:     time.Duration(getEnvInt("GEO_FALLBACK_TIMEOUT_SECONDS", 3)) * time.Second,
+		TwoIPToken:             getEnv("TWOIP_TOKEN", ""),
+		TwoIPBaseURL:           getEnv("TWOIP_BASE_URL", "https://api.2ip.io"),
 		GeoLiteASNPath:         getEnv("GEOLITE_ASN_PATH", "/app/data/GeoLite2-ASN.mmdb"),
 		GeoLiteCityPath:        getEnv("GEOLITE_CITY_PATH", "/app/data/GeoLite2-City.mmdb"),
 		GeoLiteASNDownloadURL:  getEnv("GEOLITE_ASN_DOWNLOAD_URL", "https://raw.githubusercontent.com/P3TERX/GeoLite.mmdb/download/GeoLite2-ASN.mmdb"),
@@ -137,15 +145,15 @@ func New() *Config {
 		ScoreThresholdBlock: getEnvFloat("SCORE_THRESHOLD_BLOCK", 85.0),
 
 		// --- Загрузка параметров автообучения ---
-		UnknownProvidersLogEnabled: getEnvBool("UNKNOWN_PROVIDERS_LOG_ENABLED", false),
-		AutoLearningEnabled:        getEnvBool("AUTO_LEARNING_ENABLED", false),
-		AutoLearningInterval:       time.Duration(getEnvInt("AUTO_LEARNING_INTERVAL_HOURS", 24)) * time.Hour,
-		AutoLearningMinCount:       getEnvInt("AUTO_LEARNING_MIN_COUNT", 10),
-		AutoLearningMinConfidence:  getEnv("AUTO_LEARNING_MIN_CONFIDENCE", "high"),
-		AutoLearningMaxAddsPerRun:        getEnvInt("AUTO_LEARNING_MAX_ADDS_PER_RUN", 20),
-		AutoLearningOutputFile:           getEnv("AUTO_LEARNING_OUTPUT_FILE", "providers.learned.yaml"),
-		AutoLearnMinDistinctUsers:        getEnvInt("AUTO_LEARN_MIN_DISTINCT_USERS", 3),
-		AutoLearnAutoApproveThreshold:    getEnvFloat("AUTO_LEARN_AUTO_APPROVE_THRESHOLD", 0.8),
+		UnknownProvidersLogEnabled:    getEnvBool("UNKNOWN_PROVIDERS_LOG_ENABLED", false),
+		AutoLearningEnabled:           getEnvBool("AUTO_LEARNING_ENABLED", false),
+		AutoLearningInterval:          time.Duration(getEnvInt("AUTO_LEARNING_INTERVAL_HOURS", 24)) * time.Hour,
+		AutoLearningMinCount:          getEnvInt("AUTO_LEARNING_MIN_COUNT", 10),
+		AutoLearningMinConfidence:     getEnv("AUTO_LEARNING_MIN_CONFIDENCE", "high"),
+		AutoLearningMaxAddsPerRun:     getEnvInt("AUTO_LEARNING_MAX_ADDS_PER_RUN", 20),
+		AutoLearningOutputFile:        getEnv("AUTO_LEARNING_OUTPUT_FILE", "providers.learned.yaml"),
+		AutoLearnMinDistinctUsers:     getEnvInt("AUTO_LEARN_MIN_DISTINCT_USERS", 3),
+		AutoLearnAutoApproveThreshold: getEnvFloat("AUTO_LEARN_AUTO_APPROVE_THRESHOLD", 0.8),
 
 		// --- CAIDA AS2Org ---
 		CAIDAEnabled:      getEnvBool("CAIDA_ENABLED", true),
@@ -174,6 +182,9 @@ func New() *Config {
 	if cfg.ReenableBatchSize < 1 {
 		cfg.ReenableBatchSize = 100
 	}
+	if cfg.GeoFallbackTimeout < 1*time.Second {
+		cfg.GeoFallbackTimeout = 3 * time.Second
+	}
 
 	log.Printf("Configuration loaded. Port: %s", cfg.Port)
 	log.Printf("Detection mode: ASN (providers). Limit: %d providers per user", cfg.MaxASNsPerUser)
@@ -194,6 +205,11 @@ func New() *Config {
 	}
 	if cfg.GeoIPEnabled {
 		log.Printf("GeoIP analysis enabled. Cache TTL: %v, Config dir: %s, Data dir: %s", cfg.GeoIPCacheTTL, cfg.GeoDataConfigDir, cfg.GeoDataDataDir)
+		if cfg.GeoFallbackEnabled && cfg.TwoIPToken != "" {
+			log.Printf("GeoIP fallback via 2IP enabled. Timeout: %v, Base URL: %s", cfg.GeoFallbackTimeout, cfg.TwoIPBaseURL)
+		} else if cfg.GeoFallbackEnabled {
+			log.Printf("GeoIP fallback enabled but TWOIP_TOKEN is empty; fallback lookups are disabled")
+		}
 	}
 	if cfg.ScoringEnabled {
 		log.Printf("Scoring system enabled. Warn threshold: %.1f, Block threshold: %.1f", cfg.ScoreThresholdWarn, cfg.ScoreThresholdBlock)

@@ -101,7 +101,17 @@ CAIDA_REFRESH_HOURS=168            # Обновлять раз в неделю
 
 # GeoLite updates
 GEOLITE_UPDATE_INTERVAL_HOURS=168  # Обновлять раз в неделю
+
+# External Geo fallback (2IP)
+GEO_FALLBACK_ENABLED=false
+GEO_FALLBACK_TIMEOUT_SECONDS=3
+TWOIP_TOKEN=your_2ip_token
+TWOIP_BASE_URL=https://api.2ip.io
 ```
+
+Fallback lookup is used only when GeoLite2 returns incomplete geo data
+(empty city or missing coordinates), and only if `GEO_FALLBACK_ENABLED=true`
+and `TWOIP_TOKEN` is set.
 
 **Примечание**: Фоновые обновления данных (ASN/CAIDA/GeoLite) являются **обязательными** и всегда включены. Они запускаются автоматически при старте сервиса.
 
@@ -195,6 +205,12 @@ IPTOASN_UPDATE_INTERVAL_MINUTES=60
 CAIDA_REFRESH_HOURS=168
 GEOLITE_UPDATE_INTERVAL_HOURS=168
 
+# External Geo fallback (2IP)
+GEO_FALLBACK_ENABLED=false
+GEO_FALLBACK_TIMEOUT_SECONDS=3
+TWOIP_TOKEN=your_2ip_token
+TWOIP_BASE_URL=https://api.2ip.io
+
 # Перезапустите после изменения .env:
 docker-compose restart observer
 ```
@@ -240,3 +256,4 @@ docker push quay.io/fxfuren/remnawave-observer:latest
 ---
 
 **Вопросы?** Проверьте логи: `docker logs observer`
+
