@@ -16,10 +16,6 @@ services:
       - ./config:/app/config:ro # Anti-Abuse configs (agglomerations.yaml, providers.yaml)
     env_file:
       - .env
-    environment:
-      # Data updater is integrated into observer service (runs as background goroutine)
-      # Set UPDATER_ENABLED=false to disable background updates if needed
-      - UPDATER_ENABLED=true
     depends_on:
       vector-aggregator:
         condition: service_healthy

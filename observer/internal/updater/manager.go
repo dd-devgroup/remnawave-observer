@@ -20,7 +20,6 @@ type Manager struct {
 	as2orgLoader   *geodata.AS2OrgLoader
 	geoLiteUpdater *geoip.GeoLiteUpdater
 	geoService     *geoip.GeoIPService // for hot-reload callback
-	enabled        bool
 }
 
 // NewManager creates a new updater manager.
@@ -29,18 +28,12 @@ func NewManager(cfg *config.Config, geoService *geoip.GeoIPService) *Manager {
 	return &Manager{
 		cfg:        cfg,
 		geoService: geoService,
-		enabled:    cfg.UpdaterEnabled,
 	}
 }
 
 // Start initializes all updaters and performs initial data load.
 // Returns error if critical initialization fails.
 func (m *Manager) Start(ctx context.Context) error {
-	if !m.enabled {
-		log.Println("[Updater] Data updater disabled via UPDATER_ENABLED=false")
-		return nil
-	}
-
 	log.Println("========================================")
 	log.Println("  Data Updater Manager Starting")
 	log.Println("========================================")
@@ -102,10 +95,6 @@ func (m *Manager) Start(ctx context.Context) error {
 // Run starts background refresh goroutines for all updaters.
 // Blocks until context is cancelled.
 func (m *Manager) Run(ctx context.Context, wg *sync.WaitGroup) {
-	if !m.enabled {
-		return
-	}
-
 	defer wg.Done()
 
 	var localWg sync.WaitGroup

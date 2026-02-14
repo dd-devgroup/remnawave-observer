@@ -16,8 +16,7 @@ services:
 services:
   observer:          # Всё в одном: observer + updater
     build: Dockerfile
-    environment:
-      - UPDATER_ENABLED=true  # Включить фоновые обновления
+    # Фоновые обновления включены по умолчанию
 ```
 
 ## Преимущества
@@ -93,28 +92,18 @@ USER observer  # Всё работает от пользователя 1000
 ### Переменные окружения (.env)
 
 ```bash
-# Управление updater
-UPDATER_ENABLED=true              # Включить фоновые обновления (default: true)
-
 # ASN updates
-IPTOASN_UPDATE_INTERVAL_HOURS=24  # Обновлять iptoasn каждые 24ч
+IPTOASN_UPDATE_INTERVAL_MINUTES=60  # Обновлять iptoasn каждые 60 минут
 
 # CAIDA updates
-CAIDA_ENABLED=true                 # Включить CAIDA AS2Org
-CAIDA_REFRESH_HOURS=168           # Обновлять раз в неделю
+CAIDA_ENABLED=true                  # Включить CAIDA AS2Org
+CAIDA_REFRESH_HOURS=168            # Обновлять раз в неделю
 
 # GeoLite updates
-GEOLITE_UPDATE_INTERVAL_HOURS=168 # Обновлять раз в неделю
+GEOLITE_UPDATE_INTERVAL_HOURS=168  # Обновлять раз в неделю
 ```
 
-### Отключение updater (если нужно)
-
-Если хотите отключить фоновые обновления (например, данные обновляются извне):
-
-```bash
-# В .env:
-UPDATER_ENABLED=false
-```
+**Примечание**: Фоновые обновления данных (ASN/CAIDA/GeoLite) являются **обязательными** и всегда включены. Они запускаются автоматически при старте сервиса.
 
 ## Структура файлов
 
@@ -186,15 +175,15 @@ rm -rf ./data
 docker-compose up -d  # Создаст ./data с правильными правами
 ```
 
-### Проблема: Updater не запускается
+### Проверка: Updater работает
 
-**Проверка:**
+**Проверка логов:**
 ```bash
-docker exec observer env | grep UPDATER
-# Должно быть: UPDATER_ENABLED=true
-
 docker logs observer | grep -i updater
-# Должны быть сообщения: [Updater] ✅ ...
+# Должны быть сообщения:
+# [Updater] ✅ ASN updater initialized
+# [Updater] ✅ CAIDA AS2Org updater initialized
+# [Updater] ✅ GeoLite updater initialized
 ```
 
 ### Проблема: Файлы не обновляются
@@ -202,7 +191,7 @@ docker logs observer | grep -i updater
 **Проверка интервалов:**
 ```bash
 # В .env проверьте:
-IPTOASN_UPDATE_INTERVAL_HOURS=24
+IPTOASN_UPDATE_INTERVAL_MINUTES=60
 CAIDA_REFRESH_HOURS=168
 GEOLITE_UPDATE_INTERVAL_HOURS=168
 

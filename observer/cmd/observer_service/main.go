@@ -238,7 +238,7 @@ func main() {
 	if reenableScheduler != nil {
 		goroutineCount++
 	}
-	if updaterManager != nil && cfg.UpdaterEnabled {
+	if updaterManager != nil {
 		goroutineCount++ // Data updater manager
 	}
 
@@ -255,7 +255,7 @@ func main() {
 	}
 
 	// Start Data Updater Manager (ASN, CAIDA, GeoLite background updates)
-	if updaterManager != nil && cfg.UpdaterEnabled {
+	if updaterManager != nil {
 		go updaterManager.Run(ctx, &wg)
 	}
 

@@ -83,9 +83,6 @@ type Config struct {
 	UserIDUUIDCacheTTLHours  int           // TTL кэша internal_id→uuid в часах (default: 24)
 	ReenableTickSeconds      int           // Интервал проверки просроченных disable в секундах (default: 10)
 	ReenableBatchSize        int           // Максимальное количество enable за одну итерацию (default: 100)
-
-	// --- ПАРАМЕТРЫ DATA UPDATER ---
-	UpdaterEnabled bool // Включить фоновое обновление данных (ASN/CAIDA/GeoLite) (default: true)
 }
 
 // New загружает конфигурацию из переменных окружения.
@@ -162,8 +159,6 @@ func New() *Config {
 		UserIDUUIDCacheTTLHours: getEnvInt("USERID_UUID_CACHE_TTL_HOURS", 24),
 		ReenableTickSeconds:     getEnvInt("REENABLE_TICK_SECONDS", 10),
 		ReenableBatchSize:       getEnvInt("REENABLE_BATCH_SIZE", 100),
-
-		UpdaterEnabled:          getEnvBool("UPDATER_ENABLED", true),
 	}
 
 	// Validation: timeout не может быть отрицательным
