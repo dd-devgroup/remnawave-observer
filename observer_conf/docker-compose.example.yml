@@ -1,36 +1,26 @@
 services:
-  observer-updater:
-    container_name: observer-updater
-    build:
-      context: ../observer
-      dockerfile: Dockerfile.updater
-    restart: unless-stopped
-    volumes:
-      - ./data:/app/data # Shared write volume for ASN, CAIDA, GeoLite files
-    env_file:
-      - .env
-    networks:
-      - observer-net
-    logging:
-      driver: json-file
-      options:
-        max-size: '8m'
-        max-file: '3'
-
   observer:
     container_name: observer
-    image: quay.io/fxfuren/remnawave-observer:latest
+    build:
+      context: ../observer
+      dockerfile: Dockerfile
+    # Alternative: use pre-built image instead of building locally
+    # image: quay.io/fxfuren/remnawave-observer:latest
     restart: unless-stopped
     expose:
       - '9000'
     volumes:
-      - ./data:/app/data # Writable data (unknown_providers.json, MMDB files, backups)
+      # Data directory is created inside container with user 1000:1000 ownership
+      # This volume mount preserves data between container restarts
+      - ./data:/app/data # Data files (ASN DB, MMDB, CAIDA, unknown_providers.json, backups)
       - ./config:/app/config:ro # Anti-Abuse configs (agglomerations.yaml, providers.yaml)
     env_file:
       - .env
+    environment:
+      # Data updater is integrated into observer service (runs as background goroutine)
+      # Set UPDATER_ENABLED=false to disable background updates if needed
+      - UPDATER_ENABLED=true
     depends_on:
-      observer-updater:
-        condition: service_started # No healthcheck, just start order
       vector-aggregator:
         condition: service_healthy
       redis:
@@ -45,6 +35,13 @@ services:
       options:
         max-size: '8m'
         max-file: '3'
+    # Health check (optional - uncomment if you add /health endpoint)
+    # healthcheck:
+    #   test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:9000/health"]
+    #   interval: 30s
+    #   timeout: 3s
+    #   retries: 3
+    #   start_period: 10s
 
   vector-aggregator:
     image: timberio/vector:0.48.0-alpine
@@ -135,7 +132,11 @@ services:
     networks:
       - observer-net
     healthcheck:
-      test: ['CMD-SHELL', 'pg_isready -U ${POSTGRES_USER:-observer}']
+      test:
+        [
+          'CMD-SHELL',
+          'pg_isready -h 127.0.0.1 -p 5432 -U $$POSTGRES_USER -d $$POSTGRES_DB',
+        ]
       interval: 5s
       timeout: 3s
       retries: 5

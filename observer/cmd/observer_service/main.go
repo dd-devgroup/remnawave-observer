@@ -24,6 +24,7 @@ import (
 	"observer_service/internal/services/remnawave"
 	"observer_service/internal/services/scoring"
 	"observer_service/internal/services/storage"
+	"observer_service/internal/updater"
 )
 
 func main() {
@@ -79,13 +80,17 @@ func main() {
 
 	webhookAlerter := alerter.NewWebhookAlerter(cfg.AlertWebhookURL)
 
-	// Initialize ASN lookup service (read-only mode - files provided by observer-updater)
+	// Initialize ASN lookup service
 	asnLookup, err := asn.NewASNLookupReadOnly(cfg.GeoDataDataDir)
 	if err != nil {
 		log.Fatalf("Critical error: failed to load ASN database: %v", err)
 	}
 	defer asnLookup.Close()
 	log.Printf("[Observer] ASN lookup loaded from file (records: %d)", asnLookup.Count())
+
+	// Initialize Data Updater Manager (integrated background updater)
+	// This will be started later as a goroutine to manage ASN/CAIDA/GeoLite updates
+	var updaterManager *updater.Manager
 
 	// Initialize GeoData loader (optional)
 	var geoDataLoader *geodata.GeoDataLoader
@@ -118,7 +123,11 @@ func main() {
 		geoAnalyzer = geoip.NewGeoAnalyzer(geoService, geoDataLoader)
 		log.Printf("[Observer] GeoIP service initialized (cache TTL: %v, MMDB: %v)", cfg.GeoIPCacheTTL, mmdbReader != nil)
 
-		// Note: GeoLite files are managed by observer-updater service
+		// Initialize Data Updater Manager (for background updates of ASN/CAIDA/GeoLite)
+		updaterManager = updater.NewManager(cfg, geoService)
+		if err := updaterManager.Start(ctx); err != nil {
+			log.Fatalf("Critical error: data updater failed to start: %v", err)
+		}
 
 		// Initialize ASN classifier
 		asnClassifier = asn.NewASNClassifier(geoDataLoader)
@@ -136,6 +145,12 @@ func main() {
 			scorer = scoring.NewScorer(thresholds)
 			log.Printf("✅ Scoring system initialized (warn: %.1f, hard_disable: %.1f)",
 				cfg.ScoreThresholdWarn, cfg.ScoreThresholdBlock)
+		}
+	} else {
+		// If GeoIP/Scoring disabled, still initialize updater for ASN updates
+		updaterManager = updater.NewManager(cfg, nil)
+		if err := updaterManager.Start(ctx); err != nil {
+			log.Printf("Warning: data updater failed to start: %v (continuing without background updates)", err)
 		}
 	}
 
@@ -160,11 +175,11 @@ func main() {
 	poolMonitor := monitor.NewPoolMonitor(redisStore, repo, cfg, geoService)
 	apiServer := api.NewServer(cfg.Port, logProcessor, redisStore, cfg)
 
-	// Initialize CAIDA AS2Org (read-only mode - files provided by observer-updater)
+	// Initialize CAIDA AS2Org (read-only mode - files managed by integrated updater)
 	var as2orgLoader *geodata.AS2OrgLoader
 	if cfg.CAIDAEnabled && cfg.GeoIPEnabled {
 		as2orgLoader = geodata.NewAS2OrgLoader(cfg.GeoDataDataDir, "", 0)
-		// Load from local file (no download - observer-updater handles downloads)
+		// Load from local file (downloads managed by updater manager)
 		if err := as2orgLoader.LoadFromLocalFile(); err != nil {
 			log.Printf("[Observer] Warning: CAIDA file not found: %v (running without CAIDA)", err)
 			as2orgLoader = nil
@@ -220,9 +235,11 @@ func main() {
 	if autoLearner != nil {
 		goroutineCount++
 	}
-	// Note: as2orgLoader and geoLiteUpdater background refresh removed - observer-updater handles downloads
 	if reenableScheduler != nil {
-		goroutineCount++ // Re-enable scheduler
+		goroutineCount++
+	}
+	if updaterManager != nil && cfg.UpdaterEnabled {
+		goroutineCount++ // Data updater manager
 	}
 
 	wg.Add(goroutineCount)
@@ -237,7 +254,10 @@ func main() {
 		go autoLearner.Run(ctx, &wg)
 	}
 
-	// Note: CAIDA and GeoLite background refresh removed - observer-updater handles downloads
+	// Start Data Updater Manager (ASN, CAIDA, GeoLite background updates)
+	if updaterManager != nil && cfg.UpdaterEnabled {
+		go updaterManager.Run(ctx, &wg)
+	}
 
 	// Start Re-enable Scheduler if configured
 	if reenableScheduler != nil {
