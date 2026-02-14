@@ -85,4 +85,5 @@ if currentASNCount > asnLimit then
     end
 end
 
-return {0, currentASNCount, isNewASN}
+-- For status=0 return active ASN list as well (used by scoring on new ASN events)
+return {0, currentASNCount, isNewASN, activeASNs}
