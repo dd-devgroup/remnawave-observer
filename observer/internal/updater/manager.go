@@ -31,6 +31,15 @@ func NewManager(cfg *config.Config, geoService *geoip.GeoIPService) *Manager {
 	}
 }
 
+// SetGeoService attaches GeoIPService for MMDB hot-reload callbacks.
+func (m *Manager) SetGeoService(geoService *geoip.GeoIPService) {
+	m.geoService = geoService
+	if m.geoLiteUpdater != nil {
+		m.geoLiteUpdater.SetGeoService(geoService)
+		log.Println("[Updater] GeoIP hot-reload callback attached")
+	}
+}
+
 // Start initializes all updaters and performs initial data load.
 // Returns error if critical initialization fails.
 func (m *Manager) Start(ctx context.Context) error {
