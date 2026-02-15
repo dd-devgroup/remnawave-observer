@@ -108,7 +108,7 @@ func (p *TwoIPProvider) Name() string {
 
 // Lookup fetches geolocation data for a specific IP via:
 //
-//	<baseURL>/<IP>?token=<token>
+//	GET <baseURL>/<IP> with API token in headers.
 func (p *TwoIPProvider) Lookup(ctx context.Context, ip string) (*FallbackLocation, error) {
 	ip = strings.TrimSpace(ip)
 	if ip == "" {
@@ -123,9 +123,10 @@ func (p *TwoIPProvider) Lookup(ctx context.Context, ip string) (*FallbackLocatio
 	if err != nil {
 		return nil, fmt.Errorf("2ip lookup: new request: %w", err)
 	}
-	q := req.URL.Query()
-	q.Set("token", p.token)
-	req.URL.RawQuery = q.Encode()
+	// 2IP accepts token in headers (free and paid plans).
+	// Query token can return 401 for free tokens, so do not use URL query auth.
+	req.Header.Set("Authorization", "Bearer "+p.token)
+	req.Header.Set("X-API-Key", p.token)
 
 	resp, err := p.client.Do(req)
 	if err != nil {
@@ -138,6 +139,7 @@ func (p *TwoIPProvider) Lookup(ctx context.Context, ip string) (*FallbackLocatio
 		rawBody, readErr := io.ReadAll(io.LimitReader(resp.Body, 512))
 		if readErr == nil {
 			bodyPreview = strings.TrimSpace(string(rawBody))
+			bodyPreview = redactSecret(bodyPreview, p.token)
 		}
 		return nil, &httpStatusError{
 			Provider:   p.Name(),
@@ -206,4 +208,12 @@ func normalizeASN(id string) string {
 		return upper
 	}
 	return "AS" + upper
+}
+
+func redactSecret(value, secret string) string {
+	secret = strings.TrimSpace(secret)
+	if secret == "" {
+		return value
+	}
+	return strings.ReplaceAll(value, secret, "***")
 }
