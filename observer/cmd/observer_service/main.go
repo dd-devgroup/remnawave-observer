@@ -104,6 +104,7 @@ func main() {
 	var geoAnalyzer *geoip.GeoAnalyzer
 	var asnClassifier *asn.ASNClassifier
 	var scorer *scoring.Scorer
+	var fallbackWorkerEnabled bool
 
 	if cfg.GeoIPEnabled || cfg.ScoringEnabled {
 		// Initialize unknown providers logging
@@ -132,6 +133,7 @@ func main() {
 			} else {
 				fallbackProvider := geoip.NewTwoIPProvider(cfg.TwoIPBaseURL, cfg.TwoIPToken, cfg.GeoFallbackTimeout)
 				geoService.SetFallbackProvider(fallbackProvider)
+				fallbackWorkerEnabled = true
 				log.Printf("[Observer] Geo fallback enabled via %s", fallbackProvider.Name())
 			}
 		}
@@ -242,6 +244,9 @@ func main() {
 	if reenableScheduler != nil {
 		goroutineCount++
 	}
+	if fallbackWorkerEnabled {
+		goroutineCount++
+	}
 
 	wg.Add(goroutineCount)
 	log.Println("[Startup] Stage 5/5: launching background workers")
@@ -250,6 +255,9 @@ func main() {
 	go logProcessor.StartSideEffectWorkerPool(ctx, &wg)
 	go logProcessor.StartBatchWriter(ctx, &wg)
 	go metrics.StartDumper(ctx, &wg, 60*time.Second)
+	if fallbackWorkerEnabled && geoService != nil {
+		go geoService.StartFallbackWorker(ctx, &wg)
+	}
 
 	// Start Auto-Learner if enabled
 	if autoLearner != nil {
