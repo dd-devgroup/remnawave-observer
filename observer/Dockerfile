@@ -47,12 +47,10 @@ COPY --from=builder /build/observer_service .
 # Copy Lua scripts (needed for Redis operations)
 COPY --from=builder /build/internal/scripts/*.lua ./internal/scripts/
 
-# Copy config files (if any)
-COPY --from=builder --chown=observer:observer /build/observer_conf/config /app/config
-
-# Create data directory with correct ownership
+# Create data/config directories with correct ownership.
+# Deployment is expected to mount config files into /app/config.
 # This fixes the permission issue: observer user (1000) owns the directory
-RUN mkdir -p /app/data && \
+RUN mkdir -p /app/data /app/config && \
     chown -R observer:observer /app && \
     chmod -R 755 /app/data
 
