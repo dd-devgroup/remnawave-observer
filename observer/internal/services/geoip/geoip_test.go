@@ -3,7 +3,9 @@ package geoip
 import (
 	"context"
 	"net/http"
+	"sync"
 	"testing"
+	"time"
 )
 
 // --- Lookup with nil MMDB (iptoasn only) ---
@@ -168,9 +170,12 @@ func TestLookup_WithoutASNLookup_ContinuesGracefully(t *testing.T) {
 }
 
 type fallbackProviderStub struct {
-	name  string
-	err   error
-	calls int
+	name     string
+	err      error
+	loc      *FallbackLocation
+	lookupFn func(call int, ip string) (*FallbackLocation, error)
+	mu       sync.Mutex
+	calls    int
 }
 
 func (s *fallbackProviderStub) Name() string {
@@ -181,13 +186,30 @@ func (s *fallbackProviderStub) Name() string {
 }
 
 func (s *fallbackProviderStub) Lookup(ctx context.Context, ip string) (*FallbackLocation, error) {
+	s.mu.Lock()
 	s.calls++
-	return nil, s.err
+	call := s.calls
+	lookupFn := s.lookupFn
+	loc := s.loc
+	err := s.err
+	s.mu.Unlock()
+
+	if lookupFn != nil {
+		return lookupFn(call, ip)
+	}
+	return loc, err
+}
+
+func (s *fallbackProviderStub) Calls() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.calls
 }
 
 func TestLookup_DisablesFallbackAfterUnauthorized(t *testing.T) {
 	svc := NewGeoIPService(nil, nil, nil, 0)
 	defer svc.Close()
+	svc.SetFallbackRateLimit(0, 0)
 
 	fallback := &fallbackProviderStub{
 		name: "2ip",
@@ -202,15 +224,162 @@ func TestLookup_DisablesFallbackAfterUnauthorized(t *testing.T) {
 	if _, err := svc.Lookup(context.Background(), "8.8.8.8"); err != nil {
 		t.Fatalf("unexpected lookup error on first call: %v", err)
 	}
-	if fallback.calls != 1 {
-		t.Fatalf("expected 1 fallback call after first lookup, got %d", fallback.calls)
+	if fallback.Calls() != 1 {
+		t.Fatalf("expected 1 fallback call after first lookup, got %d", fallback.Calls())
 	}
 
 	if _, err := svc.Lookup(context.Background(), "1.1.1.1"); err != nil {
 		t.Fatalf("unexpected lookup error on second call: %v", err)
 	}
-	if fallback.calls != 1 {
-		t.Fatalf("expected fallback to be disabled after 401, calls=%d", fallback.calls)
+	if fallback.Calls() != 1 {
+		t.Fatalf("expected fallback to be disabled after 401, calls=%d", fallback.Calls())
+	}
+}
+
+func TestLookup_PausesFallbackAfterTooManyRequests(t *testing.T) {
+	svc := NewGeoIPService(nil, nil, nil, 0)
+	defer svc.Close()
+	svc.SetFallbackRateLimit(0, time.Hour)
+
+	fallback := &fallbackProviderStub{
+		name: "2ip",
+		err: &httpStatusError{
+			Provider:   "2ip",
+			StatusCode: http.StatusTooManyRequests,
+			Body:       `{"error":"Unauthorized","message":"Too many requests"}`,
+		},
+	}
+	svc.SetFallbackProvider(fallback)
+
+	if _, err := svc.Lookup(context.Background(), "91.149.72.79"); err != nil {
+		t.Fatalf("unexpected lookup error on first call: %v", err)
+	}
+	if fallback.Calls() != 1 {
+		t.Fatalf("expected first fallback call, got %d", fallback.Calls())
+	}
+
+	if _, err := svc.Lookup(context.Background(), "91.149.72.80"); err != nil {
+		t.Fatalf("unexpected lookup error on second call: %v", err)
+	}
+	if fallback.Calls() != 1 {
+		t.Fatalf("expected fallback to be paused after 429, calls=%d", fallback.Calls())
+	}
+}
+
+func TestLookup_RespectsFallbackMinDelay(t *testing.T) {
+	svc := NewGeoIPService(nil, nil, nil, 0)
+	defer svc.Close()
+	svc.SetFallbackRateLimit(time.Hour, 0)
+
+	fallback := &fallbackProviderStub{
+		name: "2ip",
+		err:  nil,
+	}
+	svc.SetFallbackProvider(fallback)
+
+	if _, err := svc.Lookup(context.Background(), "82.179.192.10"); err != nil {
+		t.Fatalf("unexpected lookup error on first call: %v", err)
+	}
+	if fallback.Calls() != 1 {
+		t.Fatalf("expected first fallback call, got %d", fallback.Calls())
+	}
+
+	if _, err := svc.Lookup(context.Background(), "82.179.192.11"); err != nil {
+		t.Fatalf("unexpected lookup error on second call: %v", err)
+	}
+	if fallback.Calls() != 1 {
+		t.Fatalf("expected second lookup to be throttled by min delay, calls=%d", fallback.Calls())
+	}
+}
+
+func TestFallbackWorker_ProcessesQueuedIP(t *testing.T) {
+	svc := NewGeoIPService(nil, nil, nil, 0)
+	defer svc.Close()
+	svc.SetFallbackRateLimit(0, 0)
+	svc.ConfigureFallbackQueue(32, 3, 10*time.Millisecond)
+
+	fallback := &fallbackProviderStub{
+		name: "2ip",
+		loc: &FallbackLocation{
+			CountryCode:    "RU",
+			City:           "Samara",
+			Latitude:       53.21,
+			Longitude:      50.15,
+			HasCoordinates: true,
+			Source:         "2ip",
+			Confidence:     0.85,
+		},
+	}
+	svc.SetFallbackProvider(fallback)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go svc.StartFallbackWorker(ctx, &wg)
+
+	if !svc.enqueueFallbackTask("82.179.192.10") {
+		t.Fatal("expected IP to be queued")
+	}
+
+	deadline := time.Now().Add(500 * time.Millisecond)
+	for fallback.Calls() == 0 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	cancel()
+	wg.Wait()
+
+	if fallback.Calls() == 0 {
+		t.Fatal("expected fallback worker to process queued IP")
+	}
+}
+
+func TestFallbackWorker_RetriesOnTooManyRequests(t *testing.T) {
+	svc := NewGeoIPService(nil, nil, nil, 0)
+	defer svc.Close()
+	svc.SetFallbackRateLimit(0, 0)
+	svc.ConfigureFallbackQueue(32, 2, 10*time.Millisecond)
+
+	fallback := &fallbackProviderStub{
+		name: "2ip",
+		lookupFn: func(call int, ip string) (*FallbackLocation, error) {
+			if call == 1 {
+				return nil, &httpStatusError{
+					Provider:   "2ip",
+					StatusCode: http.StatusTooManyRequests,
+					Body:       `{"error":"Unauthorized","message":"Too many requests"}`,
+				}
+			}
+			return &FallbackLocation{
+				CountryCode:    "RU",
+				City:           "Moscow",
+				Latitude:       55.75,
+				Longitude:      37.62,
+				HasCoordinates: true,
+				Source:         "2ip",
+				Confidence:     0.85,
+			}, nil
+		},
+	}
+	svc.SetFallbackProvider(fallback)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go svc.StartFallbackWorker(ctx, &wg)
+
+	if !svc.enqueueFallbackTask("178.176.84.139") {
+		t.Fatal("expected IP to be queued")
+	}
+
+	deadline := time.Now().Add(1 * time.Second)
+	for fallback.Calls() < 2 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	cancel()
+	wg.Wait()
+
+	if fallback.Calls() < 2 {
+		t.Fatalf("expected retry after 429, got calls=%d", fallback.Calls())
 	}
 }
 
