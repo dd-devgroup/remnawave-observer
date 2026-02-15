@@ -8,6 +8,8 @@ import (
 	"observer_service/internal/metrics"
 	"observer_service/internal/models"
 	"os"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
@@ -52,6 +54,49 @@ type RedisStore struct {
 	scanTimeBudget       time.Duration
 }
 
+func loadLuaScript(scriptName string, scriptPaths ...string) ([]byte, error) {
+	candidates := make([]string, 0, len(scriptPaths)+3)
+	for _, scriptPath := range scriptPaths {
+		if scriptPath != "" {
+			candidates = append(candidates, scriptPath)
+		}
+	}
+
+	// Default case: run from module root.
+	candidates = append(candidates, filepath.Join("internal", "scripts", scriptName))
+
+	// Runtime fallback: script path next to executable root.
+	if exePath, err := os.Executable(); err == nil {
+		candidates = append(candidates, filepath.Join(filepath.Dir(exePath), "internal", "scripts", scriptName))
+	}
+
+	// Test fallback: resolve from this source file location.
+	if _, filePath, _, ok := runtime.Caller(0); ok {
+		candidates = append(candidates, filepath.Clean(filepath.Join(filepath.Dir(filePath), "..", "..", "scripts", scriptName)))
+	}
+
+	seen := make(map[string]struct{}, len(candidates))
+	uniqueCandidates := make([]string, 0, len(candidates))
+	for _, candidate := range candidates {
+		if _, exists := seen[candidate]; exists {
+			continue
+		}
+		seen[candidate] = struct{}{}
+		uniqueCandidates = append(uniqueCandidates, candidate)
+	}
+
+	var lastErr error
+	for _, candidate := range uniqueCandidates {
+		content, err := os.ReadFile(candidate)
+		if err == nil {
+			return content, nil
+		}
+		lastErr = err
+	}
+
+	return nil, fmt.Errorf("failed to read Lua script %q (tried: %s): %w", scriptName, strings.Join(uniqueCandidates, ", "), lastErr)
+}
+
 // NewRedisStore создает новый экземпляр RedisStore.
 func NewRedisStore(ctx context.Context, redisURL string, scriptPaths ...string) (*RedisStore, error) {
 	opt, err := redis.ParseURL(redisURL)
@@ -63,7 +108,7 @@ func NewRedisStore(ctx context.Context, redisURL string, scriptPaths ...string) 
 		return nil, fmt.Errorf("ошибка подключения к Redis: %w", err)
 	}
 	// Загрузка скрипта проверки и добавления ASN из файла
-	addCheckASNScript, err := os.ReadFile("internal/scripts/add_and_check_asn.lua")
+	addCheckASNScript, err := loadLuaScript("add_and_check_asn.lua", scriptPaths...)
 	if err != nil {
 		return nil, fmt.Errorf("ошибка чтения Lua-скрипта 'add_and_check_asn.lua': %w", err)
 	}
