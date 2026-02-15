@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"net/http"
 	"strings"
 	"sync"
 	"time"
@@ -58,6 +59,24 @@ func (s *GeoIPService) SetFallbackProvider(provider FallbackProvider) {
 	s.mu.Lock()
 	s.fallbackProvider = provider
 	s.mu.Unlock()
+}
+
+func (s *GeoIPService) disableFallbackProvider(reason string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.fallbackProvider == nil {
+		return
+	}
+
+	name := s.fallbackProvider.Name()
+	s.fallbackProvider = nil
+
+	if strings.TrimSpace(reason) == "" {
+		log.Printf("[GeoIP] Fallback provider %s disabled", name)
+		return
+	}
+	log.Printf("[GeoIP] Fallback provider %s disabled: %s", name, reason)
 }
 
 // Lookup performs geolocation for an IP address.
@@ -152,6 +171,9 @@ func (s *GeoIPService) Lookup(ctx context.Context, ip string) (*GeoLocation, err
 				metrics.GeoIPFallbackLookupFail.Add(1)
 			}
 			log.Printf("[GeoIP] Fallback lookup failed for %s: %v", ip, fbErr)
+			if isHTTPStatusCode(fbErr, http.StatusUnauthorized) {
+				s.disableFallbackProvider("received 401 Unauthorized; check TWOIP_TOKEN and API balance")
+			}
 		} else if fallbackLoc != nil {
 			metrics.GeoIPFallbackLookupSuccess.Add(1)
 			mergeFallbackLocation(location, fallbackLoc)

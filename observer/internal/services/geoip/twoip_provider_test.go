@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 )
@@ -13,8 +14,14 @@ func TestTwoIPProviderLookup_Success(t *testing.T) {
 		if r.URL.Path != "/9.9.9.9" {
 			t.Fatalf("unexpected path: %s", r.URL.Path)
 		}
-		if got := r.URL.Query().Get("token"); got != "test-token" {
-			t.Fatalf("unexpected token query: %q", got)
+		if got := r.URL.Query().Get("token"); got != "" {
+			t.Fatalf("token must not be sent in query, got %q", got)
+		}
+		if got := r.Header.Get("Authorization"); got != "Bearer test-token" {
+			t.Fatalf("unexpected Authorization header: %q", got)
+		}
+		if got := r.Header.Get("X-API-Key"); got != "test-token" {
+			t.Fatalf("unexpected X-API-Key header: %q", got)
 		}
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{
@@ -60,7 +67,9 @@ func TestTwoIPProviderLookup_Success(t *testing.T) {
 
 func TestTwoIPProviderLookup_HTTPError(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = w.Write([]byte(`{"error":"Unauthorized","message":"token is invalid"}`))
 	}))
 	defer server.Close()
 
@@ -68,6 +77,12 @@ func TestTwoIPProviderLookup_HTTPError(t *testing.T) {
 	_, err := provider.Lookup(context.Background(), "9.9.9.9")
 	if err == nil {
 		t.Fatal("expected error for non-200 response")
+	}
+	if !isHTTPStatusCode(err, http.StatusUnauthorized) {
+		t.Fatalf("expected unauthorized status error, got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "token is invalid") {
+		t.Fatalf("expected response body in error, got: %v", err)
 	}
 }
 
@@ -85,5 +100,15 @@ func TestParseFlexibleFloat(t *testing.T) {
 	_, ok = parseFlexibleFloat([]byte(`""`))
 	if ok {
 		t.Fatal("empty string must not be treated as valid float")
+	}
+}
+
+func TestRedactSecret(t *testing.T) {
+	got := redactSecret(`{"message":"Token <abc123> invalid"}`, "abc123")
+	if !strings.Contains(got, "***") {
+		t.Fatalf("expected secret to be masked, got: %s", got)
+	}
+	if strings.Contains(got, "abc123") {
+		t.Fatalf("expected secret not to appear, got: %s", got)
 	}
 }

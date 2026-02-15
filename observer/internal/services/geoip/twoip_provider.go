@@ -3,7 +3,9 @@ package geoip
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -58,6 +60,31 @@ type twoIPResponse struct {
 	ASN      twoIPASN        `json:"asn"`
 }
 
+type httpStatusError struct {
+	Provider   string
+	StatusCode int
+	Body       string
+}
+
+func (e *httpStatusError) Error() string {
+	if e == nil {
+		return "fallback lookup: bad status"
+	}
+	provider := strings.TrimSpace(e.Provider)
+	if provider == "" {
+		provider = "fallback"
+	}
+	if strings.TrimSpace(e.Body) == "" {
+		return fmt.Sprintf("%s lookup: bad status: %d", provider, e.StatusCode)
+	}
+	return fmt.Sprintf("%s lookup: bad status: %d (%s)", provider, e.StatusCode, e.Body)
+}
+
+func isHTTPStatusCode(err error, statusCode int) bool {
+	var statusErr *httpStatusError
+	return errors.As(err, &statusErr) && statusErr.StatusCode == statusCode
+}
+
 // NewTwoIPProvider creates 2IP fallback provider.
 func NewTwoIPProvider(baseURL, token string, timeout time.Duration) *TwoIPProvider {
 	if strings.TrimSpace(baseURL) == "" {
@@ -81,7 +108,7 @@ func (p *TwoIPProvider) Name() string {
 
 // Lookup fetches geolocation data for a specific IP via:
 //
-//	<baseURL>/<IP>?token=<token>
+//	GET <baseURL>/<IP> with API token in headers.
 func (p *TwoIPProvider) Lookup(ctx context.Context, ip string) (*FallbackLocation, error) {
 	ip = strings.TrimSpace(ip)
 	if ip == "" {
@@ -96,9 +123,10 @@ func (p *TwoIPProvider) Lookup(ctx context.Context, ip string) (*FallbackLocatio
 	if err != nil {
 		return nil, fmt.Errorf("2ip lookup: new request: %w", err)
 	}
-	q := req.URL.Query()
-	q.Set("token", p.token)
-	req.URL.RawQuery = q.Encode()
+	// 2IP accepts token in headers (free and paid plans).
+	// Query token can return 401 for free tokens, so do not use URL query auth.
+	req.Header.Set("Authorization", "Bearer "+p.token)
+	req.Header.Set("X-API-Key", p.token)
 
 	resp, err := p.client.Do(req)
 	if err != nil {
@@ -107,7 +135,17 @@ func (p *TwoIPProvider) Lookup(ctx context.Context, ip string) (*FallbackLocatio
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("2ip lookup: bad status: %d", resp.StatusCode)
+		bodyPreview := ""
+		rawBody, readErr := io.ReadAll(io.LimitReader(resp.Body, 512))
+		if readErr == nil {
+			bodyPreview = strings.TrimSpace(string(rawBody))
+			bodyPreview = redactSecret(bodyPreview, p.token)
+		}
+		return nil, &httpStatusError{
+			Provider:   p.Name(),
+			StatusCode: resp.StatusCode,
+			Body:       bodyPreview,
+		}
 	}
 
 	var payload twoIPResponse
@@ -170,4 +208,12 @@ func normalizeASN(id string) string {
 		return upper
 	}
 	return "AS" + upper
+}
+
+func redactSecret(value, secret string) string {
+	secret = strings.TrimSpace(secret)
+	if secret == "" {
+		return value
+	}
+	return strings.ReplaceAll(value, secret, "***")
 }
