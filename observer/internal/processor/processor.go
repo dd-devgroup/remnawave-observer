@@ -17,8 +17,10 @@ import (
 	"observer_service/internal/services/geoip"
 	"observer_service/internal/services/scoring"
 	"observer_service/internal/services/storage"
+	"runtime"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -41,6 +43,51 @@ type LogProcessor struct {
 	scorer        *scoring.Scorer     // Система скоринга
 
 	excludedIPsParsed []*net.IPNet // Для случаев когда в ExcludedIPs указан CIDR
+
+	logWorkerBase  int
+	logWorkerMax   int
+	logWorkerCount atomic.Int32
+	logWorkerSeq   atomic.Int64
+}
+
+const (
+	logWorkerScaleInterval    = 500 * time.Millisecond
+	elasticWorkerIdleTimeout  = 3 * time.Second
+	enqueueBackpressureMin    = 20 * time.Millisecond
+	enqueueBackpressureMax    = 120 * time.Millisecond
+	defaultEnforcementTimeout = 10 * time.Second
+	defaultASNClearTimeout    = 10 * time.Second
+)
+
+func resolveBaseLogWorkerCount(configured int) int {
+	if configured > 0 {
+		return configured
+	}
+
+	base := runtime.GOMAXPROCS(0)
+	if base < 2 {
+		base = 2
+	}
+
+	return base
+}
+
+func resolveMaxLogWorkerCount(base, queueCap int) int {
+	maxWorkers := base * 4
+	if cpuDriven := runtime.GOMAXPROCS(0) * 8; cpuDriven > maxWorkers {
+		maxWorkers = cpuDriven
+	}
+	if queueDriven := queueCap / 2; queueDriven > maxWorkers {
+		maxWorkers = queueDriven
+	}
+	if maxWorkers < base {
+		maxWorkers = base
+	}
+	if maxWorkers > 256 {
+		maxWorkers = 256
+	}
+
+	return maxWorkers
 }
 
 // NewLogProcessor создает новый экземпляр LogProcessor.
@@ -61,6 +108,8 @@ func NewLogProcessor(
 		bw = NewBatchWriter(repo)
 	}
 
+	logWorkerBase := resolveBaseLogWorkerCount(cfg.WorkerPoolSize)
+
 	lp := &LogProcessor{
 		storage:           s,
 		enforcer:          enf,
@@ -75,6 +124,8 @@ func NewLogProcessor(
 		scorer:            scorer,
 		logChannel:        make(chan []models.LogEntry, cfg.LogChannelBufferSize),
 		sideEffectChannel: make(chan func(context.Context), cfg.SideEffectChannelBufferSize),
+		logWorkerBase:     logWorkerBase,
+		logWorkerMax:      resolveMaxLogWorkerCount(logWorkerBase, cfg.LogChannelBufferSize),
 	}
 
 	// Parse excluded IPs (supports CIDR in EXCLUDED_IPS)
@@ -107,25 +158,134 @@ func (p *LogProcessor) StartWorkerPool(ctx context.Context, mainWg *sync.WaitGro
 	defer mainWg.Done()
 
 	var workerWg sync.WaitGroup
-	log.Printf("Starting log processing worker pool (size: %d)...", p.cfg.WorkerPoolSize)
+	log.Printf("Starting log processing worker pool (base: %d, max: %d, queue buffer: %d)...",
+		p.logWorkerBase, p.logWorkerMax, cap(p.logChannel))
 
-	for i := 0; i < p.cfg.WorkerPoolSize; i++ {
-		workerWg.Add(1)
-		go func(workerID int) {
-			defer workerWg.Done()
-			log.Printf("Log processing worker %d started", workerID)
-			for entries := range p.logChannel {
-				p.ProcessEntries(ctx, entries)
-			}
-			log.Printf("Log processing worker %d stopping", workerID)
-		}(i + 1)
+	for i := 0; i < p.logWorkerBase; i++ {
+		p.startLogWorker(ctx, &workerWg, false)
 	}
 
-	<-ctx.Done()
-	log.Println("Stop signal received for log processing workers. Closing channel...")
-	close(p.logChannel)
-	workerWg.Wait()
-	log.Println("All log processing workers stopped successfully")
+	scaleTicker := time.NewTicker(logWorkerScaleInterval)
+	defer scaleTicker.Stop()
+
+	for {
+		select {
+		case <-scaleTicker.C:
+			p.scaleLogWorkers(ctx, &workerWg)
+		case <-ctx.Done():
+			log.Println("Stop signal received for log processing workers. Closing channel...")
+			close(p.logChannel)
+			workerWg.Wait()
+			log.Println("All log processing workers stopped successfully")
+			return
+		}
+	}
+}
+
+func (p *LogProcessor) startLogWorker(ctx context.Context, workerWg *sync.WaitGroup, elastic bool) {
+	workerID := p.logWorkerSeq.Add(1)
+	workerType := "base"
+	if elastic {
+		workerType = "elastic"
+	}
+
+	p.logWorkerCount.Add(1)
+	workerWg.Add(1)
+	go func(id int64, typ string, isElastic bool) {
+		defer workerWg.Done()
+		defer p.logWorkerCount.Add(-1)
+
+		log.Printf("Log processing %s worker %d started", typ, id)
+		if isElastic {
+			p.runElasticLogWorker(ctx)
+		} else {
+			p.runBaseLogWorker(ctx)
+		}
+		log.Printf("Log processing %s worker %d stopping", typ, id)
+	}(workerID, workerType, elastic)
+}
+
+func (p *LogProcessor) runBaseLogWorker(ctx context.Context) {
+	for entries := range p.logChannel {
+		p.ProcessEntries(ctx, entries)
+	}
+}
+
+func (p *LogProcessor) runElasticLogWorker(ctx context.Context) {
+	idleTimer := time.NewTimer(elasticWorkerIdleTimeout)
+	defer idleTimer.Stop()
+
+	for {
+		select {
+		case entries, ok := <-p.logChannel:
+			if !ok {
+				return
+			}
+			p.ProcessEntries(ctx, entries)
+			if !idleTimer.Stop() {
+				select {
+				case <-idleTimer.C:
+				default:
+				}
+			}
+			idleTimer.Reset(elasticWorkerIdleTimeout)
+		case <-idleTimer.C:
+			// Shrink only when queue is empty and we are above base size.
+			if len(p.logChannel) == 0 && int(p.logWorkerCount.Load()) > p.logWorkerBase {
+				return
+			}
+			idleTimer.Reset(elasticWorkerIdleTimeout)
+		case <-ctx.Done():
+			return
+		}
+	}
+}
+
+func (p *LogProcessor) targetLogWorkerCount() int {
+	queueLen := len(p.logChannel)
+	queueCap := cap(p.logChannel)
+	target := p.logWorkerBase
+	if queueCap <= 0 || queueLen == 0 {
+		return target
+	}
+
+	fillRatio := float64(queueLen) / float64(queueCap)
+	if fillRatio >= 0.7 {
+		dynamicRange := p.logWorkerMax - p.logWorkerBase
+		ramp := int(fillRatio * float64(dynamicRange))
+		if ramp < 1 {
+			ramp = 1
+		}
+		target = p.logWorkerBase + ramp
+	}
+
+	if queueDriven := p.logWorkerBase + queueLen/4; queueDriven > target {
+		target = queueDriven
+	}
+	if target > p.logWorkerMax {
+		target = p.logWorkerMax
+	}
+	if target < p.logWorkerBase {
+		target = p.logWorkerBase
+	}
+
+	return target
+}
+
+func (p *LogProcessor) scaleLogWorkers(ctx context.Context, workerWg *sync.WaitGroup) {
+	target := p.targetLogWorkerCount()
+	current := int(p.logWorkerCount.Load())
+	if target <= current {
+		return
+	}
+
+	toSpawn := target - current
+	for i := 0; i < toSpawn; i++ {
+		p.startLogWorker(ctx, workerWg, true)
+	}
+
+	log.Printf("Log worker auto-scale: queue %d/%d, workers %d -> %d",
+		len(p.logChannel), cap(p.logChannel), current, target)
 }
 
 // StartSideEffectWorkerPool starts the side-effect task worker pool.
@@ -187,8 +347,53 @@ func (p *LogProcessor) EnqueueEntries(entries []models.LogEntry) (err error) {
 	case p.logChannel <- entries:
 		return nil
 	default:
-		return errors.New("log channel is full, rejecting new entries")
+		backpressureWait := p.calculateEnqueueBackpressureWait()
+		timer := time.NewTimer(backpressureWait)
+		defer timer.Stop()
+
+		select {
+		case p.logChannel <- entries:
+			return nil
+		case <-timer.C:
+			return errors.New("log channel is full, rejecting new entries")
+		}
 	}
+}
+
+func (p *LogProcessor) calculateEnqueueBackpressureWait() time.Duration {
+	queueCap := cap(p.logChannel)
+	if queueCap <= 0 {
+		return enqueueBackpressureMin
+	}
+
+	fillRatio := float64(len(p.logChannel)) / float64(queueCap)
+	wait := enqueueBackpressureMin
+
+	switch {
+	case fillRatio >= 0.95:
+		wait = enqueueBackpressureMax
+	case fillRatio >= 0.80:
+		wait = 80 * time.Millisecond
+	case fillRatio >= 0.60:
+		wait = 50 * time.Millisecond
+	}
+
+	if extraWorkers := int(p.logWorkerCount.Load()) - p.logWorkerBase; extraWorkers > 0 {
+		relief := time.Duration(extraWorkers*2) * time.Millisecond
+		wait -= relief
+		if wait < 15*time.Millisecond {
+			wait = 15 * time.Millisecond
+		}
+	}
+
+	if wait < enqueueBackpressureMin {
+		wait = enqueueBackpressureMin
+	}
+	if wait > enqueueBackpressureMax {
+		wait = enqueueBackpressureMax
+	}
+
+	return wait
 }
 
 // enqueueSideEffectTask adds a side-effect task to the execution queue.
@@ -649,7 +854,7 @@ func (p *LogProcessor) disableUser(ctx context.Context, userEmail string, reason
 		duration = 5 * time.Minute
 	}
 
-	enfCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	enfCtx, cancel := context.WithTimeout(ctx, defaultEnforcementTimeout)
 	defer cancel()
 
 	if err := p.enforcer.DisableTempByInternalID(enfCtx, internalID, duration, reason, score); err != nil {
@@ -670,7 +875,7 @@ func (p *LogProcessor) scheduleASNClear(ctx context.Context, userEmail string) {
 			return
 		}
 
-		opCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		opCtx, cancel := context.WithTimeout(ctx, defaultASNClearTimeout)
 		defer cancel()
 
 		cleared, err := p.storage.ClearUserASNData(opCtx, userEmail)

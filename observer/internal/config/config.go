@@ -3,6 +3,7 @@ package config
 import (
 	"log"
 	"os"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -89,8 +90,75 @@ type Config struct {
 	ReenableBatchSize       int    // Максимальное количество enable за одну итерацию (default: 100)
 }
 
+const (
+	defaultMonitoringIntervalSeconds = 300
+	defaultSideEffectTimeoutSeconds  = 10
+	defaultMaxRequestBytes           = 2 * 1024 * 1024
+	defaultReenableTickSeconds       = 10
+	defaultReenableBatchSize         = 100
+)
+
+func defaultLogWorkerPoolSize() int {
+	workers := runtime.GOMAXPROCS(0)
+	if workers < 2 {
+		workers = 2
+	}
+	return workers
+}
+
+func defaultLogChannelBufferSize(logWorkers int) int {
+	buffer := logWorkers * 20
+	if buffer < 100 {
+		buffer = 100
+	}
+	if buffer > 5000 {
+		buffer = 5000
+	}
+	return buffer
+}
+
+func defaultSideEffectWorkerPoolSize(logWorkers int) int {
+	workers := logWorkers / 2
+	if workers < 2 {
+		workers = 2
+	}
+	if workers > 32 {
+		workers = 32
+	}
+	return workers
+}
+
+func defaultSideEffectChannelBufferSize(sideEffectWorkers int) int {
+	buffer := sideEffectWorkers * 10
+	if buffer < 50 {
+		buffer = 50
+	}
+	if buffer > 1000 {
+		buffer = 1000
+	}
+	return buffer
+}
+
+func defaultMaxLogEntriesPerRequest(maxRequestBytes int64) int {
+	// Conservative estimate: one JSON log entry is ~2KB in heavy payload scenarios.
+	limit := int(maxRequestBytes / 2048)
+	if limit < 200 {
+		limit = 200
+	}
+	if limit > 1000 {
+		limit = 1000
+	}
+	return limit
+}
+
 // New загружает конфигурацию из переменных окружения.
 func New() *Config {
+	logWorkers := defaultLogWorkerPoolSize()
+	logChannelBuffer := defaultLogChannelBufferSize(logWorkers)
+	sideEffectWorkers := defaultSideEffectWorkerPoolSize(logWorkers)
+	sideEffectChannelBuffer := defaultSideEffectChannelBufferSize(sideEffectWorkers)
+	maxRequestBytes := int64(defaultMaxRequestBytes)
+
 	cfg := &Config{
 		Port:                        getEnv("PORT", "9000"),
 		PostgresDSN:                 getEnv("POSTGRES_DSN", ""),
@@ -102,20 +170,20 @@ func New() *Config {
 		AlertCooldown:               time.Duration(getEnvInt("ALERT_COOLDOWN_SECONDS", 60*60)) * time.Second,
 		ClearIPsDelay:               time.Duration(getEnvInt("CLEAR_IPS_DELAY_SECONDS", 30)) * time.Second,
 		BlockDuration:               getEnv("BLOCK_DURATION", "5m"),
-		MonitoringInterval:          time.Duration(getEnvInt("MONITORING_INTERVAL", 300)) * time.Second,
+		MonitoringInterval:          time.Duration(defaultMonitoringIntervalSeconds) * time.Second,
 		DebugEmail:                  getEnv("DEBUG_EMAIL", ""),
 		DebugIPLimit:                getEnvInt("DEBUG_IP_LIMIT", 1),
 		ExcludedUsers:               parseSet(getEnv("EXCLUDED_USERS", "")),
 		ExcludedIPs:                 parseSet(getEnv("EXCLUDED_IPS", "")),
-		WorkerPoolSize:              getEnvInt("WORKER_POOL_SIZE", 20),
-		LogChannelBufferSize:        getEnvInt("LOG_CHANNEL_BUFFER_SIZE", 100),
-		SideEffectWorkerPoolSize:    getEnvInt("SIDE_EFFECT_WORKER_POOL_SIZE", 10),
-		SideEffectChannelBufferSize: getEnvInt("SIDE_EFFECT_CHANNEL_BUFFER_SIZE", 50),
-		SideEffectTimeout:           time.Duration(getEnvInt("SIDE_EFFECT_TIMEOUT_SECONDS", 10)) * time.Second,
+		WorkerPoolSize:              logWorkers,
+		LogChannelBufferSize:        logChannelBuffer,
+		SideEffectWorkerPoolSize:    sideEffectWorkers,
+		SideEffectChannelBufferSize: sideEffectChannelBuffer,
+		SideEffectTimeout:           time.Duration(defaultSideEffectTimeoutSeconds) * time.Second,
 
 		// --- Загрузка параметров входящих запросов ---
-		MaxRequestBytes:         int64(getEnvInt("MAX_REQUEST_BYTES", 2*1024*1024)),
-		MaxLogEntriesPerRequest: getEnvInt("MAX_LOG_ENTRIES_PER_REQUEST", 1000),
+		MaxRequestBytes:         maxRequestBytes,
+		MaxLogEntriesPerRequest: defaultMaxLogEntriesPerRequest(maxRequestBytes),
 
 		// --- Загрузка параметров ASN ---
 		IPtoASNDownloadURL:    getEnv("IPTOASN_DOWNLOAD_URL", ""),
@@ -165,8 +233,8 @@ func New() *Config {
 		RemnawaveAPIToken:       getEnv("REMNAWAVE_API_TOKEN", ""),
 		RemnawaveTimeoutSeconds: getEnvInt("REMNAWAVE_TIMEOUT_SECONDS", 5),
 		UserIDUUIDCacheTTLHours: getEnvInt("USERID_UUID_CACHE_TTL_HOURS", 24),
-		ReenableTickSeconds:     getEnvInt("REENABLE_TICK_SECONDS", 10),
-		ReenableBatchSize:       getEnvInt("REENABLE_BATCH_SIZE", 100),
+		ReenableTickSeconds:     defaultReenableTickSeconds,
+		ReenableBatchSize:       defaultReenableBatchSize,
 	}
 
 	// Validation: timeout не может быть отрицательным
