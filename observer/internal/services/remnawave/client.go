@@ -2,177 +2,209 @@ package remnawave
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
+	"strconv"
+	"strings"
 	"time"
 
+	remapi "github.com/Jolymmiles/remnawave-api-go/v2/api"
 	"github.com/redis/go-redis/v9"
 )
 
-// Client взаимодействует с Remnawave API для enforce операций.
+// Client wraps Remnawave community SDK and local UUID cache.
 type Client struct {
-	baseURL    string
-	apiToken   string
-	httpClient *http.Client
-	redis      *redis.Client
-	cacheTTL   time.Duration
+	baseURL  string
+	apiToken string
+
+	sdk     *remapi.ClientExt
+	initErr error
+
+	redis    *redis.Client
+	cacheTTL time.Duration
 }
 
-// NewClient создаёт новый Remnawave client с HTTP timeout и Redis кэшированием.
+// NewClient creates a Remnawave client with timeout and Redis cache settings.
 func NewClient(baseURL, apiToken string, timeoutSeconds, cacheTTLHours int, redisClient *redis.Client) *Client {
-	return &Client{
+	client := &Client{
 		baseURL:  baseURL,
 		apiToken: apiToken,
-		httpClient: &http.Client{
-			Timeout: time.Duration(timeoutSeconds) * time.Second,
-		},
 		redis:    redisClient,
 		cacheTTL: time.Duration(cacheTTLHours) * time.Hour,
 	}
+
+	if baseURL == "" || apiToken == "" {
+		return client
+	}
+
+	httpClient := &http.Client{Timeout: time.Duration(timeoutSeconds) * time.Second}
+
+	baseSDK, err := remapi.NewClient(
+		baseURL,
+		remapi.StaticToken{Token: apiToken},
+		remapi.WithClient(httpClient),
+		remapi.WithRequestEditor(func(_ context.Context, req *http.Request) error {
+			// Keep compatibility with installations that still expect X-Api-Key.
+			req.Header.Set("X-Api-Key", apiToken)
+			return nil
+		}),
+	)
+	if err != nil {
+		client.initErr = fmt.Errorf("init remnawave sdk: %w", err)
+		return client
+	}
+
+	client.sdk = remapi.NewClientExt(baseSDK)
+	return client
 }
 
-// ResolveUUIDByInternalID резолвит UUID пользователя по internal numeric ID.
-// Сначала проверяет Redis cache, если промах — запрашивает Remnawave API.
+func (c *Client) ensureSDK() error {
+	if c.baseURL == "" || c.apiToken == "" {
+		return nil
+	}
+	if c.initErr != nil {
+		return c.initErr
+	}
+	if c.sdk == nil {
+		return fmt.Errorf("remnawave sdk is not initialized")
+	}
+	return nil
+}
+
+func internalServerErrorMessage(resp *remapi.InternalServerError) string {
+	if resp == nil {
+		return "internal server error"
+	}
+	if msg, ok := resp.Message.Get(); ok {
+		msg = strings.TrimSpace(msg)
+		if msg != "" {
+			return msg
+		}
+	}
+	return "internal server error"
+}
+
+// ResolveUUIDByInternalID resolves a user UUID by internal numeric ID.
 func (c *Client) ResolveUUIDByInternalID(ctx context.Context, internalID int64) (string, error) {
-	// Проверяем кэш
 	cacheKey := fmt.Sprintf("rw:uid2uuid:%d", internalID)
-	cached, err := c.redis.Get(ctx, cacheKey).Result()
-	if err == nil && cached != "" {
-		return cached, nil
+	if c.redis != nil {
+		cached, err := c.redis.Get(ctx, cacheKey).Result()
+		if err == nil && cached != "" {
+			return cached, nil
+		}
 	}
 
-	// Cache miss: запрашиваем API
-	// TODO: Если у Remnawave API нет endpoint "get user by numeric ID", то нужен fallback:
-	// - либо GET /users?id=<internalID> (если поддерживается фильтрация)
-	// - либо итерация по пагинированному списку (НЕ рекомендуется из-за нагрузки)
-	//
-	// Временная заглушка для демонстрации структуры:
-	// Предполагаем endpoint GET /api/users/<internalID> возвращает {"uuid": "...", "id": ...}
-	url := fmt.Sprintf("%s/api/users/%d", c.baseURL, internalID)
-	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
-	if err != nil {
-		return "", fmt.Errorf("create request: %w", err)
+	if err := c.ensureSDK(); err != nil {
+		return "", err
 	}
-	req.Header.Set("X-Api-Key", c.apiToken)
 
-	resp, err := c.httpClient.Do(req)
+	res, err := c.sdk.Users().GetUserById(ctx, strconv.FormatInt(internalID, 10))
 	if err != nil {
 		return "", fmt.Errorf("http request: %w", err)
 	}
-	defer resp.Body.Close()
 
-	if resp.StatusCode == http.StatusNotFound {
+	var uuid string
+	switch v := res.(type) {
+	case *remapi.UserResponse:
+		uuid = strings.TrimSpace(v.Response.UUID.String())
+		if uuid == "" || uuid == "00000000-0000-0000-0000-000000000000" {
+			return "", fmt.Errorf("empty UUID in response")
+		}
+	case *remapi.NotFoundError:
 		return "", fmt.Errorf("user with internal ID %d not found", internalID)
-	}
-	if resp.StatusCode >= 500 {
-		return "", fmt.Errorf("remnawave server error: %d", resp.StatusCode)
-	}
-	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("unexpected status code: %d", resp.StatusCode)
+	case *remapi.InternalServerError:
+		return "", fmt.Errorf("remnawave server error: %s", internalServerErrorMessage(v))
+	default:
+		return "", fmt.Errorf("unexpected response type for get user by id: %T", res)
 	}
 
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return "", fmt.Errorf("read response: %w", err)
+	if c.redis != nil {
+		_ = c.redis.Set(ctx, cacheKey, uuid, c.cacheTTL).Err()
 	}
 
-	var result struct {
-		UUID string `json:"uuid"`
-	}
-	if err := json.Unmarshal(body, &result); err != nil {
-		return "", fmt.Errorf("parse response: %w", err)
-	}
-
-	if result.UUID == "" {
-		return "", fmt.Errorf("empty UUID in response")
-	}
-
-	// Кэшируем результат
-	_ = c.redis.Set(ctx, cacheKey, result.UUID, c.cacheTTL).Err()
-
-	return result.UUID, nil
+	return uuid, nil
 }
 
-// DisableUser отключает пользователя по UUID через Remnawave API.
+// DisableUser disables a user by UUID via Remnawave API.
 func (c *Client) DisableUser(ctx context.Context, uuid string) error {
-	// Предполагаем endpoint POST /api/users/<uuid>/disable
-	url := fmt.Sprintf("%s/api/users/%s/disable", c.baseURL, uuid)
-	req, err := http.NewRequestWithContext(ctx, "POST", url, nil)
-	if err != nil {
-		return fmt.Errorf("create request: %w", err)
+	if err := c.ensureSDK(); err != nil {
+		return err
 	}
-	req.Header.Set("X-Api-Key", c.apiToken)
 
-	resp, err := c.httpClient.Do(req)
+	res, err := c.sdk.Users().DisableUser(ctx, uuid)
 	if err != nil {
 		return fmt.Errorf("http request: %w", err)
 	}
-	defer resp.Body.Close()
 
-	if resp.StatusCode >= 500 {
-		return fmt.Errorf("remnawave server error: %d", resp.StatusCode)
+	switch v := res.(type) {
+	case *remapi.UserResponse:
+		return nil
+	case *remapi.NotFoundError:
+		if strings.TrimSpace(v.Message) != "" {
+			return fmt.Errorf("disable failed: %s", strings.TrimSpace(v.Message))
+		}
+		return fmt.Errorf("disable failed: user not found")
+	case *remapi.BadRequestError:
+		return fmt.Errorf("disable failed: bad request")
+	case *remapi.InternalServerError:
+		return fmt.Errorf("remnawave server error: %s", internalServerErrorMessage(v))
+	default:
+		return fmt.Errorf("disable failed: unexpected response type %T", res)
 	}
-	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNoContent {
-		body, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("disable failed: status %d, body: %s", resp.StatusCode, string(body))
-	}
-
-	return nil
 }
 
-// EnableUser включает пользователя по UUID через Remnawave API.
+// EnableUser enables a user by UUID via Remnawave API.
 func (c *Client) EnableUser(ctx context.Context, uuid string) error {
-	// Предполагаем endpoint POST /api/users/<uuid>/enable
-	url := fmt.Sprintf("%s/api/users/%s/enable", c.baseURL, uuid)
-	req, err := http.NewRequestWithContext(ctx, "POST", url, nil)
-	if err != nil {
-		return fmt.Errorf("create request: %w", err)
+	if err := c.ensureSDK(); err != nil {
+		return err
 	}
-	req.Header.Set("X-Api-Key", c.apiToken)
 
-	resp, err := c.httpClient.Do(req)
+	res, err := c.sdk.Users().EnableUser(ctx, uuid)
 	if err != nil {
 		return fmt.Errorf("http request: %w", err)
 	}
-	defer resp.Body.Close()
 
-	if resp.StatusCode >= 500 {
-		return fmt.Errorf("remnawave server error: %d", resp.StatusCode)
+	switch v := res.(type) {
+	case *remapi.UserResponse:
+		return nil
+	case *remapi.NotFoundError:
+		if strings.TrimSpace(v.Message) != "" {
+			return fmt.Errorf("enable failed: %s", strings.TrimSpace(v.Message))
+		}
+		return fmt.Errorf("enable failed: user not found")
+	case *remapi.BadRequestError:
+		return fmt.Errorf("enable failed: bad request")
+	case *remapi.InternalServerError:
+		return fmt.Errorf("remnawave server error: %s", internalServerErrorMessage(v))
+	default:
+		return fmt.Errorf("enable failed: unexpected response type %T", res)
 	}
-	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNoContent {
-		body, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("enable failed: status %d, body: %s", resp.StatusCode, string(body))
-	}
-
-	return nil
 }
 
-// Ping проверяет доступность Remnawave API (для health check).
+// Ping checks Remnawave API availability for health checks.
 func (c *Client) Ping(ctx context.Context) error {
 	if c.baseURL == "" || c.apiToken == "" {
-		// Если Remnawave не настроен, считаем что всё ок (noop режим)
+		// Noop mode when Remnawave is not configured.
 		return nil
 	}
 
-	// Предполагаем endpoint GET /api/health или GET /api/ping
-	url := fmt.Sprintf("%s/api/health", c.baseURL)
-	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
-	if err != nil {
-		return fmt.Errorf("create request: %w", err)
+	if err := c.ensureSDK(); err != nil {
+		return err
 	}
-	req.Header.Set("X-Api-Key", c.apiToken)
 
-	resp, err := c.httpClient.Do(req)
+	res, err := c.sdk.System().GetRemnawaveHealth(ctx)
 	if err != nil {
 		return fmt.Errorf("http request: %w", err)
 	}
-	defer resp.Body.Close()
 
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("ping failed: status %d", resp.StatusCode)
+	switch v := res.(type) {
+	case *remapi.GetRemnawaveHealthResponse:
+		return nil
+	case *remapi.BadRequestError:
+		return fmt.Errorf("ping failed: bad request")
+	case *remapi.InternalServerError:
+		return fmt.Errorf("ping failed: server error: %s", internalServerErrorMessage(v))
+	default:
+		return fmt.Errorf("ping failed: unexpected response type %T", res)
 	}
-
-	return nil
 }
