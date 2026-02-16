@@ -38,8 +38,6 @@ func TestRemnawaveConfigCustomValues(t *testing.T) {
 	os.Setenv("REMNAWAVE_API_TOKEN", "secret-token")
 	os.Setenv("REMNAWAVE_TIMEOUT_SECONDS", "10")
 	os.Setenv("USERID_UUID_CACHE_TTL_HOURS", "48")
-	os.Setenv("REENABLE_TICK_SECONDS", "30")
-	os.Setenv("REENABLE_BATCH_SIZE", "200")
 
 	cfg := New()
 
@@ -55,21 +53,18 @@ func TestRemnawaveConfigCustomValues(t *testing.T) {
 	if cfg.UserIDUUIDCacheTTLHours != 48 {
 		t.Errorf("expected UserIDUUIDCacheTTLHours = 48, got %d", cfg.UserIDUUIDCacheTTLHours)
 	}
-	if cfg.ReenableTickSeconds != 30 {
-		t.Errorf("expected ReenableTickSeconds = 30, got %d", cfg.ReenableTickSeconds)
+	if cfg.ReenableTickSeconds != 10 {
+		t.Errorf("expected ReenableTickSeconds internal default 10, got %d", cfg.ReenableTickSeconds)
 	}
-	if cfg.ReenableBatchSize != 200 {
-		t.Errorf("expected ReenableBatchSize = 200, got %d", cfg.ReenableBatchSize)
+	if cfg.ReenableBatchSize != 100 {
+		t.Errorf("expected ReenableBatchSize internal default 100, got %d", cfg.ReenableBatchSize)
 	}
 }
 
 func TestRemnawaveConfigValidation(t *testing.T) {
 	os.Clearenv()
-	// Отрицательные значения должны сброситься на дефолты
 	os.Setenv("REMNAWAVE_TIMEOUT_SECONDS", "-5")
 	os.Setenv("USERID_UUID_CACHE_TTL_HOURS", "0")
-	os.Setenv("REENABLE_TICK_SECONDS", "-10")
-	os.Setenv("REENABLE_BATCH_SIZE", "0")
 
 	cfg := New()
 
@@ -84,6 +79,53 @@ func TestRemnawaveConfigValidation(t *testing.T) {
 	}
 	if cfg.ReenableBatchSize != 100 {
 		t.Errorf("expected ReenableBatchSize clamp to 100, got %d", cfg.ReenableBatchSize)
+	}
+}
+
+func TestInternalDefaults_NotReadFromEnv(t *testing.T) {
+	os.Clearenv()
+	os.Setenv("WORKER_POOL_SIZE", "99")
+	os.Setenv("LOG_CHANNEL_BUFFER_SIZE", "999")
+	os.Setenv("SIDE_EFFECT_WORKER_POOL_SIZE", "77")
+	os.Setenv("SIDE_EFFECT_CHANNEL_BUFFER_SIZE", "777")
+	os.Setenv("SIDE_EFFECT_TIMEOUT_SECONDS", "123")
+	os.Setenv("MONITORING_INTERVAL", "1")
+	os.Setenv("REENABLE_TICK_SECONDS", "1")
+	os.Setenv("REENABLE_BATCH_SIZE", "1")
+	os.Setenv("MAX_REQUEST_BYTES", "123")
+	os.Setenv("MAX_LOG_ENTRIES_PER_REQUEST", "4")
+
+	cfg := New()
+
+	if cfg.WorkerPoolSize == 99 {
+		t.Fatalf("WORKER_POOL_SIZE should be ignored, got %d", cfg.WorkerPoolSize)
+	}
+	if cfg.LogChannelBufferSize == 999 {
+		t.Fatalf("LOG_CHANNEL_BUFFER_SIZE should be ignored, got %d", cfg.LogChannelBufferSize)
+	}
+	if cfg.SideEffectWorkerPoolSize == 77 {
+		t.Fatalf("SIDE_EFFECT_WORKER_POOL_SIZE should be ignored, got %d", cfg.SideEffectWorkerPoolSize)
+	}
+	if cfg.SideEffectChannelBufferSize == 777 {
+		t.Fatalf("SIDE_EFFECT_CHANNEL_BUFFER_SIZE should be ignored, got %d", cfg.SideEffectChannelBufferSize)
+	}
+	if cfg.SideEffectTimeout == 123*time.Second {
+		t.Fatalf("SIDE_EFFECT_TIMEOUT_SECONDS should be ignored, got %v", cfg.SideEffectTimeout)
+	}
+	if cfg.MonitoringInterval == 1*time.Second {
+		t.Fatalf("MONITORING_INTERVAL should be ignored, got %v", cfg.MonitoringInterval)
+	}
+	if cfg.ReenableTickSeconds != 10 {
+		t.Fatalf("REENABLE_TICK_SECONDS should be ignored, got %d", cfg.ReenableTickSeconds)
+	}
+	if cfg.ReenableBatchSize != 100 {
+		t.Fatalf("REENABLE_BATCH_SIZE should be ignored, got %d", cfg.ReenableBatchSize)
+	}
+	if cfg.MaxRequestBytes == 123 {
+		t.Fatalf("MAX_REQUEST_BYTES should be ignored, got %d", cfg.MaxRequestBytes)
+	}
+	if cfg.MaxLogEntriesPerRequest == 4 {
+		t.Fatalf("MAX_LOG_ENTRIES_PER_REQUEST should be ignored, got %d", cfg.MaxLogEntriesPerRequest)
 	}
 }
 

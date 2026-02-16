@@ -247,6 +247,22 @@ func shouldRetryFallback(err error) bool {
 	return false
 }
 
+func isNoFreeRequestsError(err error) bool {
+	var statusErr *httpStatusError
+	if !errors.As(err, &statusErr) {
+		return false
+	}
+	if statusErr.StatusCode != http.StatusTooManyRequests {
+		return false
+	}
+
+	body := strings.ToLower(strings.TrimSpace(statusErr.Body))
+	if body == "" {
+		return false
+	}
+	return strings.Contains(body, "no free requests at this moment")
+}
+
 func (s *GeoIPService) disableFallbackProvider(reason string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -374,6 +390,11 @@ func (s *GeoIPService) processFallbackTask(ctx context.Context, task fallbackTas
 			return
 		}
 		if isHTTPStatusCode(fbErr, http.StatusTooManyRequests) {
+			if isNoFreeRequestsError(fbErr) {
+				s.disableFallbackProvider("received 429 No free requests at this moment; check 2IP plan/token balance")
+				s.finishFallbackTask(task.IP)
+				return
+			}
 			s.activateFallbackCooldown("received 429 Too Many Requests")
 		}
 
@@ -520,7 +541,11 @@ func (s *GeoIPService) Lookup(ctx context.Context, ip string) (*GeoLocation, err
 				if isHTTPStatusCode(fbErr, http.StatusUnauthorized) {
 					s.disableFallbackProvider("received 401 Unauthorized; check TWOIP_TOKEN and API balance")
 				} else if isHTTPStatusCode(fbErr, http.StatusTooManyRequests) {
-					s.activateFallbackCooldown("received 429 Too Many Requests")
+					if isNoFreeRequestsError(fbErr) {
+						s.disableFallbackProvider("received 429 No free requests at this moment; check 2IP plan/token balance")
+					} else {
+						s.activateFallbackCooldown("received 429 Too Many Requests")
+					}
 				}
 				s.enqueueFallbackTask(ip)
 			} else if fallbackLoc != nil {

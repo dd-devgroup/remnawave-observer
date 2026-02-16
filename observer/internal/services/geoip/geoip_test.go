@@ -266,6 +266,36 @@ func TestLookup_PausesFallbackAfterTooManyRequests(t *testing.T) {
 	}
 }
 
+func TestLookup_DisablesFallbackAfterNoFreeRequests429(t *testing.T) {
+	svc := NewGeoIPService(nil, nil, nil, 0)
+	defer svc.Close()
+	svc.SetFallbackRateLimit(0, time.Hour)
+
+	fallback := &fallbackProviderStub{
+		name: "2ip",
+		err: &httpStatusError{
+			Provider:   "2ip",
+			StatusCode: http.StatusTooManyRequests,
+			Body:       `{"error":"Unauthorized","message":"No free requests at this moment"}`,
+		},
+	}
+	svc.SetFallbackProvider(fallback)
+
+	if _, err := svc.Lookup(context.Background(), "89.39.121.249"); err != nil {
+		t.Fatalf("unexpected lookup error on first call: %v", err)
+	}
+	if fallback.Calls() != 1 {
+		t.Fatalf("expected first fallback call, got %d", fallback.Calls())
+	}
+
+	if _, err := svc.Lookup(context.Background(), "89.39.121.250"); err != nil {
+		t.Fatalf("unexpected lookup error on second call: %v", err)
+	}
+	if fallback.Calls() != 1 {
+		t.Fatalf("expected fallback to be disabled after no-free-requests 429, calls=%d", fallback.Calls())
+	}
+}
+
 func TestLookup_RespectsFallbackMinDelay(t *testing.T) {
 	svc := NewGeoIPService(nil, nil, nil, 0)
 	defer svc.Close()
