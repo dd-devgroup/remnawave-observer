@@ -108,7 +108,7 @@ func (p *TwoIPProvider) Name() string {
 
 // Lookup fetches geolocation data for a specific IP via:
 //
-//	GET <baseURL>/<IP> with API token in headers.
+//	GET <baseURL>/<IP>?token=<TOKEN>
 func (p *TwoIPProvider) Lookup(ctx context.Context, ip string) (*FallbackLocation, error) {
 	ip = strings.TrimSpace(ip)
 	if ip == "" {
@@ -118,15 +118,11 @@ func (p *TwoIPProvider) Lookup(ctx context.Context, ip string) (*FallbackLocatio
 		return nil, fmt.Errorf("2ip lookup: token is empty")
 	}
 
-	endpoint := fmt.Sprintf("%s/%s", p.baseURL, url.PathEscape(ip))
+	endpoint := fmt.Sprintf("%s/%s?token=%s", p.baseURL, url.PathEscape(ip), url.QueryEscape(p.token))
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
 		return nil, fmt.Errorf("2ip lookup: new request: %w", err)
 	}
-	// 2IP accepts token in headers (free and paid plans).
-	// Query token can return 401 for free tokens, so do not use URL query auth.
-	req.Header.Set("Authorization", "Bearer "+p.token)
-	req.Header.Set("X-API-Key", p.token)
 
 	resp, err := p.client.Do(req)
 	if err != nil {

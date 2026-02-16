@@ -14,14 +14,8 @@ func TestTwoIPProviderLookup_Success(t *testing.T) {
 		if r.URL.Path != "/9.9.9.9" {
 			t.Fatalf("unexpected path: %s", r.URL.Path)
 		}
-		if got := r.URL.Query().Get("token"); got != "" {
-			t.Fatalf("token must not be sent in query, got %q", got)
-		}
-		if got := r.Header.Get("Authorization"); got != "Bearer test-token" {
-			t.Fatalf("unexpected Authorization header: %q", got)
-		}
-		if got := r.Header.Get("X-API-Key"); got != "test-token" {
-			t.Fatalf("unexpected X-API-Key header: %q", got)
+		if got := r.URL.Query().Get("token"); got != "test-token" {
+			t.Fatalf("token query must be set, got %q", got)
 		}
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{
