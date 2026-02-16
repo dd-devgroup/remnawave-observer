@@ -15,19 +15,15 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// setupEnforcerTest создаёт test enforcer + mock HTTP server + in-memory Redis.
+const enforcerTestUUID = "123e4567-e89b-12d3-a456-426614174000"
+
 func setupEnforcerTest(t *testing.T, handler http.HandlerFunc) (Enforcer, *redis.Client, *mockRedisStore) {
-	// Mock HTTP server для Remnawave API
 	server := httptest.NewServer(handler)
 	t.Cleanup(server.Close)
 
-	// In-memory Redis
 	redisClient := redis.NewClient(&redis.Options{Addr: "localhost:63791"})
-
-	// Remnawave client
 	client := remnawave.NewClient(server.URL, "test-token", 5, 24, redisClient)
 
-	// Mock storage (заглушка для тестов без реального Redis)
 	store := &mockRedisStore{
 		uuidCache:      make(map[int64]string),
 		disableRecords: make(map[int64]*storage.DisableRecord),
@@ -41,7 +37,56 @@ func setupEnforcerTest(t *testing.T, handler http.HandlerFunc) (Enforcer, *redis
 	return enforcer, redisClient, store
 }
 
-// mockRedisStore — in-memory заглушка storage для тестов
+func writeJSON(w http.ResponseWriter, code int, payload any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(code)
+	_ = json.NewEncoder(w).Encode(payload)
+}
+
+func mockUserResponse(uuid string) map[string]any {
+	timestamp := "2026-02-16T17:57:06.730Z"
+	return map[string]any{
+		"response": map[string]any{
+			"uuid":                   uuid,
+			"id":                     1,
+			"shortUuid":              "short-uuid",
+			"username":               "test-user",
+			"status":                 "ACTIVE",
+			"trafficLimitBytes":      0,
+			"trafficLimitStrategy":   "NO_RESET",
+			"expireAt":               timestamp,
+			"telegramId":             nil,
+			"email":                  nil,
+			"description":            nil,
+			"tag":                    nil,
+			"hwidDeviceLimit":        nil,
+			"externalSquadUuid":      nil,
+			"trojanPassword":         "tp",
+			"vlessUuid":              uuid,
+			"ssPassword":             "sp",
+			"lastTriggeredThreshold": 0,
+			"subRevokedAt":           nil,
+			"subLastUserAgent":       nil,
+			"subLastOpenedAt":        nil,
+			"lastTrafficResetAt":     nil,
+			"createdAt":              timestamp,
+			"updatedAt":              timestamp,
+			"subscriptionUrl":        "https://example/sub",
+			"activeInternalSquads": []map[string]any{
+				{"uuid": uuid, "name": "default"},
+			},
+			"userTraffic": map[string]any{
+				"usedTrafficBytes":         1,
+				"lifetimeUsedTrafficBytes": 1,
+				"onlineAt":                 nil,
+				"firstConnectedAt":         nil,
+				"lastConnectedNodeUuid":    nil,
+			},
+		},
+	}
+}
+
+// mockRedisStore is an in-memory test storage.
 type mockRedisStore struct {
 	uuidCache      map[int64]string
 	disableRecords map[int64]*storage.DisableRecord
@@ -78,45 +123,37 @@ func (m *mockRedisStore) ClearDisableRecord(ctx context.Context, internalID int6
 	return nil
 }
 
-// Тесты
-
 func TestRemnawaveEnforcer_DisableTempByInternalID_Success(t *testing.T) {
 	resolveCallCount := 0
 	disableCallCount := 0
 
 	handler := func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/api/users/12345" {
+		if r.URL.Path == "/api/users/by-id/12345" {
 			resolveCallCount++
-			w.WriteHeader(http.StatusOK)
-			json.NewEncoder(w).Encode(map[string]string{"uuid": "user-uuid-12345"})
+			writeJSON(w, http.StatusOK, mockUserResponse(enforcerTestUUID))
 			return
 		}
-		if r.URL.Path == "/api/users/user-uuid-12345/disable" {
+		if r.URL.Path == "/api/users/"+enforcerTestUUID+"/actions/disable" {
 			disableCallCount++
-			w.WriteHeader(http.StatusOK)
+			writeJSON(w, http.StatusOK, mockUserResponse(enforcerTestUUID))
 			return
 		}
-		w.WriteHeader(http.StatusNotFound)
+		writeJSON(w, http.StatusNotFound, map[string]any{"message": "not found", "statusCode": 404})
 	}
 
 	enforcer, _, store := setupEnforcerTest(t, handler)
-	ctx := context.Background()
-
-	err := enforcer.DisableTempByInternalID(ctx, 12345, 10*time.Minute, "test reason", 85)
+	err := enforcer.DisableTempByInternalID(context.Background(), 12345, 10*time.Minute, "test reason", 85)
 	require.NoError(t, err)
 
-	// Проверяем что UUID был закэширован
-	uuid, ok := store.GetUserUUIDCache(ctx, 12345)
+	uuid, ok := store.GetUserUUIDCache(context.Background(), 12345)
 	assert.True(t, ok)
-	assert.Equal(t, "user-uuid-12345", uuid)
-
-	// Проверяем что disable был вызван
+	assert.Equal(t, enforcerTestUUID, uuid)
+	assert.Equal(t, 1, resolveCallCount)
 	assert.Equal(t, 1, disableCallCount)
 
-	// Проверяем что запись о disable создана
-	rec, ok := store.GetDisableRecord(ctx, 12345)
+	rec, ok := store.GetDisableRecord(context.Background(), 12345)
 	assert.True(t, ok)
-	assert.Equal(t, "user-uuid-12345", rec.UUID)
+	assert.Equal(t, enforcerTestUUID, rec.UUID)
 	assert.Equal(t, "test reason", rec.Reason)
 	assert.Equal(t, 85, rec.Score)
 }
@@ -124,32 +161,28 @@ func TestRemnawaveEnforcer_DisableTempByInternalID_Success(t *testing.T) {
 func TestRemnawaveEnforcer_DisableTempByInternalID_CacheHit(t *testing.T) {
 	resolveCallCount := 0
 	disableCallCount := 0
+	cachedUUID := "223e4567-e89b-12d3-a456-426614174000"
 
 	handler := func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/api/users/12345" {
+		if r.URL.Path == "/api/users/by-id/12345" {
 			resolveCallCount++
-			w.WriteHeader(http.StatusOK)
-			json.NewEncoder(w).Encode(map[string]string{"uuid": "user-uuid-12345"})
+			writeJSON(w, http.StatusOK, mockUserResponse(enforcerTestUUID))
 			return
 		}
-		if r.URL.Path == "/api/users/user-uuid-cached/disable" {
+		if r.URL.Path == "/api/users/"+cachedUUID+"/actions/disable" {
 			disableCallCount++
-			w.WriteHeader(http.StatusOK)
+			writeJSON(w, http.StatusOK, mockUserResponse(cachedUUID))
 			return
 		}
-		w.WriteHeader(http.StatusNotFound)
+		writeJSON(w, http.StatusNotFound, map[string]any{"message": "not found", "statusCode": 404})
 	}
 
 	enforcer, _, store := setupEnforcerTest(t, handler)
-	ctx := context.Background()
+	_ = store.SetUserUUIDCache(context.Background(), 12345, cachedUUID, 24*time.Hour)
 
-	// Pre-populate cache
-	store.SetUserUUIDCache(ctx, 12345, "user-uuid-cached", 24*time.Hour)
-
-	err := enforcer.DisableTempByInternalID(ctx, 12345, 10*time.Minute, "test", 80)
+	err := enforcer.DisableTempByInternalID(context.Background(), 12345, 10*time.Minute, "test", 80)
 	require.NoError(t, err)
 
-	// Resolve API не должен был вызываться (cache hit)
 	assert.Equal(t, 0, resolveCallCount)
 	assert.Equal(t, 1, disableCallCount)
 }
@@ -158,54 +191,53 @@ func TestRemnawaveEnforcer_DisableTempByInternalID_Idempotent(t *testing.T) {
 	disableCallCount := 0
 
 	handler := func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/api/users/12345" {
-			w.WriteHeader(http.StatusOK)
-			json.NewEncoder(w).Encode(map[string]string{"uuid": "user-uuid-12345"})
+		if r.URL.Path == "/api/users/by-id/12345" {
+			writeJSON(w, http.StatusOK, mockUserResponse(enforcerTestUUID))
 			return
 		}
-		if r.URL.Path == "/api/users/user-uuid-12345/disable" {
+		if r.URL.Path == "/api/users/"+enforcerTestUUID+"/actions/disable" {
 			disableCallCount++
-			w.WriteHeader(http.StatusOK)
+			writeJSON(w, http.StatusOK, mockUserResponse(enforcerTestUUID))
 			return
 		}
-		w.WriteHeader(http.StatusNotFound)
+		writeJSON(w, http.StatusNotFound, map[string]any{"message": "not found", "statusCode": 404})
 	}
 
 	enforcer, _, store := setupEnforcerTest(t, handler)
-	ctx := context.Background()
 
-	// Первый disable на 10 минут
-	err := enforcer.DisableTempByInternalID(ctx, 12345, 10*time.Minute, "first", 80)
+	err := enforcer.DisableTempByInternalID(context.Background(), 12345, 10*time.Minute, "first", 80)
 	require.NoError(t, err)
 	assert.Equal(t, 1, disableCallCount)
 
-	rec1, _ := store.GetDisableRecord(ctx, 12345)
+	rec1, _ := store.GetDisableRecord(context.Background(), 12345)
 
-	// Второй disable на 5 минут (меньше): должен пропуститься (идемпотентность)
-	err = enforcer.DisableTempByInternalID(ctx, 12345, 5*time.Minute, "second", 90)
+	err = enforcer.DisableTempByInternalID(context.Background(), 12345, 5*time.Minute, "second", 90)
 	require.NoError(t, err)
-
-	// Disable API не должен был вызваться второй раз
 	assert.Equal(t, 1, disableCallCount, "idempotent: should not call disable again")
 
-	// Запись не должна была измениться
-	rec2, _ := store.GetDisableRecord(ctx, 12345)
+	rec2, _ := store.GetDisableRecord(context.Background(), 12345)
 	assert.Equal(t, rec1.UntilUnix, rec2.UntilUnix)
-	assert.Equal(t, "first", rec2.Reason) // старая запись сохранена
+	assert.Equal(t, "first", rec2.Reason)
 }
 
 func TestRemnawaveEnforcer_Ping_Success(t *testing.T) {
 	handler := func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/api/health" {
-			w.WriteHeader(http.StatusOK)
+		if r.URL.Path == "/api/system/health" {
+			writeJSON(w, http.StatusOK, map[string]any{
+				"response": map[string]any{
+					"pm2Stats": []map[string]any{{
+						"name":   "api",
+						"memory": "10MB",
+						"cpu":    "1%",
+					}},
+				},
+			})
 			return
 		}
-		w.WriteHeader(http.StatusNotFound)
+		writeJSON(w, http.StatusNotFound, map[string]any{"message": "not found", "statusCode": 404})
 	}
 
 	enforcer, _, _ := setupEnforcerTest(t, handler)
-	ctx := context.Background()
-
-	err := enforcer.Ping(ctx)
+	err := enforcer.Ping(context.Background())
 	require.NoError(t, err)
 }

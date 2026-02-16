@@ -82,7 +82,7 @@ type Config struct {
 
 	// --- ПАРАМЕТРЫ REMNAWAVE ENFORCEMENT ---
 	RemnawaveBaseURL        string // Base URL Remnawave панели (например: https://panel.example.com)
-	RemnawaveAPIToken       string // API токен для аутентификации (X-Api-Key)
+	RemnawaveAPIToken       string // API token for Remnawave Authorization (Bearer)
 	RemnawaveTimeoutSeconds int    // Таймаут HTTP запросов к Remnawave (default: 5)
 	UserIDUUIDCacheTTLHours int    // TTL кэша internal_id→uuid в часах (default: 24)
 	ReenableTickSeconds     int    // Интервал проверки просроченных disable в секундах (default: 10)
