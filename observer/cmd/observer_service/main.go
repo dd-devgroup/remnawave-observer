@@ -73,12 +73,13 @@ func main() {
 	// MIG-9: RabbitMQ publisher removed, using Remnawave enforcement
 	var enforcer enforcement.Enforcer
 	if cfg.RemnawaveBaseURL != "" && cfg.RemnawaveAPIToken != "" {
-		remnawaveClient := remnawave.NewClient(
+		remnawaveClient := remnawave.NewClientWithHeader(
 			cfg.RemnawaveBaseURL,
 			cfg.RemnawaveAPIToken,
 			cfg.RemnawaveTimeoutSeconds,
 			cfg.UserIDUUIDCacheTTLHours,
 			redisStore.GetClient(),
+			cfg.RemnawaveHeader,
 		)
 		enforcer = enforcement.NewRemnawaveEnforcer(remnawaveClient, redisStore)
 		log.Printf("✅ Remnawave Enforcer initialized (URL: %s)", cfg.RemnawaveBaseURL)
@@ -219,12 +220,13 @@ func main() {
 	var reenableScheduler *enforcement.Scheduler
 	if cfg.RemnawaveBaseURL != "" && cfg.RemnawaveAPIToken != "" {
 		// Create scheduler with the same Remnawave client
-		remnawaveClient := remnawave.NewClient(
+		remnawaveClient := remnawave.NewClientWithHeader(
 			cfg.RemnawaveBaseURL,
 			cfg.RemnawaveAPIToken,
 			cfg.RemnawaveTimeoutSeconds,
 			cfg.UserIDUUIDCacheTTLHours,
 			redisStore.GetClient(),
+			cfg.RemnawaveHeader,
 		)
 		reenableScheduler = enforcement.NewScheduler(
 			remnawaveClient,

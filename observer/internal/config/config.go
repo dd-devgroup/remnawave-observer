@@ -85,6 +85,7 @@ type Config struct {
 	RemnawaveBaseURL        string // Base URL Remnawave панели (например: https://panel.example.com)
 	RemnawaveAPIToken       string // API token for Remnawave Authorization (Bearer)
 	RemnawaveTimeoutSeconds int    // Таймаут HTTP запросов к Remnawave (default: 5)
+	RemnawaveHeader         string // Optional reverse-proxy gate KEY=VALUE (added as query+cookie on each API request)
 	UserIDUUIDCacheTTLHours int    // TTL кэша internal_id→uuid в часах (default: 24)
 	ReenableTickSeconds     int    // Интервал проверки просроченных disable в секундах (default: 10)
 	ReenableBatchSize       int    // Максимальное количество enable за одну итерацию (default: 100)
@@ -158,6 +159,15 @@ func New() *Config {
 	sideEffectWorkers := defaultSideEffectWorkerPoolSize(logWorkers)
 	sideEffectChannelBuffer := defaultSideEffectChannelBufferSize(sideEffectWorkers)
 	maxRequestBytes := int64(defaultMaxRequestBytes)
+	remnawaveBaseURL := getEnv("REMNAWAVE_BASE_URL", "")
+	remnawaveHeader := getEnv("REMNAWAVE_HEADER", "")
+	remnawaveHeaderInvalid := false
+	if remnawaveHeader != "" {
+		if _, _, ok := parseNameValue(remnawaveHeader); !ok {
+			remnawaveHeaderInvalid = true
+			remnawaveHeader = ""
+		}
+	}
 
 	cfg := &Config{
 		Port:                        getEnv("PORT", "9000"),
@@ -229,9 +239,10 @@ func New() *Config {
 		CAIDARefreshHours: getEnvInt("CAIDA_REFRESH_HOURS", 168),
 
 		// --- Загрузка параметров Remnawave enforcement ---
-		RemnawaveBaseURL:        getEnv("REMNAWAVE_BASE_URL", ""),
+		RemnawaveBaseURL:        remnawaveBaseURL,
 		RemnawaveAPIToken:       getEnv("REMNAWAVE_API_TOKEN", ""),
 		RemnawaveTimeoutSeconds: getEnvInt("REMNAWAVE_TIMEOUT_SECONDS", 5),
+		RemnawaveHeader:         remnawaveHeader,
 		UserIDUUIDCacheTTLHours: getEnvInt("USERID_UUID_CACHE_TTL_HOURS", 24),
 		ReenableTickSeconds:     defaultReenableTickSeconds,
 		ReenableBatchSize:       defaultReenableBatchSize,
@@ -252,6 +263,9 @@ func New() *Config {
 	}
 	if cfg.GeoFallbackTimeout < 1*time.Second {
 		cfg.GeoFallbackTimeout = 3 * time.Second
+	}
+	if remnawaveHeaderInvalid {
+		log.Printf("Warning: REMNAWAVE_HEADER must be in KEY=VALUE format; ignored")
 	}
 
 	log.Printf("Configuration loaded. Port: %s", cfg.Port)
@@ -291,6 +305,11 @@ func New() *Config {
 	}
 	if cfg.CAIDAEnabled {
 		log.Printf("CAIDA AS2Org enabled. Refresh every %dh", cfg.CAIDARefreshHours)
+	}
+	if cfg.RemnawaveHeader != "" {
+		if name, _, ok := parseNameValue(cfg.RemnawaveHeader); ok {
+			log.Printf("Remnawave gate header enabled from REMNAWAVE_HEADER: %s=<hidden>", name)
+		}
 	}
 
 	return cfg
@@ -343,4 +362,21 @@ func parseSet(value string) map[string]bool {
 		}
 	}
 	return set
+}
+
+func parseNameValue(value string) (string, string, bool) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "", "", false
+	}
+	parts := strings.SplitN(value, "=", 2)
+	if len(parts) != 2 {
+		return "", "", false
+	}
+	name := strings.TrimSpace(parts[0])
+	val := strings.TrimSpace(parts[1])
+	if name == "" || val == "" {
+		return "", "", false
+	}
+	return name, val, true
 }

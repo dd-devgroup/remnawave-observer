@@ -24,8 +24,42 @@ type Client struct {
 	cacheTTL time.Duration
 }
 
+func normalizeAPIToken(token string) string {
+	token = strings.TrimSpace(token)
+	if len(token) >= 7 && strings.EqualFold(token[:7], "Bearer ") {
+		token = strings.TrimSpace(token[7:])
+	}
+	return token
+}
+
+func parseNameValue(value string) (string, string, bool) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "", "", false
+	}
+	parts := strings.SplitN(value, "=", 2)
+	if len(parts) != 2 {
+		return "", "", false
+	}
+	name := strings.TrimSpace(parts[0])
+	val := strings.TrimSpace(parts[1])
+	if name == "" || val == "" {
+		return "", "", false
+	}
+	return name, val, true
+}
+
 // NewClient creates a Remnawave client with timeout and Redis cache settings.
 func NewClient(baseURL, apiToken string, timeoutSeconds, cacheTTLHours int, redisClient *redis.Client) *Client {
+	return NewClientWithHeader(baseURL, apiToken, timeoutSeconds, cacheTTLHours, redisClient, "")
+}
+
+// NewClientWithHeader creates a Remnawave client with optional gate bypass header in KEY=VALUE format.
+// If provided, the pair is added both as query parameter and cookie on each request.
+func NewClientWithHeader(baseURL, apiToken string, timeoutSeconds, cacheTTLHours int, redisClient *redis.Client, gateHeader string) *Client {
+	apiToken = normalizeAPIToken(apiToken)
+	gateName, gateValue, hasGateHeader := parseNameValue(gateHeader)
+
 	client := &Client{
 		baseURL:  baseURL,
 		apiToken: apiToken,
@@ -44,8 +78,13 @@ func NewClient(baseURL, apiToken string, timeoutSeconds, cacheTTLHours int, redi
 		remapi.StaticToken{Token: apiToken},
 		remapi.WithClient(httpClient),
 		remapi.WithRequestEditor(func(_ context.Context, req *http.Request) error {
-			// Keep compatibility with installations that still expect X-Api-Key.
-			req.Header.Set("X-Api-Key", apiToken)
+			if hasGateHeader {
+				query := req.URL.Query()
+				query.Set(gateName, gateValue)
+				req.URL.RawQuery = query.Encode()
+				req.AddCookie(&http.Cookie{Name: gateName, Value: gateValue})
+			}
+
 			return nil
 		}),
 	)
