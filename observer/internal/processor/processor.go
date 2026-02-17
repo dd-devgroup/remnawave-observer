@@ -704,6 +704,9 @@ func (p *LogProcessor) processEntryByASN(ctx context.Context, entry models.LogEn
 
 		if err := p.disableUser(ctx, entry.UserEmail, enfReason, enfScore); err != nil {
 			log.Printf("Enforcement error for %s: %v", entry.UserEmail, err)
+		} else {
+			// Reset ASN/IP hot-window state after successful enforcement.
+			p.scheduleASNClear(ctx, entry.UserEmail)
 		}
 
 		p.enqueueSideEffectTask(func(ctx context.Context) {
