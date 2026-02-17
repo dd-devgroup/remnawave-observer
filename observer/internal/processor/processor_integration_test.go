@@ -14,14 +14,30 @@ import (
 // asnMockStorage returns a fixed CheckResult for CheckAndAddASN.
 type asnMockStorage struct {
 	MockStorage
-	mu     sync.Mutex
-	result *models.CheckResult
+	mu      sync.Mutex
+	result  *models.CheckResult
+	clearCh chan struct{}
 }
 
 func (s *asnMockStorage) CheckAndAddASN(_ context.Context, _, _ string, _ int, _, _ time.Duration) (*models.CheckResult, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.result, nil
+}
+
+func (s *asnMockStorage) ClearUserASNData(_ context.Context, _ string) (int, error) {
+	s.mu.Lock()
+	clearCh := s.clearCh
+	s.mu.Unlock()
+
+	if clearCh != nil {
+		select {
+		case clearCh <- struct{}{}:
+		default:
+		}
+	}
+
+	return 1, nil
 }
 
 // capturingEnforcer captures disable calls for testing.
@@ -159,6 +175,35 @@ func TestIntegration_ASNMode_LimitExceeded_DisablesUser(t *testing.T) {
 	}
 	if alert.ViolationType != "asn_limit_exceeded" {
 		t.Errorf("violation_type = %q, want asn_limit_exceeded", alert.ViolationType)
+	}
+}
+
+func TestIntegration_ASNMode_LimitExceeded_SchedulesASNCleanup(t *testing.T) {
+	stor := &asnMockStorage{
+		result: &models.CheckResult{
+			StatusCode:   1,
+			CurrentCount: 4,
+			AllUserItems: []string{"AS13335", "AS15169", "AS32934", "AS16509"},
+		},
+		clearCh: make(chan struct{}, 1),
+	}
+	alrt := &capturingAlerter{}
+	cfg := asnCfg(3)
+	cfg.ClearIPsDelay = 10 * time.Millisecond
+
+	enf := &capturingEnforcer{}
+	proc := NewLogProcessor(stor, enf, alrt, cfg, nil, nil, nil, nil, nil, nil)
+	ctx := context.Background()
+
+	proc.ProcessEntries(ctx, []models.LogEntry{
+		{UserEmail: "12345", SourceIP: "10.0.0.4"},
+	})
+
+	select {
+	case <-stor.clearCh:
+		// Expected cleanup call after successful enforcement.
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("expected ClearUserASNData call after enforcement, got timeout")
 	}
 }
 
