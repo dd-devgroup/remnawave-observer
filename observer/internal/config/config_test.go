@@ -21,6 +21,9 @@ func TestRemnawaveConfigDefaults(t *testing.T) {
 	if cfg.RemnawaveTimeoutSeconds != 5 {
 		t.Errorf("expected RemnawaveTimeoutSeconds = 5, got %d", cfg.RemnawaveTimeoutSeconds)
 	}
+	if cfg.RemnawaveHeader != "" {
+		t.Errorf("expected RemnawaveHeader default empty, got %q", cfg.RemnawaveHeader)
+	}
 	if cfg.UserIDUUIDCacheTTLHours != 24 {
 		t.Errorf("expected UserIDUUIDCacheTTLHours = 24, got %d", cfg.UserIDUUIDCacheTTLHours)
 	}
@@ -37,6 +40,7 @@ func TestRemnawaveConfigCustomValues(t *testing.T) {
 	os.Setenv("REMNAWAVE_BASE_URL", "https://panel.example.com")
 	os.Setenv("REMNAWAVE_API_TOKEN", "secret-token")
 	os.Setenv("REMNAWAVE_TIMEOUT_SECONDS", "10")
+	os.Setenv("REMNAWAVE_HEADER", "gate_key=gate_value")
 	os.Setenv("USERID_UUID_CACHE_TTL_HOURS", "48")
 
 	cfg := New()
@@ -49,6 +53,9 @@ func TestRemnawaveConfigCustomValues(t *testing.T) {
 	}
 	if cfg.RemnawaveTimeoutSeconds != 10 {
 		t.Errorf("expected RemnawaveTimeoutSeconds = 10, got %d", cfg.RemnawaveTimeoutSeconds)
+	}
+	if cfg.RemnawaveHeader != "gate_key=gate_value" {
+		t.Errorf("expected RemnawaveHeader = gate_key=gate_value, got %q", cfg.RemnawaveHeader)
 	}
 	if cfg.UserIDUUIDCacheTTLHours != 48 {
 		t.Errorf("expected UserIDUUIDCacheTTLHours = 48, got %d", cfg.UserIDUUIDCacheTTLHours)
@@ -79,6 +86,33 @@ func TestRemnawaveConfigValidation(t *testing.T) {
 	}
 	if cfg.ReenableBatchSize != 100 {
 		t.Errorf("expected ReenableBatchSize clamp to 100, got %d", cfg.ReenableBatchSize)
+	}
+}
+
+func TestRemnawaveConfigHeaderShortcut(t *testing.T) {
+	os.Clearenv()
+	os.Setenv("REMNAWAVE_BASE_URL", "https://panel.example.com")
+	os.Setenv("REMNAWAVE_API_TOKEN", "secret-token")
+	os.Setenv("REMNAWAVE_HEADER", "gate_key=gate_value")
+
+	cfg := New()
+
+	if cfg.RemnawaveBaseURL != "https://panel.example.com" {
+		t.Errorf("expected RemnawaveBaseURL = https://panel.example.com, got %q", cfg.RemnawaveBaseURL)
+	}
+	if cfg.RemnawaveHeader != "gate_key=gate_value" {
+		t.Errorf("expected RemnawaveHeader from REMNAWAVE_HEADER, got %q", cfg.RemnawaveHeader)
+	}
+}
+
+func TestRemnawaveHeaderInvalidFormat(t *testing.T) {
+	os.Clearenv()
+	os.Setenv("REMNAWAVE_HEADER", "bad-format")
+
+	cfg := New()
+
+	if cfg.RemnawaveHeader != "" {
+		t.Errorf("expected invalid REMNAWAVE_HEADER to be disabled, got %q", cfg.RemnawaveHeader)
 	}
 }
 

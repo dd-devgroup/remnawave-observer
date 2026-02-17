@@ -74,7 +74,6 @@ func TestResolveUUIDByInternalID_Success(t *testing.T) {
 	handler := func(w http.ResponseWriter, r *http.Request) {
 		assert.Equal(t, "/api/users/by-id/12345", r.URL.Path)
 		assert.Equal(t, "Bearer test-token", r.Header.Get("Authorization"))
-		assert.Equal(t, "test-token", r.Header.Get("X-Api-Key"))
 		writeJSON(w, http.StatusOK, mockUserResponse(testUUID))
 	}
 
@@ -82,6 +81,51 @@ func TestResolveUUIDByInternalID_Success(t *testing.T) {
 	uuid, err := client.ResolveUUIDByInternalID(context.Background(), 12345)
 	require.NoError(t, err)
 	assert.Equal(t, testUUID, uuid)
+}
+
+func TestRequestEditor_GateQueryAndCookie(t *testing.T) {
+	handler := func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, "/api/system/health", r.URL.Path)
+		assert.Equal(t, "gate_value", r.URL.Query().Get("gate_key"))
+		assert.Equal(t, "gate_key=gate_value", r.Header.Get("Cookie"))
+		assert.Equal(t, "Bearer test-token", r.Header.Get("Authorization"))
+		writeJSON(w, http.StatusOK, map[string]any{
+			"response": map[string]any{
+				"pm2Stats": []map[string]any{{
+					"name":   "api",
+					"memory": "10MB",
+					"cpu":    "1%",
+				}},
+			},
+		})
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(handler))
+	t.Cleanup(server.Close)
+
+	client := NewClientWithHeader(server.URL, "test-token", 1, 24, nil, "gate_key=gate_value")
+
+	err := client.Ping(context.Background())
+	require.NoError(t, err)
+}
+
+func TestAuthToken_BearerPrefixInEnvIsNormalized(t *testing.T) {
+	handler := func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, "/api/system/health", r.URL.Path)
+		assert.Equal(t, "Bearer test-token", r.Header.Get("Authorization"))
+		writeJSON(w, http.StatusOK, map[string]any{
+			"response": map[string]any{
+				"pm2Stats": []map[string]any{{"name": "api", "memory": "10MB", "cpu": "1%"}},
+			},
+		})
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(handler))
+	t.Cleanup(server.Close)
+
+	client := NewClient(server.URL, "Bearer test-token", 1, 24, nil)
+	err := client.Ping(context.Background())
+	require.NoError(t, err)
 }
 
 func TestResolveUUIDByInternalID_NotFound(t *testing.T) {
@@ -125,7 +169,6 @@ func TestDisableUser_Success(t *testing.T) {
 		assert.Equal(t, "/api/users/"+testUUID+"/actions/disable", r.URL.Path)
 		assert.Equal(t, http.MethodPost, r.Method)
 		assert.Equal(t, "Bearer test-token", r.Header.Get("Authorization"))
-		assert.Equal(t, "test-token", r.Header.Get("X-Api-Key"))
 		writeJSON(w, http.StatusOK, mockUserResponse(testUUID))
 	}
 
@@ -161,7 +204,6 @@ func TestPing_Success(t *testing.T) {
 	handler := func(w http.ResponseWriter, r *http.Request) {
 		assert.Equal(t, "/api/system/health", r.URL.Path)
 		assert.Equal(t, "Bearer test-token", r.Header.Get("Authorization"))
-		assert.Equal(t, "test-token", r.Header.Get("X-Api-Key"))
 		writeJSON(w, http.StatusOK, map[string]any{
 			"response": map[string]any{
 				"pm2Stats": []map[string]any{{
