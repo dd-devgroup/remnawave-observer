@@ -72,8 +72,9 @@ func main() {
 	log.Println("[Startup] Stage 3/5: initializing observer core")
 	// MIG-9: RabbitMQ publisher removed, using Remnawave enforcement
 	var enforcer enforcement.Enforcer
+	var remnawaveClient *remnawave.Client
 	if cfg.RemnawaveBaseURL != "" && cfg.RemnawaveAPIToken != "" {
-		remnawaveClient := remnawave.NewClientWithHeader(
+		remnawaveClient = remnawave.NewClientWithHeader(
 			cfg.RemnawaveBaseURL,
 			cfg.RemnawaveAPIToken,
 			cfg.RemnawaveTimeoutSeconds,
@@ -81,6 +82,12 @@ func main() {
 			redisStore.GetClient(),
 			cfg.RemnawaveHeader,
 		)
+		pingCtx, pingCancel := context.WithTimeout(ctx, time.Duration(cfg.RemnawaveTimeoutSeconds)*time.Second)
+		if err := remnawaveClient.Ping(pingCtx); err != nil {
+			pingCancel()
+			log.Fatalf("Critical error: failed to connect to Remnawave API (%s): %v", cfg.RemnawaveBaseURL, err)
+		}
+		pingCancel()
 		enforcer = enforcement.NewRemnawaveEnforcer(remnawaveClient, redisStore)
 		log.Printf("✅ Remnawave Enforcer initialized (URL: %s)", cfg.RemnawaveBaseURL)
 	} else {
@@ -218,16 +225,7 @@ func main() {
 
 	// MIG-7: Initialize Re-enable Scheduler
 	var reenableScheduler *enforcement.Scheduler
-	if cfg.RemnawaveBaseURL != "" && cfg.RemnawaveAPIToken != "" {
-		// Create scheduler with the same Remnawave client
-		remnawaveClient := remnawave.NewClientWithHeader(
-			cfg.RemnawaveBaseURL,
-			cfg.RemnawaveAPIToken,
-			cfg.RemnawaveTimeoutSeconds,
-			cfg.UserIDUUIDCacheTTLHours,
-			redisStore.GetClient(),
-			cfg.RemnawaveHeader,
-		)
+	if remnawaveClient != nil {
 		reenableScheduler = enforcement.NewScheduler(
 			remnawaveClient,
 			redisStore,
