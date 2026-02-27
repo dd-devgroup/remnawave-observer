@@ -294,8 +294,8 @@ func TestScorer_FullCalculation(t *testing.T) {
 	if result.FinalScore < 0 || result.FinalScore > 100 {
 		t.Errorf("FinalScore out of range: %.2f", result.FinalScore)
 	}
-	if len(result.Features) != 4 {
-		t.Errorf("expected 4 feature results, got %d", len(result.Features))
+	if len(result.Features) != 5 {
+		t.Errorf("expected 5 feature results, got %d", len(result.Features))
 	}
 	if result.Confidence <= 0 || result.Confidence > 1 {
 		t.Errorf("confidence out of range: %.2f", result.Confidence)
