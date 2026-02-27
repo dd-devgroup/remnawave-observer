@@ -100,6 +100,7 @@ func (s *Server) handleProcessLogEntries(c *gin.Context) {
 		return
 	}
 
+	filtered := entries[:0]
 	for i, entry := range entries {
 		if entry.UserEmail == "" {
 			c.JSON(http.StatusBadRequest, gin.H{
@@ -108,7 +109,8 @@ func (s *Server) handleProcessLogEntries(c *gin.Context) {
 			})
 			return
 		}
-		if _, err := netip.ParseAddr(entry.SourceIP); err != nil {
+		addr, err := netip.ParseAddr(entry.SourceIP)
+		if err != nil {
 			log.Printf("Invalid source_ip in entry %d for user %s: %q", i, entry.UserEmail, entry.SourceIP)
 			c.JSON(http.StatusBadRequest, gin.H{
 				"error": fmt.Sprintf("invalid source_ip at index %d: %q", i, entry.SourceIP),
@@ -116,6 +118,20 @@ func (s *Server) handleProcessLogEntries(c *gin.Context) {
 			})
 			return
 		}
+		if addr.IsUnspecified() {
+			log.Printf("Skipping unspecified source_ip %q for user %s (entry %d)", entry.SourceIP, entry.UserEmail, i)
+			continue
+		}
+		filtered = append(filtered, entry)
+	}
+	entries = filtered
+
+	if len(entries) == 0 {
+		c.JSON(http.StatusAccepted, gin.H{
+			"status":            "accepted",
+			"processed_entries": 0,
+		})
+		return
 	}
 
 	if err := s.enqueuer.EnqueueEntries(entries); err != nil {
