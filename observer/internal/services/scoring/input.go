@@ -11,4 +11,7 @@ type ScoringInput struct {
 	GeoResult          *geoip.GeoAnalysisResult
 	UniqueCount        int
 	Limit              int
+	// IPsPerASN holds the number of unique IPs seen per ASN in the current TTL window.
+	// Used by IPDensityFeature to detect sharing via IP count on non-mobile providers.
+	IPsPerASN map[string]int
 }

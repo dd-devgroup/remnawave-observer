@@ -953,11 +953,18 @@ func (p *LogProcessor) performEnhancedAnalytics(
 		GeoFlags:        geoResult.GeoFlags,
 	}
 
+	// Build per-ASN IP count map for IPDensityFeature.
+	ipsPerASN := make(map[string]int, len(asnDetails))
+	for asnStr, info := range asnDetails {
+		ipsPerASN[asnStr] = len(info.IPs)
+	}
+
 	violationScore := p.scorer.Calculate(&scoring.ScoringInput{
 		ASNClassifications: asnClassifications,
 		GeoResult:          geoResultForScorer,
 		UniqueCount:        len(allASNs),
 		Limit:              p.cfg.MaxASNsPerUser,
+		IPsPerASN:          ipsPerASN,
 	})
 
 	log.Printf("[Anti-Abuse] Analysis for %s: GeoScore=%d, ASNScore=%.1f, FinalScore=%.1f, Confidence=%.2f, Action=%s",

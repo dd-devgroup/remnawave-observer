@@ -29,6 +29,7 @@ func NewScorer(thresholds ScoreThresholds) *Scorer {
 			&ASNFeature{},
 			&GeoFeature{},
 			&CountFeature{},
+			&IPDensityFeature{},
 			&ProviderMixFeature{},
 		},
 	}
