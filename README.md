@@ -24,7 +24,7 @@ Current behavior:
 - users from configured `Internal Squads` are fully bypassed
 - garbage IPs like `0.0.0.0` and `::` are discarded silently and cleaned from Redis/PostgreSQL on startup
 - `HWID` and subscription request history (`SRH`) are used as anti-false-positive evidence
-- legacy `/log-entry` and `Vector` mode still exist via `LOG_SOURCE_MODE=http|hybrid`
+- legacy `/log-entry` is disabled and returns `410 Gone`
 
 ---
 
@@ -124,7 +124,6 @@ REDIS_URL=redis://redis:6379/0
 
 REMNAWAVE_BASE_URL=https://panel.example.com
 REMNAWAVE_API_TOKEN=your_api_token_here
-LOG_SOURCE_MODE=panel
 
 BLOCK_DURATION=10m
 USER_ASN_TTL_SECONDS=43200
@@ -153,7 +152,7 @@ docker logs observer -f
 - `Remnawave Node >= 2.7.0`
 - `cap_add: NET_ADMIN` on nodes if `NODE_EXECUTOR_BLOCK_ENABLED=true`
 
-`Vector` is no longer required for the default deployment. Legacy ingest is still available via `LOG_SOURCE_MODE=http|hybrid`.
+Observer is now strictly panel-only. `Vector` and HTTP log ingest are no longer supported.
 
 ---
 
@@ -169,7 +168,6 @@ docker logs observer -f
 | `REMNAWAVE_BASE_URL` | Remnawave panel URL | required |
 | `REMNAWAVE_API_TOKEN` | Remnawave API token | required |
 | `REMNAWAVE_HEADER` | Optional reverse-proxy gate header in `KEY=VALUE` format | empty |
-| `LOG_SOURCE_MODE` | Ingest mode: `panel`, `http`, `hybrid` | `panel` |
 | `REMNAWAVE_TIMEOUT_SECONDS` | Timeout for Remnawave API requests | `5` |
 | `USERID_UUID_CACHE_TTL_HOURS` | Internal ID -> UUID cache TTL | `24` |
 | `BLOCK_DURATION` | Disable duration | `5m` |
@@ -316,14 +314,9 @@ Users from excluded internal squads are bypassed before scoring, persistence, al
 
 That is expected. Unspecified IPs are discarded on ingest and removed from persisted hot-window/history state during startup cleanup.
 
-**Legacy Vector mode not sending logs**
+**`/log-entry` still receives traffic**
 
-Only relevant for `LOG_SOURCE_MODE=http|hybrid`:
-
-```bash
-docker logs vector-agent | grep -i error
-docker exec vector-agent tail -1 /var/log/xray/access.log
-```
+That means some old sender is still alive. Observer no longer accepts HTTP log ingest, so stop and remove the old `Vector` deployment on nodes.
 
 **Node-side IP block does not work**
 
@@ -332,12 +325,6 @@ Check:
 - `NODE_EXECUTOR_BLOCK_ENABLED=true`
 - node containers have `cap_add: NET_ADMIN`
 - `executor_block_fail` metric
-
----
-
-## Additional Docs
-
-- [observer/docs/VECTOR-AGENT-SETUP.md](observer/docs/VECTOR-AGENT-SETUP.md) — legacy per-node Vector setup for `LOG_SOURCE_MODE=http|hybrid`
 
 ---
 
@@ -356,7 +343,7 @@ Remnawave side:
 - `Remnawave Node >= 2.7.0`
 - `cap_add: NET_ADMIN` if temporary node-side IP blocking is enabled
 
-Legacy `Vector` mode additionally needs per-node agent resources and is no longer the default architecture.
+No separate per-node log collector is required anymore.
 
 ---
 

@@ -2,45 +2,31 @@ package api
 
 import (
 	"context"
-	"encoding/json"
-	"errors"
-	"fmt"
-	"io"
-	"log"
 	"net/http"
 	"observer_service/internal/config"
-	"observer_service/internal/iputil"
 	"observer_service/internal/metrics"
-	"observer_service/internal/models"
 	"observer_service/internal/services/storage"
 	"time"
 
 	"github.com/gin-gonic/gin"
 )
 
-// EntryEnqueuer определяет интерфейс для добавления записей в очередь обработки.
-type EntryEnqueuer interface {
-	EnqueueEntries(entries []models.LogEntry) error
-}
-
 type Server struct {
-	router   *gin.Engine
-	enqueuer EntryEnqueuer
-	storage  storage.Storage
-	port     string
-	cfg      *config.Config
+	router  *gin.Engine
+	storage storage.Storage
+	port    string
+	cfg     *config.Config
 }
 
-func NewServer(port string, enqueuer EntryEnqueuer, storage storage.Storage, cfg *config.Config) *Server {
+func NewServer(port string, storage storage.Storage, cfg *config.Config) *Server {
 	gin.SetMode(gin.ReleaseMode)
 	router := gin.Default()
 
 	s := &Server{
-		router:   router,
-		enqueuer: enqueuer,
-		storage:  storage,
-		port:     port,
-		cfg:      cfg,
+		router:  router,
+		storage: storage,
+		port:    port,
+		cfg:     cfg,
 	}
 
 	s.setupRoutes()
@@ -52,7 +38,7 @@ func (s *Server) GetRouter() *gin.Engine {
 }
 
 func (s *Server) setupRoutes() {
-	s.router.POST("/log-entry", s.handleProcessLogEntries)
+	s.router.POST("/log-entry", s.handleLegacyLogIngestRemoved)
 	s.router.GET("/health", s.handleHealthCheck)
 }
 
@@ -60,93 +46,12 @@ func (s *Server) Run() error {
 	return s.router.Run(":" + s.port)
 }
 
-func (s *Server) handleProcessLogEntries(c *gin.Context) {
+func (s *Server) handleLegacyLogIngestRemoved(c *gin.Context) {
 	metrics.RequestsTotal.Add(1)
-	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, s.cfg.MaxRequestBytes)
-
-	var entries []models.LogEntry
-	decoder := json.NewDecoder(c.Request.Body)
-
-	if err := decoder.Decode(&entries); err != nil {
-		metrics.RejectedRequestsTotal.Add(1)
-		var maxBytesErr *http.MaxBytesError
-		if errors.As(err, &maxBytesErr) {
-			c.JSON(http.StatusRequestEntityTooLarge, gin.H{"error": "request body exceeds maximum allowed size", "code": "body_too_large"})
-			return
-		}
-		if errors.Is(err, io.EOF) {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "empty request body", "code": "invalid_json"})
-			return
-		}
-
-		log.Printf("Body decoding error: %v", err)
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error(), "code": "invalid_json"})
-		return
-	}
-
-	if len(entries) == 0 {
-		metrics.RejectedRequestsTotal.Add(1)
-		c.JSON(http.StatusBadRequest, gin.H{"error": "empty entries array", "code": "empty_entries"})
-		return
-	}
-
-	if len(entries) > s.cfg.MaxLogEntriesPerRequest {
-		metrics.RejectedRequestsTotal.Add(1)
-		log.Printf("Request rejected: %d entries, max %d", len(entries), s.cfg.MaxLogEntriesPerRequest)
-		c.JSON(http.StatusBadRequest, gin.H{
-			"error": fmt.Sprintf("too many entries: %d, max allowed: %d", len(entries), s.cfg.MaxLogEntriesPerRequest),
-			"code":  "too_many_entries",
-		})
-		return
-	}
-
-	filtered := entries[:0]
-	for i, entry := range entries {
-		if entry.UserEmail == "" {
-			c.JSON(http.StatusBadRequest, gin.H{
-				"error": fmt.Sprintf("missing user_email at index %d", i),
-				"code":  "invalid_json",
-			})
-			return
-		}
-		addr, err := iputil.ParseSourceIP(entry.SourceIP)
-		if err != nil {
-			log.Printf("Invalid source_ip in entry %d for user %s: %q", i, entry.UserEmail, entry.SourceIP)
-			c.JSON(http.StatusBadRequest, gin.H{
-				"error": fmt.Sprintf("invalid source_ip at index %d: %q", i, entry.SourceIP),
-				"code":  "invalid_ip",
-			})
-			return
-		}
-		if addr.IsUnspecified() {
-			metrics.DiscardedUnspecifiedIP.Add(1)
-			continue
-		}
-		filtered = append(filtered, entry)
-	}
-	entries = filtered
-
-	if len(entries) == 0 {
-		c.JSON(http.StatusAccepted, gin.H{
-			"status":            "accepted",
-			"processed_entries": 0,
-		})
-		return
-	}
-
-	if err := s.enqueuer.EnqueueEntries(entries); err != nil {
-		metrics.RejectedRequestsTotal.Add(1)
-		log.Printf("Warning: log queue is full. Rejecting request for %d entries. Error: %v", len(entries), err)
-		c.JSON(http.StatusServiceUnavailable, gin.H{
-			"error": "Service is temporarily overloaded. Please try again later.",
-			"code":  "service_overloaded",
-		})
-		return
-	}
-
-	c.JSON(http.StatusAccepted, gin.H{
-		"status":            "accepted",
-		"processed_entries": len(entries),
+	metrics.RejectedRequestsTotal.Add(1)
+	c.JSON(http.StatusGone, gin.H{
+		"error": "legacy HTTP ingest has been removed; observer is panel-only",
+		"code":  "legacy_ingest_removed",
 	})
 }
 

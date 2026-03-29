@@ -91,44 +91,35 @@ func main() {
 	}
 
 	log.Println("[Startup] Stage 3/5: initializing observer core")
-	// MIG-9: RabbitMQ publisher removed, using Remnawave enforcement
-	var enforcer enforcement.Enforcer
-	var remnawaveClient *remnawave.Client
-	var squadExcluder *userpolicy.Excluder
-	if cfg.RemnawaveBaseURL != "" && cfg.RemnawaveAPIToken != "" {
-		remnawaveClient = remnawave.NewClientWithHeader(
-			cfg.RemnawaveBaseURL,
-			cfg.RemnawaveAPIToken,
-			cfg.RemnawaveTimeoutSeconds,
-			cfg.UserIDUUIDCacheTTLHours,
-			redisStore.GetClient(),
-			cfg.RemnawaveHeader,
-		)
-		pingCtx, pingCancel := context.WithTimeout(ctx, time.Duration(cfg.RemnawaveTimeoutSeconds)*time.Second)
-		if err := remnawaveClient.Ping(pingCtx); err != nil {
-			pingCancel()
-			log.Fatalf("Critical error: failed to connect to Remnawave API (%s): %v", cfg.RemnawaveBaseURL, err)
-		}
-		pingCancel()
-		enforcer = enforcement.NewRemnawaveEnforcer(remnawaveClient, redisStore)
-		log.Printf("✅ Remnawave Enforcer initialized (URL: %s)", cfg.RemnawaveBaseURL)
-		squadExcluder = userpolicy.NewExcluder(remnawaveClient, cfg.ExcludedInternalSquads)
-		if squadExcluder != nil {
-			validateCtx, validateCancel := context.WithTimeout(ctx, time.Duration(cfg.RemnawaveTimeoutSeconds)*time.Second)
-			missingSquads, err := squadExcluder.ValidateConfiguredSquads(validateCtx)
-			validateCancel()
-			if err != nil {
-				log.Printf("Warning: failed to validate excluded internal squads: %v", err)
-			} else if len(missingSquads) > 0 {
-				log.Printf("Warning: configured excluded internal squads are missing in panel: %v", missingSquads)
-			}
-		}
-	} else {
-		enforcer = enforcement.NewNoopEnforcer()
-		log.Printf("⚠️  Remnawave not configured, using noop enforcer")
+	if cfg.RemnawaveBaseURL == "" || cfg.RemnawaveAPIToken == "" {
+		log.Fatalf("Critical error: REMNAWAVE_BASE_URL and REMNAWAVE_API_TOKEN are required in panel-only mode")
 	}
-	if (cfg.LogSourceMode == "panel" || cfg.LogSourceMode == "hybrid") && remnawaveClient == nil {
-		log.Fatalf("Critical error: LOG_SOURCE_MODE=%s requires REMNAWAVE_BASE_URL and REMNAWAVE_API_TOKEN", cfg.LogSourceMode)
+	remnawaveClient := remnawave.NewClientWithHeader(
+		cfg.RemnawaveBaseURL,
+		cfg.RemnawaveAPIToken,
+		cfg.RemnawaveTimeoutSeconds,
+		cfg.UserIDUUIDCacheTTLHours,
+		redisStore.GetClient(),
+		cfg.RemnawaveHeader,
+	)
+	pingCtx, pingCancel := context.WithTimeout(ctx, time.Duration(cfg.RemnawaveTimeoutSeconds)*time.Second)
+	if err := remnawaveClient.Ping(pingCtx); err != nil {
+		pingCancel()
+		log.Fatalf("Critical error: failed to connect to Remnawave API (%s): %v", cfg.RemnawaveBaseURL, err)
+	}
+	pingCancel()
+	enforcer := enforcement.NewRemnawaveEnforcer(remnawaveClient, redisStore)
+	log.Printf("✅ Remnawave Enforcer initialized (URL: %s)", cfg.RemnawaveBaseURL)
+	squadExcluder := userpolicy.NewExcluder(remnawaveClient, cfg.ExcludedInternalSquads)
+	if squadExcluder != nil {
+		validateCtx, validateCancel := context.WithTimeout(ctx, time.Duration(cfg.RemnawaveTimeoutSeconds)*time.Second)
+		missingSquads, err := squadExcluder.ValidateConfiguredSquads(validateCtx)
+		validateCancel()
+		if err != nil {
+			log.Printf("Warning: failed to validate excluded internal squads: %v", err)
+		} else if len(missingSquads) > 0 {
+			log.Printf("Warning: configured excluded internal squads are missing in panel: %v", missingSquads)
+		}
 	}
 
 	webhookAlerter := alerter.NewWebhookAlerter(cfg.AlertWebhookURL)
@@ -232,11 +223,8 @@ func main() {
 	}
 
 	poolMonitor := monitor.NewPoolMonitor(redisStore, repo, cfg, geoService)
-	apiServer := api.NewServer(cfg.Port, logProcessor, redisStore, cfg)
-	var panelIngestService *panelingest.Service
-	if (cfg.LogSourceMode == "panel" || cfg.LogSourceMode == "hybrid") && remnawaveClient != nil {
-		panelIngestService = panelingest.NewService(remnawaveClient, logProcessor, squadExcluder, observationStore, cfg)
-	}
+	apiServer := api.NewServer(cfg.Port, redisStore, cfg)
+	panelIngestService := panelingest.NewService(remnawaveClient, logProcessor, squadExcluder, observationStore, cfg)
 
 	// Initialize CAIDA AS2Org (read-only mode - files managed by integrated updater)
 	var as2orgLoader *geodata.AS2OrgLoader
@@ -273,30 +261,21 @@ func main() {
 	}
 
 	// MIG-7: Initialize Re-enable Scheduler
-	var reenableScheduler *enforcement.Scheduler
-	if remnawaveClient != nil {
-		reenableScheduler = enforcement.NewScheduler(
-			remnawaveClient,
-			redisStore,
-			time.Duration(cfg.ReenableTickSeconds)*time.Second,
-			cfg.ReenableBatchSize,
-		)
-		log.Printf("✅ Re-enable Scheduler initialized (tick: %ds, batch: %d)",
-			cfg.ReenableTickSeconds, cfg.ReenableBatchSize)
-	}
+	reenableScheduler := enforcement.NewScheduler(
+		remnawaveClient,
+		redisStore,
+		time.Duration(cfg.ReenableTickSeconds)*time.Second,
+		cfg.ReenableBatchSize,
+	)
+	log.Printf("✅ Re-enable Scheduler initialized (tick: %ds, batch: %d)",
+		cfg.ReenableTickSeconds, cfg.ReenableBatchSize)
 
 	// Tell WaitGroup how many goroutines we'll launch
-	goroutineCount := 6 // poolMonitor + workerPool + sideEffectPool + metricsDumper + batchWriter + updaterManager
+	goroutineCount := 8 // poolMonitor + workerPool + sideEffectPool + metricsDumper + batchWriter + updaterManager + panelIngest + reenableScheduler
 	if autoLearner != nil {
 		goroutineCount++
 	}
-	if reenableScheduler != nil {
-		goroutineCount++
-	}
 	if fallbackWorkerEnabled {
-		goroutineCount++
-	}
-	if panelIngestService != nil {
 		goroutineCount++
 	}
 
@@ -310,9 +289,7 @@ func main() {
 	if fallbackWorkerEnabled && geoService != nil {
 		go geoService.StartFallbackWorker(ctx, &wg)
 	}
-	if panelIngestService != nil {
-		go panelIngestService.Run(ctx, &wg)
-	}
+	go panelIngestService.Run(ctx, &wg)
 
 	// Start Auto-Learner if enabled
 	if autoLearner != nil {
@@ -323,9 +300,7 @@ func main() {
 	go updaterManager.Run(ctx, &wg)
 
 	// Start Re-enable Scheduler if configured
-	if reenableScheduler != nil {
-		go reenableScheduler.Run(ctx, &wg)
-	}
+	go reenableScheduler.Run(ctx, &wg)
 
 	srv := &http.Server{
 		Addr:              ":" + cfg.Port,

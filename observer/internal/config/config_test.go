@@ -126,8 +126,6 @@ func TestInternalDefaults_NotReadFromEnv(t *testing.T) {
 	os.Setenv("MONITORING_INTERVAL", "1")
 	os.Setenv("REENABLE_TICK_SECONDS", "1")
 	os.Setenv("REENABLE_BATCH_SIZE", "1")
-	os.Setenv("MAX_REQUEST_BYTES", "123")
-	os.Setenv("MAX_LOG_ENTRIES_PER_REQUEST", "4")
 
 	cfg := New()
 
@@ -154,12 +152,6 @@ func TestInternalDefaults_NotReadFromEnv(t *testing.T) {
 	}
 	if cfg.ReenableBatchSize != 100 {
 		t.Fatalf("REENABLE_BATCH_SIZE should be ignored, got %d", cfg.ReenableBatchSize)
-	}
-	if cfg.MaxRequestBytes == 123 {
-		t.Fatalf("MAX_REQUEST_BYTES should be ignored, got %d", cfg.MaxRequestBytes)
-	}
-	if cfg.MaxLogEntriesPerRequest == 4 {
-		t.Fatalf("MAX_LOG_ENTRIES_PER_REQUEST should be ignored, got %d", cfg.MaxLogEntriesPerRequest)
 	}
 }
 

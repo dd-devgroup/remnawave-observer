@@ -14,10 +14,9 @@ type Config struct {
 	Port                        string
 	PostgresDSN                 string // DSN for PostgreSQL (required, fatal if empty)
 	RedisURL                    string
-	LogSourceMode               string // panel|http|hybrid
-	ScanMaxKeys                 int    // Макс. количество ключей при SCAN (default: 10000)
-	ScanCount                   int    // Hint COUNT для Redis SCAN (default: 100)
-	ScanTimeBudgetSeconds       int    // Макс. время одной SCAN операции в секундах (default: 30)
+	ScanMaxKeys                 int // Макс. количество ключей при SCAN (default: 10000)
+	ScanCount                   int // Hint COUNT для Redis SCAN (default: 100)
+	ScanTimeBudgetSeconds       int // Макс. время одной SCAN операции в секундах (default: 30)
 	AlertWebhookURL             string
 	AlertCooldown               time.Duration
 	ClearIPsDelay               time.Duration
@@ -59,10 +58,6 @@ type Config struct {
 	ScoreThresholdWarn  float64 // Порог для предупреждения (default: 50)
 	ScoreThresholdBlock float64 // Порог для блокировки (default: 85)
 
-	// --- ПАРАМЕТРЫ ВХОДЯЩИХ ЗАПРОСОВ ---
-	MaxRequestBytes         int64 // Максимальный размер body POST /log-entry (default: 2MB)
-	MaxLogEntriesPerRequest int   // Максимальное количество записей в одном запросе (default: 1000)
-
 	// --- ПАРАМЕТРЫ АВТООБУЧЕНИЯ ---
 	UnknownProvidersLogEnabled bool // Включить логирование неизвестных провайдеров (default: false)
 
@@ -100,7 +95,6 @@ type Config struct {
 const (
 	defaultMonitoringIntervalSeconds = 300
 	defaultSideEffectTimeoutSeconds  = 10
-	defaultMaxRequestBytes           = 2 * 1024 * 1024
 	defaultReenableTickSeconds       = 10
 	defaultReenableBatchSize         = 100
 )
@@ -146,25 +140,12 @@ func defaultSideEffectChannelBufferSize(sideEffectWorkers int) int {
 	return buffer
 }
 
-func defaultMaxLogEntriesPerRequest(maxRequestBytes int64) int {
-	// Conservative estimate: one JSON log entry is ~2KB in heavy payload scenarios.
-	limit := int(maxRequestBytes / 2048)
-	if limit < 200 {
-		limit = 200
-	}
-	if limit > 1000 {
-		limit = 1000
-	}
-	return limit
-}
-
 // New загружает конфигурацию из переменных окружения.
 func New() *Config {
 	logWorkers := defaultLogWorkerPoolSize()
 	logChannelBuffer := defaultLogChannelBufferSize(logWorkers)
 	sideEffectWorkers := defaultSideEffectWorkerPoolSize(logWorkers)
 	sideEffectChannelBuffer := defaultSideEffectChannelBufferSize(sideEffectWorkers)
-	maxRequestBytes := int64(defaultMaxRequestBytes)
 	remnawaveBaseURL := getEnv("REMNAWAVE_BASE_URL", "")
 	remnawaveHeader := getEnv("REMNAWAVE_HEADER", "")
 	remnawaveHeaderInvalid := false
@@ -179,7 +160,6 @@ func New() *Config {
 		Port:                        getEnv("PORT", "9000"),
 		PostgresDSN:                 getEnv("POSTGRES_DSN", ""),
 		RedisURL:                    getEnv("REDIS_URL", "redis://localhost:6379/0"),
-		LogSourceMode:               strings.ToLower(getEnv("LOG_SOURCE_MODE", "panel")),
 		ScanMaxKeys:                 getEnvInt("SCAN_MAX_KEYS", 10000),
 		ScanCount:                   getEnvInt("SCAN_COUNT", 100),
 		ScanTimeBudgetSeconds:       getEnvInt("SCAN_TIME_BUDGET_SECONDS", 30),
@@ -197,10 +177,6 @@ func New() *Config {
 		SideEffectWorkerPoolSize:    sideEffectWorkers,
 		SideEffectChannelBufferSize: sideEffectChannelBuffer,
 		SideEffectTimeout:           time.Duration(defaultSideEffectTimeoutSeconds) * time.Second,
-
-		// --- Загрузка параметров входящих запросов ---
-		MaxRequestBytes:         maxRequestBytes,
-		MaxLogEntriesPerRequest: defaultMaxLogEntriesPerRequest(maxRequestBytes),
 
 		// --- Загрузка параметров ASN ---
 		IPtoASNDownloadURL:    getEnv("IPTOASN_DOWNLOAD_URL", ""),
@@ -267,9 +243,6 @@ func New() *Config {
 	if cfg.UserIDUUIDCacheTTLHours < 1 {
 		cfg.UserIDUUIDCacheTTLHours = 24
 	}
-	if cfg.LogSourceMode != "panel" && cfg.LogSourceMode != "http" && cfg.LogSourceMode != "hybrid" {
-		cfg.LogSourceMode = "panel"
-	}
 	if cfg.PanelPollInterval < 1*time.Second {
 		cfg.PanelPollInterval = 60 * time.Second
 	}
@@ -296,7 +269,7 @@ func New() *Config {
 	}
 
 	log.Printf("Configuration loaded. Port: %s", cfg.Port)
-	log.Printf("Log source mode: %s", cfg.LogSourceMode)
+	log.Printf("Log source mode: panel-only")
 	log.Printf("Provider tracking mode: scoring-only over ASN hot window")
 	log.Printf("    Source: iptoasn.com, Update interval: %v, ASN TTL: %v", cfg.IPtoASNUpdateInterval, cfg.UserASNTTL)
 	if cfg.MaxASNsPerUser > 0 {
@@ -343,10 +316,8 @@ func New() *Config {
 			log.Printf("Remnawave gate header enabled from REMNAWAVE_HEADER: %s=<hidden>", name)
 		}
 	}
-	if cfg.LogSourceMode == "panel" || cfg.LogSourceMode == "hybrid" {
-		log.Printf("Panel ingest enabled. poll=%v fetch_timeout=%v result_poll=%v inflight=%d executor_block=%v",
-			cfg.PanelPollInterval, cfg.PanelFetchTimeout, cfg.PanelFetchResultPoll, cfg.PanelFetchMaxInflight, cfg.NodeExecutorBlockEnabled)
-	}
+	log.Printf("Panel ingest enabled. poll=%v fetch_timeout=%v result_poll=%v inflight=%d executor_block=%v",
+		cfg.PanelPollInterval, cfg.PanelFetchTimeout, cfg.PanelFetchResultPoll, cfg.PanelFetchMaxInflight, cfg.NodeExecutorBlockEnabled)
 
 	return cfg
 }
