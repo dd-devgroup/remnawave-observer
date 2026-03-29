@@ -4,7 +4,7 @@
 ![Docker](https://img.shields.io/badge/Docker-28.0-2496ED?style=for-the-badge&logo=docker)
 ![Redis](https://img.shields.io/badge/Redis-8.2-DC382D?style=for-the-badge&logo=redis)
 ![PostgreSQL](https://img.shields.io/badge/PostgreSQL-16-4169E1?style=for-the-badge&logo=postgresql&logoColor=white)
-![Vector](https://img.shields.io/badge/Vector-0.48-orange?style=for-the-badge)
+![Panel](https://img.shields.io/badge/Panel%20Ingest-2.7.0-blue?style=for-the-badge)
 
 <p align="center">
   🇷🇺 <strong>Русский</strong> | 🇬🇧 <a href="README.md">English</a>
@@ -28,29 +28,25 @@
 ## Как это работает
 
 ```
-Пользователь → Xray → Логи → Vector Agent (нода) → Vector Aggregator → Observer
-                                                                             │
-                                                       ┌─────────────────────┤
-                                                       ▼                     ▼
-                                                    Redis              PostgreSQL
-                                                 (ASN-пулы,          (история оценок,
-                                               расписание разблок.)    журнал событий)
-                                                       │
-                                                       ▼
-                                             Anti-Abuse Scoring
-                                        (Гео + тип ASN + плотность IP)
-                                                       │
-                                                       ▼
-                                             Remnawave API
-                                         (DisableUser / EnableUser)
+Пользователь → Xray / Remnawave Node → Remnawave Panel → panel poller в Observer
+                                                                      │
+                                               ┌──────────────────────┴──────────────────────┐
+                                               ▼                                             ▼
+                                            Redis                                       PostgreSQL
+                                      (hot-window, sightings,                     (история, score,
+                                       расписание разблок.)                        журнал событий)
+                                               │
+                                               ▼
+                                Anti-Abuse Scoring + Enforcement
+                        (DisableUser + временный node-side block IP)
 ```
 
-1. **Vector** на каждой ноде читает логи доступа Xray, извлекает `user_email` (числовой ID) и `source_ip`
-2. **Observer** отслеживает уникальные провайдеры (ASN) на пользователя в скользящем временном окне (по умолчанию: 12ч)
-3. **Anti-Abuse Scorer** запускает многофакторный анализ при каждом новом ASN-событии
-4. **При превышении лимита/оценки** → вызывается `DisableUser()` — аккаунт блокируется глобально
-5. **Redis ZSET** планирует автоматическое разблокирование
-6. **Scheduler** (каждые 10с) разблокирует истёкшие блокировки через `EnableUser()`
+1. **Observer** сам опрашивает `Remnawave Panel 2.7.0+` и забирает per-user IP по активным нодам
+2. Poller нормализует каждое наблюдение в прежний внутренний формат `user_email` (числовой ID) + `source_ip`
+3. **Observer** отслеживает уникальные провайдеры (ASN) на пользователя в скользящем временном окне
+4. **Anti-Abuse Scorer** запускает многофакторный анализ при каждом новом ASN-событии
+5. **Только при blocking score action** → вызывается `DisableUser()`, а offending IP могут временно блокироваться на нодах, где они были замечены
+6. **Redis ZSET** планирует автоматическое разблокирование, а устаревшие наблюдения истекают автоматически
 
 ---
 
@@ -83,7 +79,7 @@
 
 ## Anti-Abuse Скоринг
 
-Помимо жёсткого лимита по ASN, Observer запускает **конвейер многофакторной оценки**, который рассматривает полную картину перед принятием решения. Это предотвращает ложные срабатывания и обеспечивает постепенное применение мер.
+Observer использует **конвейер многофакторной оценки**, который рассматривает полную картину перед принятием решения. Это предотвращает ложные срабатывания и оставляет блокировки только за score action, а не за голый подсчет ASN.
 
 ### Конвейер оценки
 
@@ -91,15 +87,13 @@
 ScoringInput
   ├── Классификации ASN   (тип провайдера + модификатор для каждого ASN)
   ├── Анализ GeoIP        (страны, города, максимальное расстояние между IP)
-  ├── Кол-во ASN / лимит
   └── IP на ASN           (плотность IP по провайдеру)
          │
          ▼
    ┌────────────────────────────────────────────────────────────────┐
-   │  GeoFeature        вес=50%  → географический разброс          │
-   │  ASNFeature        вес=25%  → смешение типов провайдеров      │
-   │  CountFeature      вес=15%  → близость к лимиту               │
-   │  IPDensityFeature  вес=10%  → количество IP на провайдера     │
+   │  GeoFeature        вес=55%  → географический разброс          │
+   │  ASNFeature        вес=30%  → смешение типов провайдеров      │
+   │  IPDensityFeature  вес=15%  → количество IP на провайдера     │
    │  ProviderMixFeature мод-р   → усиление при VPN/хостинге       │
    └────────────────────────────────────────────────────────────────┘
          │
@@ -111,10 +105,9 @@ ScoringInput
 
 | Признак              | Вес    | Что обнаруживает                                                                           |
 | -------------------- | ------ | ------------------------------------------------------------------------------------------ |
-| `GeoFeature`         | 50%    | Одновременные подключения из разных городов/стран — самый сильный сигнал шаринга           |
-| `ASNFeature`         | 25%    | Смешение рискованных типов провайдеров (VPN/хостинг повышает оценку, мобильный снижает)    |
-| `CountFeature`       | 15%    | Насколько близко пользователь к лимиту ASN                                                 |
-| `IPDensityFeature`   | 10%    | Высокое число уникальных IP на немобильного провайдера (CGNAT мобильные исключены целиком) |
+| `GeoFeature`         | 55%    | Одновременные подключения из разных городов/стран — самый сильный сигнал шаринга           |
+| `ASNFeature`         | 30%    | Смешение рискованных типов провайдеров (VPN/хостинг повышает оценку, мобильный снижает)    |
+| `IPDensityFeature`   | 15%    | Высокое число уникальных IP на немобильного провайдера (CGNAT мобильные исключены целиком) |
 | `ProviderMixFeature` | модиф. | Если >50% VPN/хостинг-провайдеров — устанавливает минимальную оценку 50                    |
 
 ### IPDensityFeature — учёт мобильных сетей
@@ -167,50 +160,38 @@ REMNAWAVE_API_TOKEN=your_api_token_here
 POSTGRES_DSN=postgres://observer:password@postgres:5432/observer?sslmode=disable
 REDIS_URL=redis://redis:6379/0
 
-# --- Детектирование ---
-DETECT_BY_ASN=true
-MAX_ASNS_PER_USER=5
-USER_ASN_TTL_SECONDS=43200       # Скользящее окно 12 часов
-
-# --- Применение мер ---
+# --- Базовое поведение ---
 BLOCK_DURATION=10m
-
-# --- Скоринг (anti-abuse) ---
-SCORING_ENABLED=true
-
-# --- GeoIP ---
+USER_ASN_TTL_SECONDS=43200
 GEOIP_ENABLED=true
+SCORE_THRESHOLD_WARN=50.0
+SCORE_THRESHOLD_BLOCK=85.0
 
 # --- Исключения ---
 EXCLUDED_USERS=admin@example.com,test@example.com
 EXCLUDED_IPS=8.8.8.8,1.1.1.1
+EXCLUDED_INTERNAL_SQUAD_UUIDS=
 
 # --- Уведомления ---
 ALERT_WEBHOOK_URL=https://bot.example.com/webhook
 ```
+
+Panel-only ingest, scoring и временный node-side IP block уже включены по умолчанию. Дополнительные override добавляйте только если реально хотите уйти от стандартного поведения.
 
 ```bash
 docker compose up -d
 docker logs observer -f
 ```
 
-### 2. Настройка Vector (ноды Xray)
+### 2. Требования к Remnawave
 
-Подробное руководство: [**Настройка Vector Agent**](observer/docs/VECTOR-AGENT-SETUP.md)
+Для panel-only ingest нужны:
 
-```bash
-cd /opt/xray-node
-# Скопируйте vector-node.toml и docker-compose.node.yml из observer_conf/vector-examples/
-vim vector-node.toml   # укажите путь к логам + URL Observer aggregator
-docker compose -f docker-compose.node.yml up -d
-```
+- `Remnawave Panel >= 2.7.0`
+- `Remnawave Node >= 2.7.0`
+- `cap_add: NET_ADMIN` на нодах, если включён локальный node-side IP block
 
-**⚠️ Важно:** `user_email` в логах Xray должен быть **числовым ID** (int64), не email-адресом:
-
-```
-accepted tcp:1.2.3.4:12345 [inbound_user:12345 >> ...]
-                                         ^^^^^ — должно быть числом
-```
+По умолчанию Observer больше не требует разворачивать Vector на каждой ноде. Старый путь через Vector остаётся как legacy-режим через `LOG_SOURCE_MODE=http|hybrid`.
 
 ---
 
@@ -225,19 +206,25 @@ accepted tcp:1.2.3.4:12345 [inbound_user:12345 >> ...]
 | `REDIS_URL`              | URL Redis                                   | `redis://localhost:6379/0` |
 | `REMNAWAVE_BASE_URL`     | URL панели Remnawave                        | **обязательно**            |
 | `REMNAWAVE_API_TOKEN`    | Bearer-токен Remnawave API                  | **обязательно**            |
+| `LOG_SOURCE_MODE`        | Режим ingest: `panel`, `http`, `hybrid`     | `panel`                    |
+| `PANEL_POLL_INTERVAL_SECONDS` | Интервал опроса панели                 | `60`                       |
+| `PANEL_FETCH_TIMEOUT_SECONDS` | Таймаут одного fetch-job               | `20`                       |
+| `PANEL_FETCH_RESULT_POLL_SECONDS` | Интервал polling результата      | `2`                        |
+| `PANEL_FETCH_MAX_INFLIGHT` | Макс. количество одновременных fetch-job | `3`                        |
+| `NODE_EXECUTOR_BLOCK_ENABLED` | Включить временный node-side block IP | `true`                   |
 | `BLOCK_DURATION`         | Длительность блокировки (напр. `10m`, `1h`) | `5m`                       |
 | `EXCLUDED_USERS`         | ID пользователей для исключения (через ,)   | —                          |
 | `EXCLUDED_IPS`           | IP для исключения (через ,)                 | —                          |
+| `EXCLUDED_INTERNAL_SQUAD_UUIDS` | UUID Internal Squads, исключённых из anti-sharing | —      |
 | `EXCLUDED_ASNS`          | ASN для исключения (через ,)                | —                          |
 | `ALERT_WEBHOOK_URL`      | URL вебхука для уведомлений о блокировках   | —                          |
 | `ALERT_COOLDOWN_SECONDS` | Мин. секунд между оповещениями на юзера     | `3600`                     |
 
-### Детектирование ASN
+### Горячее окно провайдеров
 
 | Переменная                        | Описание                             | По умолчанию |
 | --------------------------------- | ------------------------------------ | ------------ |
-| `DETECT_BY_ASN`                   | Включить режим ASN                   | `false`      |
-| `MAX_ASNS_PER_USER`               | Макс. уникальных ASN на пользователя | `4`          |
+| `MAX_ASNS_PER_USER`               | Только legacy-порог для мониторинга; не участвует в блокировке и scoring | `4` |
 | `USER_ASN_TTL_SECONDS`            | TTL скользящего окна для записей ASN | `3600`       |
 | `IPTOASN_UPDATE_INTERVAL_MINUTES` | Интервал обновления базы ASN         | `60`         |
 
@@ -257,7 +244,6 @@ accepted tcp:1.2.3.4:12345 [inbound_user:12345 >> ...]
 
 | Переменная              | Описание                        | По умолчанию |
 | ----------------------- | ------------------------------- | ------------ |
-| `SCORING_ENABLED`       | Включить конвейер скоринга      | `false`      |
 | `SCORE_THRESHOLD_WARN`  | Порог оценки для действия warn  | `45`         |
 | `SCORE_THRESHOLD_BLOCK` | Порог оценки для действия block | `75`         |
 
@@ -278,12 +264,13 @@ accepted tcp:1.2.3.4:12345 [inbound_user:12345 >> ...]
 [2026-02-27 20:30:42] === ASN POOLS MONITORING START ===
 SUMMARY:
    Total active users: 95
-   Near limit: 11
-   Over limit: 0
+   Monitor actions: 11
+   Warn or challenge actions: 3
+   Blocking actions: 0
 
-TOP USERS BY PROVIDER COUNT (ASN):
-    1. [WARN] 12345
-       Providers: 5/5 | TTL: 0.6-12.0h
+TOP USERS BY PROVIDER COUNT AND SCORE:
+    1. [MONITOR] 12345
+       Providers: 5 | TTL: 0.6-12.0h
        Score: 47.4 [monitor]
        ASNs: AS3267(11.6h)[1 IPs], AS31133(0.6h)[2 IPs], AS39264(0.7h)[2 IPs], ...
        Geo: countries: RU, cities: Moscow, Samara, Saint Petersburg
@@ -292,7 +279,7 @@ TOP USERS BY PROVIDER COUNT (ASN):
           AS3267:  1 IP -> 82.179.192.10 -> RU, Moscow  (55.74, 37.61) [src:mmdb+2ip]
 ```
 
-Строка **Score** показывает последнюю anti-abuse оценку и текущее действие.
+Строка **Score** показывает последнюю anti-abuse оценку и текущее действие. Количество провайдеров в мониторинге теперь только информационное и само по себе не приводит к бану.
 
 ### Метрики времени выполнения (логируются каждые 60с)
 
@@ -312,17 +299,18 @@ TOP USERS BY PROVIDER COUNT (ASN):
 
 ## Уведомления через вебхук
 
-Observer отправляет POST-запрос на `ALERT_WEBHOOK_URL` при каждом событии блокировки.
+Observer отправляет POST-запрос на `ALERT_WEBHOOK_URL` при каждом scoring alert с действием `warn` и выше.
 
-**Payload в режиме ASN:**
+**Scoring payload:**
 
 ```json
 {
 	"user_identifier": "12345",
-	"limit": 4,
+	"violation_type": "scoring_action",
+	"score": 82.4,
+	"score_action": "temp_disable",
 	"block_duration": "10m",
-	"violation_type": "asn_limit_exceeded",
-	"detected_asn_count": 5,
+	"all_user_asns": ["AS31133", "AS3267"],
 	"asn_details": {
 		"AS31133": {
 			"asn": "AS31133",
@@ -330,7 +318,11 @@ Observer отправляет POST-запрос на `ALERT_WEBHOOK_URL` при 
 			"ips": ["185.22.64.15", "91.108.4.22"],
 			"ip_count": 2
 		}
-	}
+	},
+	"score_breakdown": [
+		{ "name": "geo", "score": 90, "weight": 0.55, "confidence": 0.9 },
+		{ "name": "asn", "score": 70, "weight": 0.30, "confidence": 0.8 }
+	]
 }
 ```
 
@@ -358,7 +350,7 @@ docker compose -f docker-compose.test.yml down
 | Пропускная способность Observer | ~5 000 req/s |
 | Задержка Remnawave API          | 50–200 мс    |
 | Задержка Redis                  | < 5 мс       |
-| Накладные расходы Vector (нода) | < 10 МБ RAM  |
+| Накладные расходы legacy Vector (`http` режим) | < 10 МБ RAM  |
 | RAM Observer                    | ~150 МБ      |
 
 ---
@@ -366,7 +358,8 @@ docker compose -f docker-compose.test.yml down
 ## Безопасность
 
 - Используйте надёжные API-токены (32+ символов)
-- TLS для трафика Vector → Observer (через nginx)
+- TLS для запросов Remnawave Panel → Observer API
+- Если используется legacy-режим `Vector`, дополнительно защитите трафик Vector → Observer
 - Redis изолирован в Docker-сети, не доступен снаружи
 - Настройте rate limiting nginx на эндпоинт Observer
 - Используйте секретный путь для `ALERT_WEBHOOK_URL`
@@ -385,7 +378,7 @@ docker logs observer | grep -i "disable\|error"
 # - user_email содержит email-строку вместо числового ID
 ```
 
-**Vector не отправляет логи:**
+**Legacy-режим Vector не отправляет логи:**
 
 ```bash
 docker logs vector-agent | grep -i error
@@ -404,7 +397,7 @@ docker exec redis redis-cli ZRANGE rw:reenable:zset 0 -1 WITHSCORES
 
 ## Документация
 
-- 📖 [Настройка Vector Agent](observer/docs/VECTOR-AGENT-SETUP.md) — подробное руководство по развёртыванию на нодах
+- 📖 [Настройка Vector Agent](observer/docs/VECTOR-AGENT-SETUP.md) — legacy-руководство для `LOG_SOURCE_MODE=http|hybrid`
 
 ---
 
@@ -416,10 +409,11 @@ docker exec redis redis-cli ZRANGE rw:reenable:zset 0 -1 WITHSCORES
 - 2 ГБ RAM, 1 vCPU
 - Docker 24.0+, Docker Compose v2
 
-**Каждая нода Xray:**
+**Ноды Remnawave:**
 
-- 512 МБ RAM, 0.25 vCPU (для Vector)
-- Docker 24.0+
+- Remnawave Node 2.7.0+
+- `cap_add: NET_ADMIN`, если включён временный node-side block IP
+- Для legacy-режима `Vector` дополнительно нужны ~512 МБ RAM, 0.25 vCPU и Docker 24.0+
 
 ---
 

@@ -4,7 +4,7 @@
 ![Docker](https://img.shields.io/badge/Docker-28.0-2496ED?style=for-the-badge&logo=docker)
 ![Redis](https://img.shields.io/badge/Redis-8.2-DC382D?style=for-the-badge&logo=redis)
 ![PostgreSQL](https://img.shields.io/badge/PostgreSQL-16-4169E1?style=for-the-badge&logo=postgresql&logoColor=white)
-![Vector](https://img.shields.io/badge/Vector-0.48-orange?style=for-the-badge)
+![Panel](https://img.shields.io/badge/Panel%20Ingest-2.7.0-blue?style=for-the-badge)
 
 <p align="center">
   🇷🇺 <a href="README.ru.md">Русский</a> | 🇬🇧 <strong>English</strong>
@@ -28,29 +28,25 @@ Unlike simple IP-based blocking (easily bypassed), **Observer blocks at the Remn
 ## How It Works
 
 ```
-User → Xray → Logs → Vector Agent (node) → Vector Aggregator → Observer
-                                                                    │
-                                              ┌─────────────────────┤
-                                              ▼                     ▼
-                                           Redis              PostgreSQL
-                                        (ASN pools,          (score history,
-                                      reenable schedule)      event log)
-                                              │
-                                              ▼
-                                    Anti-Abuse Scoring
-                                  (Geo + ASN type + IP Density)
-                                              │
-                                              ▼
-                                    Remnawave API
-                                  (DisableUser / EnableUser)
+User → Xray / Remnawave Node → Remnawave Panel → Observer panel poller
+                                                           │
+                                         ┌─────────────────┴─────────────────┐
+                                         ▼                                   ▼
+                                      Redis                            PostgreSQL
+                                   (hot window,                      (history, score
+                                 reenables, sightings)                  and events)
+                                         │
+                                         ▼
+                               Anti-Abuse Scoring + Enforcement
+                           (DisableUser + temporary node IP block)
 ```
 
-1. **Vector** on each node reads Xray access logs, extracts `user_email` (numeric ID) and `source_ip`
-2. **Observer** tracks unique providers (ASNs) per user in a sliding TTL window (default: 12h)
-3. **Anti-Abuse Scorer** runs a multi-feature analysis on every new ASN event
-4. **On limit/score exceeded** → `DisableUser()` is called — the account is blocked globally
-5. **Redis ZSET** schedules automatic re-enable
-6. **Scheduler** (every 10s) re-enables expired blocks via `EnableUser()`
+1. **Observer** polls Remnawave Panel `2.7.0+` for per-user IP snapshots on active nodes
+2. The poller normalizes each observation into the existing `user_email` (numeric ID) + `source_ip` event format
+3. **Observer** tracks unique providers (ASNs) per user in a sliding TTL window (default: 12h)
+4. **Anti-Abuse Scorer** runs a multi-feature analysis on every new ASN event
+5. **On blocking score actions only** → `DisableUser()` is called and offending IPs can be blocked temporarily on the nodes where they were seen
+6. **Redis ZSET** schedules automatic re-enable, while stale observations expire automatically
 
 ---
 
@@ -83,7 +79,7 @@ The ASN database auto-downloads from [iptoasn.com](https://iptoasn.com) on start
 
 ## Anti-Abuse Scoring
 
-Beyond the hard ASN limit, Observer runs a **multi-feature scoring pipeline** that considers the full picture before taking action. This prevents false positives and enables progressive enforcement.
+Observer uses a **multi-feature scoring pipeline** that considers the full picture before taking action. This prevents false positives and keeps bans tied only to score actions, not raw ASN counts.
 
 ### Scoring Pipeline
 
@@ -91,15 +87,13 @@ Beyond the hard ASN limit, Observer runs a **multi-feature scoring pipeline** th
 ScoringInput
   ├── ASN Classifications   (provider type + modifier per ASN)
   ├── GeoIP Analysis        (countries, cities, max distance between IPs)
-  ├── ASN count vs. limit
   └── IPs per ASN           (per-provider IP density)
          │
          ▼
    ┌────────────────────────────────────────────────────┐
-   │  GeoFeature        weight=50%  → geographic spread │
-   │  ASNFeature        weight=25%  → provider type mix │
-   │  CountFeature      weight=15%  → proximity to limit│
-   │  IPDensityFeature  weight=10%  → IPs per provider  │
+   │  GeoFeature        weight=55%  → geographic spread │
+   │  ASNFeature        weight=30%  → provider type mix │
+   │  IPDensityFeature  weight=15%  → IPs per provider  │
    │  ProviderMixFeature modifier   → VPN/hosting boost │
    └────────────────────────────────────────────────────┘
          │
@@ -111,10 +105,9 @@ ScoringInput
 
 | Feature              | Weight   | What it detects                                                                         |
 | -------------------- | -------- | --------------------------------------------------------------------------------------- |
-| `GeoFeature`         | 50%      | Simultaneous connections from different cities/countries — the strongest sharing signal |
-| `ASNFeature`         | 25%      | Mix of high-risk provider types (VPN/hosting raises score, mobile lowers it)            |
-| `CountFeature`       | 15%      | How close the user is to the ASN limit                                                  |
-| `IPDensityFeature`   | 10%      | High unique IP count per non-mobile provider (CGNAT mobile is excluded entirely)        |
+| `GeoFeature`         | 55%      | Simultaneous connections from different cities/countries — the strongest sharing signal |
+| `ASNFeature`         | 30%      | Mix of high-risk provider types (VPN/hosting raises score, mobile lowers it)            |
+| `IPDensityFeature`   | 15%      | High unique IP count per non-mobile provider (CGNAT mobile is excluded entirely)        |
 | `ProviderMixFeature` | modifier | If >50% VPN/hosting providers — enforces a minimum score of 50                          |
 
 ### IPDensityFeature — Mobile-Aware
@@ -167,50 +160,38 @@ REMNAWAVE_API_TOKEN=your_api_token_here
 POSTGRES_DSN=postgres://observer:password@postgres:5432/observer?sslmode=disable
 REDIS_URL=redis://redis:6379/0
 
-# --- Detection ---
-DETECT_BY_ASN=true
-MAX_ASNS_PER_USER=5
-USER_ASN_TTL_SECONDS=43200       # 12-hour sliding window
-
-# --- Enforcement ---
+# --- Core behavior ---
 BLOCK_DURATION=10m
-
-# --- Scoring (anti-abuse) ---
-SCORING_ENABLED=true
-
-# --- GeoIP ---
+USER_ASN_TTL_SECONDS=43200
 GEOIP_ENABLED=true
+SCORE_THRESHOLD_WARN=50.0
+SCORE_THRESHOLD_BLOCK=85.0
 
 # --- Exclusions ---
 EXCLUDED_USERS=admin@example.com,test@example.com
 EXCLUDED_IPS=8.8.8.8,1.1.1.1
+EXCLUDED_INTERNAL_SQUAD_UUIDS=
 
 # --- Notifications ---
 ALERT_WEBHOOK_URL=https://bot.example.com/webhook
 ```
+
+Panel-only ingest, scoring and temporary node-side IP blocking are already enabled by default. Add advanced overrides only when you actually need non-default behavior.
 
 ```bash
 docker compose up -d
 docker logs observer -f
 ```
 
-### 2. Vector Setup (Xray nodes)
+### 2. Remnawave requirements
 
-See detailed guide: [**Vector Agent Setup**](observer/docs/VECTOR-AGENT-SETUP.md)
+Panel ingest requires:
 
-```bash
-cd /opt/xray-node
-# Copy vector-node.toml and docker-compose.node.yml from observer_conf/vector-examples/
-vim vector-node.toml   # set log path + Observer aggregator URL
-docker compose -f docker-compose.node.yml up -d
-```
+- `Remnawave Panel >= 2.7.0`
+- `Remnawave Node >= 2.7.0`
+- `cap_add: NET_ADMIN` on nodes if local node-side IP blocking is enabled
 
-**⚠️ Critical:** `user_email` in Xray logs must be the **numeric ID** (int64), not an email address:
-
-```
-accepted tcp:1.2.3.4:12345 [inbound_user:12345 >> ...]
-                                        ^^^^^ — this must be a number
-```
+Observer now works without deploying Vector on every node by default. The old Vector path remains available as a legacy ingest mode via `LOG_SOURCE_MODE=http|hybrid`.
 
 ---
 
@@ -225,19 +206,25 @@ accepted tcp:1.2.3.4:12345 [inbound_user:12345 >> ...]
 | `REDIS_URL`              | Redis URL                           | `redis://localhost:6379/0` |
 | `REMNAWAVE_BASE_URL`     | Remnawave panel URL                 | **required**               |
 | `REMNAWAVE_API_TOKEN`    | Remnawave API bearer token          | **required**               |
+| `LOG_SOURCE_MODE`        | Ingest mode: `panel`, `http`, `hybrid` | `panel`                 |
+| `PANEL_POLL_INTERVAL_SECONDS` | Panel poll interval             | `60`                      |
+| `PANEL_FETCH_TIMEOUT_SECONDS` | Timeout for one fetch job        | `20`                      |
+| `PANEL_FETCH_RESULT_POLL_SECONDS` | Poll interval for job result | `2`                       |
+| `PANEL_FETCH_MAX_INFLIGHT` | Max concurrent fetch jobs         | `3`                       |
+| `NODE_EXECUTOR_BLOCK_ENABLED` | Enable temporary node-side IP block | `true`               |
 | `BLOCK_DURATION`         | Block duration (e.g. `10m`, `1h`)   | `5m`                       |
 | `EXCLUDED_USERS`         | Comma-separated user IDs to skip    | —                          |
 | `EXCLUDED_IPS`           | Comma-separated IPs to skip         | —                          |
+| `EXCLUDED_INTERNAL_SQUAD_UUIDS` | Internal squad UUIDs to bypass anti-sharing | —       |
 | `EXCLUDED_ASNS`          | Comma-separated ASNs to skip        | —                          |
 | `ALERT_WEBHOOK_URL`      | Webhook URL for block notifications | —                          |
 | `ALERT_COOLDOWN_SECONDS` | Min seconds between alerts per user | `3600`                     |
 
-### ASN Detection
+### Provider Hot Window
 
 | Variable                          | Description                        | Default |
 | --------------------------------- | ---------------------------------- | ------- |
-| `DETECT_BY_ASN`                   | Enable ASN mode                    | `false` |
-| `MAX_ASNS_PER_USER`               | Max unique ASNs per user           | `4`     |
+| `MAX_ASNS_PER_USER`               | Legacy monitoring threshold only; not used for bans/scoring | `4` |
 | `USER_ASN_TTL_SECONDS`            | Sliding window TTL for ASN records | `3600`  |
 | `IPTOASN_UPDATE_INTERVAL_MINUTES` | ASN DB refresh interval            | `60`    |
 
@@ -257,7 +244,6 @@ accepted tcp:1.2.3.4:12345 [inbound_user:12345 >> ...]
 
 | Variable                | Description                      | Default |
 | ----------------------- | -------------------------------- | ------- |
-| `SCORING_ENABLED`       | Enable scoring pipeline          | `false` |
 | `SCORE_THRESHOLD_WARN`  | Score threshold for warn action  | `45`    |
 | `SCORE_THRESHOLD_BLOCK` | Score threshold for block action | `75`    |
 
@@ -278,12 +264,13 @@ Every 5 minutes Observer prints an ASN pool summary to stdout:
 [2026-02-27 20:30:42] === ASN POOLS MONITORING START ===
 SUMMARY:
    Total active users: 95
-   Near limit: 11
-   Over limit: 0
+   Monitor actions: 11
+   Warn or challenge actions: 3
+   Blocking actions: 0
 
-TOP USERS BY PROVIDER COUNT (ASN):
-    1. [WARN] 12345
-       Providers: 5/5 | TTL: 0.6-12.0h
+TOP USERS BY PROVIDER COUNT AND SCORE:
+    1. [MONITOR] 12345
+       Providers: 5 | TTL: 0.6-12.0h
        Score: 47.4 [monitor]
        ASNs: AS3267(11.6h)[1 IPs], AS31133(0.6h)[2 IPs], AS39264(0.7h)[2 IPs], ...
        Geo: countries: RU, cities: Moscow, Samara, Saint Petersburg
@@ -292,7 +279,7 @@ TOP USERS BY PROVIDER COUNT (ASN):
           AS3267:  1 IP -> 82.179.192.10 -> RU, Moscow  (55.74, 37.61) [src:mmdb+2ip]
 ```
 
-The **Score** line shows the latest anti-abuse score and current action.
+The **Score** line shows the latest anti-abuse score and current action. Provider counts in monitoring are informational only and no longer trigger bans by themselves.
 
 ### Runtime Metrics (logged every 60s)
 
@@ -312,17 +299,18 @@ The **Score** line shows the latest anti-abuse score and current action.
 
 ## Webhook Notifications
 
-Observer sends a POST request to `ALERT_WEBHOOK_URL` on every block event.
+Observer sends a POST request to `ALERT_WEBHOOK_URL` on every scoring alert with action `warn` or higher.
 
-**ASN mode payload:**
+**Scoring payload:**
 
 ```json
 {
 	"user_identifier": "12345",
-	"limit": 4,
+	"violation_type": "scoring_action",
+	"score": 82.4,
+	"score_action": "temp_disable",
 	"block_duration": "10m",
-	"violation_type": "asn_limit_exceeded",
-	"detected_asn_count": 5,
+	"all_user_asns": ["AS31133", "AS3267"],
 	"asn_details": {
 		"AS31133": {
 			"asn": "AS31133",
@@ -330,7 +318,11 @@ Observer sends a POST request to `ALERT_WEBHOOK_URL` on every block event.
 			"ips": ["185.22.64.15", "91.108.4.22"],
 			"ip_count": 2
 		}
-	}
+	},
+	"score_breakdown": [
+		{ "name": "geo", "score": 90, "weight": 0.55, "confidence": 0.9 },
+		{ "name": "asn", "score": 70, "weight": 0.30, "confidence": 0.8 }
+	]
 }
 ```
 
@@ -358,7 +350,7 @@ docker compose -f docker-compose.test.yml down
 | Observer throughput      | ~5 000 req/s |
 | Remnawave API latency    | 50–200 ms    |
 | Redis latency            | < 5 ms       |
-| Vector overhead per node | < 10 MB RAM  |
+| Legacy Vector overhead per node (`http` mode) | < 10 MB RAM  |
 | Observer RAM             | ~150 MB      |
 
 ---
@@ -366,7 +358,8 @@ docker compose -f docker-compose.test.yml down
 ## Security
 
 - Use strong API tokens (32+ characters)
-- TLS for Vector → Observer traffic (via nginx)
+- TLS for Remnawave Panel → Observer API requests
+- If legacy `Vector` mode is used, also secure Vector → Observer traffic
 - Redis isolated in Docker network, not exposed externally
 - Configure nginx rate limiting on the Observer endpoint
 - Use a secret path for `ALERT_WEBHOOK_URL`
@@ -385,7 +378,7 @@ docker logs observer | grep -i "disable\|error"
 # - user_email contains email string instead of numeric ID
 ```
 
-**Vector not sending logs:**
+**Legacy Vector mode not sending logs:**
 
 ```bash
 docker logs vector-agent | grep -i error
@@ -404,7 +397,7 @@ docker exec redis redis-cli ZRANGE rw:reenable:zset 0 -1 WITHSCORES
 
 ## Documentation
 
-- 📖 [Vector Agent Setup](observer/docs/VECTOR-AGENT-SETUP.md) — detailed per-node deployment guide
+- 📖 [Vector Agent Setup](observer/docs/VECTOR-AGENT-SETUP.md) — legacy per-node deployment guide for `LOG_SOURCE_MODE=http|hybrid`
 
 ---
 
@@ -416,10 +409,11 @@ docker exec redis redis-cli ZRANGE rw:reenable:zset 0 -1 WITHSCORES
 - 2 GB RAM, 1 vCPU
 - Docker 24.0+, Docker Compose v2
 
-**Each Xray node:**
+**Remnawave nodes:**
 
-- 512 MB RAM, 0.25 vCPU (for Vector)
-- Docker 24.0+
+- Remnawave Node 2.7.0+
+- `cap_add: NET_ADMIN` if temporary node-side IP block is enabled
+- Legacy `Vector` mode additionally needs ~512 MB RAM, 0.25 vCPU and Docker 24.0+
 
 ---
 
