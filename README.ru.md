@@ -12,128 +12,94 @@
 
 ## Описание
 
-**Remnawave Observer** автоматически обнаруживает и блокирует пользователей, которые делятся своими VPN-подписками.
+**Remnawave Observer** это anti-sharing сервис поверх Remnawave на уровне панели.
 
-В отличие от простой блокировки по IP (легко обходится), **Observer блокирует учётную запись пользователя на уровне панели Remnawave** — нарушители теряют подключение **на всех серверах одновременно**, независимо от IP-адреса.
+Он больше не зависит от `Vector` как от основной схемы. Главный источник данных теперь это **Remnawave Panel 2.7.0+**: Observer сам опрашивает панель, получает per-user IP по нодам, нормализует события во внутренний формат, считает score и только после этого принимает решение о блокировке пользователя.
 
-**Ключевые возможности:**
+Текущее поведение:
 
-- ✅ Нельзя обойти сменой IP
-- ✅ Понимает CGNAT — мобильные операторы с 50+ динамическими IP не триггерят ложные срабатывания
-- ✅ Многосигнальный скоринг: география + тип провайдера + плотность IP
-- ✅ Глобальная блокировка и разблокировка на всех нодах через Remnawave API
+- основной ingest-режим это `panel`
+- блокировки теперь **только scoring-only**
+- голый подсчет ASN **не банит**
+- пользователи из заданных `Internal Squads` полностью обходят anti-sharing
+- мусорные IP вроде `0.0.0.0` и `::` тихо выкидываются и дополнительно чистятся из Redis/PostgreSQL на старте
+- `HWID` и история запросов подписки (`SRH`) используются как слой против false positive
+- legacy `/log-entry` и режим `Vector` по-прежнему доступны через `LOG_SOURCE_MODE=http|hybrid`
 
 ---
 
 ## Как это работает
 
-```
-Пользователь → Xray / Remnawave Node → Remnawave Panel → panel poller в Observer
-                                                                      │
-                                               ┌──────────────────────┴──────────────────────┐
-                                               ▼                                             ▼
-                                            Redis                                       PostgreSQL
-                                      (hot-window, sightings,                     (история, score,
-                                       расписание разблок.)                        журнал событий)
-                                               │
-                                               ▼
-                                Anti-Abuse Scoring + Enforcement
-                        (DisableUser + временный node-side block IP)
+```text
+Пользователь -> Xray / Remnawave Node -> Remnawave Panel -> panel poller в Observer
+                                                           |
+                                +--------------------------+--------------------------+
+                                |                                                     |
+                              Redis                                               PostgreSQL
+                 (hot window, sightings, watermarks,                      (история, score events,
+                  cooldown алертов, расписание re-enable)                  anti-abuse actions)
+                                |
+                                v
+                     Anti-Abuse Scoring + Enforcement
+                 (DisableUser + опциональный node-side block IP)
 ```
 
-1. **Observer** сам опрашивает `Remnawave Panel 2.7.0+` и забирает per-user IP по активным нодам
-2. Poller нормализует каждое наблюдение в прежний внутренний формат `user_email` (числовой ID) + `source_ip`
-3. **Observer** отслеживает уникальные провайдеры (ASN) на пользователя в скользящем временном окне
-4. **Anti-Abuse Scorer** запускает многофакторный анализ при каждом новом ASN-событии
-5. **Только при blocking score action** → вызывается `DisableUser()`, а offending IP могут временно блокироваться на нодах, где они были замечены
-6. **Redis ZSET** планирует автоматическое разблокирование, а устаревшие наблюдения истекают автоматически
+Пайплайн:
+
+1. Observer опрашивает активные ноды через Remnawave panel jobs.
+2. Ответ `fetch-users-ips` превращается в внутренние события `user_email=<numeric internal ID>` и `source_ip`.
+3. Unspecified IP (`0.0.0.0`, `::`) отбрасываются сразу.
+4. Пользователи из `EXCLUDED_INTERNAL_SQUAD_UUIDS`, `EXCLUDED_USERS`, `EXCLUDED_IPS` и `EXCLUDED_ASNS` обходят обработку.
+5. Panel observations дедуплицируются по watermark `(nodeUUID, userID, ip, lastSeen)`.
+6. В Redis обновляется hot-window по ASN, после чего запускается scoring.
+7. Только `temp_disable` и `hard_disable` запускают enforcement:
+   - глобальный `DisableUser` через Remnawave
+   - опциональный временный node-side block IP через `POST /api/node-plugins/executor`
+8. Redis scheduler автоматически делает `EnableUser` после `BLOCK_DURATION`.
+
+Важно: для executor не нужно заранее создавать отдельный node plugin. Нужны только `Remnawave Panel >= 2.7.0`, `Remnawave Node >= 2.7.0` и `cap_add: NET_ADMIN` на нодах.
 
 ---
 
-## Детектирование
+## Скоринг
 
-### Режим ASN / провайдер
+Observer теперь работает в режиме **scoring-only**. Превышение `MAX_ASNS_PER_USER` не банит пользователя и не влияет на score напрямую.
 
-Группирует все IP одного интернет-провайдера (номер AS) как одну сущность. Один легитимный пользователь обычно подключается максимум с 2–5 провайдеров (домашний ISP + мобильный оператор + возможно рабочий VPN).
+### Базовые сигналы
 
-**Легитимный пользователь (1 человек):**
+| Сигнал | Вес | Что означает |
+| --- | ---: | --- |
+| `GeoFeature` | 55% | Географический разлет между наблюдаемыми IP |
+| `ASNFeature` | 30% | Смесь типов провайдеров: mobile снижает риск, VPN/hosting повышает |
+| `IPDensityFeature` | 15% | Плотность уникальных IP внутри non-mobile провайдеров |
+| `ProviderMixFeature` | модификатор | Поднимает нижнюю границу score, если доминируют VPN/hosting |
 
-```
-176.59.40.10  → AS12389 (Ростелеком, дом)
-213.87.120.5  → AS8359  (МТС, мобильный)
-→ 2 провайдера ✅
-```
+### Evidence из Remnawave
 
-**Шаринг аккаунта (несколько людей):**
+После базового score Observer при необходимости дополнительно берет из Remnawave:
 
-```
-176.59.40.10  → AS12389 (Ростелеком, Москва)
-91.108.4.50   → AS31200 (Билайн, Казахстан)
-185.22.64.10  → AS48642 (Kyivstar, Украина)
-→ 3 провайдера в 3 странах ⚠️ → БЛОКИРОВКА
-```
+- `HWID` devices
+- subscription request history (`SRH`)
 
-База данных ASN автоматически скачивается с [iptoasn.com](https://iptoasn.com) при запуске и обновляется каждый час.
+Эти данные не добавляют новый штраф сами по себе. Они используются как анти-false-positive слой:
 
----
+- сильная single-device консистентность может снизить итоговый score на `40%`
+- низкое разнообразие устройств и user-agent может снизить итоговый score на `20%`
 
-## Anti-Abuse Скоринг
+То есть `HWID` и `SRH` могут понизить действие с `temp_disable` до `warn`, но не создают отдельный бан сами по себе.
 
-Observer использует **конвейер многофакторной оценки**, который рассматривает полную картину перед принятием решения. Это предотвращает ложные срабатывания и оставляет блокировки только за score action, а не за голый подсчет ASN.
+### Действия по score по умолчанию
 
-### Конвейер оценки
+`SCORE_THRESHOLD_WARN` и `SCORE_THRESHOLD_BLOCK` управляют границами `warn` и `hard_disable`. С текущими дефолтами получается:
 
-```
-ScoringInput
-  ├── Классификации ASN   (тип провайдера + модификатор для каждого ASN)
-  ├── Анализ GeoIP        (страны, города, максимальное расстояние между IP)
-  └── IP на ASN           (плотность IP по провайдеру)
-         │
-         ▼
-   ┌────────────────────────────────────────────────────────────────┐
-   │  GeoFeature        вес=55%  → географический разброс          │
-   │  ASNFeature        вес=30%  → смешение типов провайдеров      │
-   │  IPDensityFeature  вес=15%  → количество IP на провайдера     │
-   │  ProviderMixFeature мод-р   → усиление при VPN/хостинге       │
-   └────────────────────────────────────────────────────────────────┘
-         │
-         ▼
-   FinalScore (0–100)  →  Действие
-```
-
-### Описание признаков
-
-| Признак              | Вес    | Что обнаруживает                                                                           |
-| -------------------- | ------ | ------------------------------------------------------------------------------------------ |
-| `GeoFeature`         | 55%    | Одновременные подключения из разных городов/стран — самый сильный сигнал шаринга           |
-| `ASNFeature`         | 30%    | Смешение рискованных типов провайдеров (VPN/хостинг повышает оценку, мобильный снижает)    |
-| `IPDensityFeature`   | 15%    | Высокое число уникальных IP на немобильного провайдера (CGNAT мобильные исключены целиком) |
-| `ProviderMixFeature` | модиф. | Если >50% VPN/хостинг-провайдеров — устанавливает минимальную оценку 50                    |
-
-### IPDensityFeature — учёт мобильных сетей
-
-Мобильные операторы (CGNAT) вызывают у легитимных пользователей появление 50+ IP за 12-часовое окно. `IPDensityFeature` корректно обрабатывает это:
-
-| Тип провайдера                   | Модификатор | Порог IP для оценки=100        |
-| -------------------------------- | ----------- | ------------------------------ |
-| Мобильный (МТС, Мегафон)         | ≤ 0.6       | **ПРОПУСК** — исключён целиком |
-| Региональный ISP                 | ~0.7        | ~71 IP                         |
-| Фиксированный ISP (МГТС, Ростел) | 1.0         | 50 IP                          |
-| Корпоративный / Хостинг          | 1.5         | ~33 IP                         |
-| VPN / Прокси                     | 1.8         | ~28 IP                         |
-
-Даже при максимальной оценке `IPDensityFeature` вносит лишь **10 баллов** в итоговую оценку. Блокировка (оценка > 75) требует одновременно высокого географического разброса.
-
-### Оценка → Действие
-
-| Оценка | Действие         | Эффект                         |
-| ------ | ---------------- | ------------------------------ |
-| < 25   | `none`           | Без действий                   |
-| 25–44  | `monitor`        | Логируется, без применения мер |
-| 45–59  | `warn`           | Отправляется оповещение        |
-| 60–74  | `soft_challenge` | Временное ограничение доступа  |
-| 75–89  | `temp_disable`   | Аккаунт приостановлен          |
-| 90+    | `hard_disable`   | Аккаунт заблокирован           |
+| Score | Действие | Реальный эффект |
+| ---: | --- | --- |
+| `< 25` | `none` | Ничего не делать |
+| `25-49` | `monitor` | Сохранение и отображение в мониторинге |
+| `50-59` | `warn` | Webhook alert |
+| `60-74` | `soft_challenge` | Повышенный alert state, без disable |
+| `75-84` | `temp_disable` | Disable пользователя + опциональный node-side block IP |
+| `85+` | `hard_disable` | Disable пользователя + опциональный node-side block IP |
 
 Результаты с низкой уверенностью автоматически понижаются на один уровень.
 
@@ -141,42 +107,40 @@ ScoringInput
 
 ## Быстрый старт
 
-### 1. Настройка Observer (центральный сервер)
+### 1. Настройка Observer
 
 ```bash
 git clone https://github.com/dd-devgroup/remnawave-observer.git
 cd remnawave-observer/observer_conf
 
 cp docker-compose.example.yml docker-compose.yml
-# Отредактируйте .env:
 ```
 
-**Минимальный `.env`:**
+Минимальный `.env`:
 
 ```bash
-# --- Обязательные ---
-REMNAWAVE_BASE_URL=https://panel.example.com
-REMNAWAVE_API_TOKEN=your_api_token_here
 POSTGRES_DSN=postgres://observer:password@postgres:5432/observer?sslmode=disable
 REDIS_URL=redis://redis:6379/0
 
-# --- Базовое поведение ---
+REMNAWAVE_BASE_URL=https://panel.example.com
+REMNAWAVE_API_TOKEN=your_api_token_here
+LOG_SOURCE_MODE=panel
+
 BLOCK_DURATION=10m
 USER_ASN_TTL_SECONDS=43200
 GEOIP_ENABLED=true
 SCORE_THRESHOLD_WARN=50.0
 SCORE_THRESHOLD_BLOCK=85.0
 
-# --- Исключения ---
-EXCLUDED_USERS=admin@example.com,test@example.com
-EXCLUDED_IPS=8.8.8.8,1.1.1.1
+EXCLUDED_USERS=
+EXCLUDED_IPS=
 EXCLUDED_INTERNAL_SQUAD_UUIDS=
+EXCLUDED_ASNS=
 
-# --- Уведомления ---
 ALERT_WEBHOOK_URL=https://bot.example.com/webhook
 ```
 
-Panel-only ingest, scoring и временный node-side IP block уже включены по умолчанию. Дополнительные override добавляйте только если реально хотите уйти от стандартного поведения.
+Запуск:
 
 ```bash
 docker compose up -d
@@ -185,235 +149,214 @@ docker logs observer -f
 
 ### 2. Требования к Remnawave
 
-Для panel-only ingest нужны:
-
 - `Remnawave Panel >= 2.7.0`
 - `Remnawave Node >= 2.7.0`
-- `cap_add: NET_ADMIN` на нодах, если включён локальный node-side IP block
+- `cap_add: NET_ADMIN` на нодах, если `NODE_EXECUTOR_BLOCK_ENABLED=true`
 
-По умолчанию Observer больше не требует разворачивать Vector на каждой ноде. Старый путь через Vector остаётся как legacy-режим через `LOG_SOURCE_MODE=http|hybrid`.
+`Vector` больше не нужен для стандартного деплоя. Legacy ingest остается доступен через `LOG_SOURCE_MODE=http|hybrid`.
 
 ---
 
 ## Справочник конфигурации
 
-### Основные параметры
+### Основное
 
-| Переменная               | Описание                                    | По умолчанию               |
-| ------------------------ | ------------------------------------------- | -------------------------- |
-| `PORT`                   | HTTP порт прослушивания                     | `9000`                     |
-| `POSTGRES_DSN`           | Строка подключения к PostgreSQL             | **обязательно**            |
-| `REDIS_URL`              | URL Redis                                   | `redis://localhost:6379/0` |
-| `REMNAWAVE_BASE_URL`     | URL панели Remnawave                        | **обязательно**            |
-| `REMNAWAVE_API_TOKEN`    | Bearer-токен Remnawave API                  | **обязательно**            |
-| `LOG_SOURCE_MODE`        | Режим ingest: `panel`, `http`, `hybrid`     | `panel`                    |
-| `PANEL_POLL_INTERVAL_SECONDS` | Интервал опроса панели                 | `60`                       |
-| `PANEL_FETCH_TIMEOUT_SECONDS` | Таймаут одного fetch-job               | `20`                       |
-| `PANEL_FETCH_RESULT_POLL_SECONDS` | Интервал polling результата      | `2`                        |
-| `PANEL_FETCH_MAX_INFLIGHT` | Макс. количество одновременных fetch-job | `3`                        |
-| `NODE_EXECUTOR_BLOCK_ENABLED` | Включить временный node-side block IP | `true`                   |
-| `BLOCK_DURATION`         | Длительность блокировки (напр. `10m`, `1h`) | `5m`                       |
-| `EXCLUDED_USERS`         | ID пользователей для исключения (через ,)   | —                          |
-| `EXCLUDED_IPS`           | IP для исключения (через ,)                 | —                          |
-| `EXCLUDED_INTERNAL_SQUAD_UUIDS` | UUID Internal Squads, исключённых из anti-sharing | —      |
-| `EXCLUDED_ASNS`          | ASN для исключения (через ,)                | —                          |
-| `ALERT_WEBHOOK_URL`      | URL вебхука для уведомлений о блокировках   | —                          |
-| `ALERT_COOLDOWN_SECONDS` | Мин. секунд между оповещениями на юзера     | `3600`                     |
+| Переменная | Описание | По умолчанию |
+| --- | --- | --- |
+| `PORT` | HTTP порт | `9000` |
+| `POSTGRES_DSN` | Строка подключения к PostgreSQL | обязательно |
+| `REDIS_URL` | URL Redis | `redis://localhost:6379/0` |
+| `REMNAWAVE_BASE_URL` | URL панели Remnawave | обязательно |
+| `REMNAWAVE_API_TOKEN` | API токен Remnawave | обязательно |
+| `REMNAWAVE_HEADER` | Опциональный reverse-proxy gate header в формате `KEY=VALUE` | пусто |
+| `LOG_SOURCE_MODE` | Режим ingest: `panel`, `http`, `hybrid` | `panel` |
+| `REMNAWAVE_TIMEOUT_SECONDS` | Таймаут запросов к Remnawave API | `5` |
+| `USERID_UUID_CACHE_TTL_HOURS` | TTL кэша internal ID -> UUID | `24` |
+| `BLOCK_DURATION` | Длительность disable | `5m` |
+| `ALERT_WEBHOOK_URL` | Webhook для алертов | пусто |
+| `ALERT_COOLDOWN_SECONDS` | Cooldown алертов на пользователя | `3600` |
 
-### Горячее окно провайдеров
+### Panel ingest
 
-| Переменная                        | Описание                             | По умолчанию |
-| --------------------------------- | ------------------------------------ | ------------ |
-| `MAX_ASNS_PER_USER`               | Только legacy-порог для мониторинга; не участвует в блокировке и scoring | `4` |
-| `USER_ASN_TTL_SECONDS`            | TTL скользящего окна для записей ASN | `3600`       |
-| `IPTOASN_UPDATE_INTERVAL_MINUTES` | Интервал обновления базы ASN         | `60`         |
+| Переменная | Описание | По умолчанию |
+| --- | --- | --- |
+| `PANEL_POLL_INTERVAL_SECONDS` | Интервал основного опроса | `60` |
+| `PANEL_FETCH_TIMEOUT_SECONDS` | Таймаут одного `fetch-users-ips` job | `20` |
+| `PANEL_FETCH_RESULT_POLL_SECONDS` | Интервал polling результата | `2` |
+| `PANEL_FETCH_MAX_INFLIGHT` | Максимум параллельных fetch job | `3` |
+| `NODE_EXECUTOR_BLOCK_ENABLED` | Включить временный node-side block IP | `true` |
 
-### GeoIP
+### Исключения и hot window
 
-| Переменная                      | Описание                            | По умолчанию |
-| ------------------------------- | ----------------------------------- | ------------ |
-| `GEOIP_ENABLED`                 | Включить анализ GeoIP               | `false`      |
-| `GEOIP_CACHE_TTL_HOURS`         | TTL кэша GeoIP в памяти             | `24`         |
-| `GEO_FALLBACK_ENABLED`          | Включить fallback через 2IP API     | `false`      |
-| `TWOIP_TOKEN`                   | Токен 2IP API                       | —            |
-| `GEOLITE_ASN_DOWNLOAD_URL`      | URL автозагрузки GeoLite2-ASN.mmdb  | —            |
-| `GEOLITE_CITY_DOWNLOAD_URL`     | URL автозагрузки GeoLite2-City.mmdb | —            |
-| `GEOLITE_UPDATE_INTERVAL_HOURS` | Интервал автообновления MMDB        | `168` (7д)   |
+| Переменная | Описание | По умолчанию |
+| --- | --- | --- |
+| `EXCLUDED_USERS` | Список internal user ID через запятую | пусто |
+| `EXCLUDED_IPS` | Список IP или CIDR через запятую | пусто |
+| `EXCLUDED_INTERNAL_SQUAD_UUIDS` | UUID Internal Squad, полностью исключенных из anti-sharing | пусто |
+| `EXCLUDED_ASNS` | Список ASN через запятую | пусто |
+| `USER_ASN_TTL_SECONDS` | TTL hot-window по ASN | `86400` |
+| `MAX_ASNS_PER_USER` | Legacy monitoring-only порог; не влияет на score и ban | `4` |
+| `CLEAR_IPS_DELAY_SECONDS` | Задержка перед очисткой ASN hot-window после disable | `30` |
 
-### Anti-Abuse Скоринг
+### Scoring и GeoIP
 
-| Переменная              | Описание                        | По умолчанию |
-| ----------------------- | ------------------------------- | ------------ |
-| `SCORE_THRESHOLD_WARN`  | Порог оценки для действия warn  | `45`         |
-| `SCORE_THRESHOLD_BLOCK` | Порог оценки для действия block | `75`         |
+| Переменная | Описание | По умолчанию |
+| --- | --- | --- |
+| `GEOIP_ENABLED` | Включить GeoIP enrichment | `false` |
+| `GEOIP_CACHE_TTL_HOURS` | TTL GeoIP cache | `24` |
+| `GEO_FALLBACK_ENABLED` | Включить fallback через 2IP | `false` |
+| `TWOIP_TOKEN` | Токен 2IP | пусто |
+| `TWOIP_BASE_URL` | Base URL 2IP API | `https://api.2ip.io` |
+| `GEOLITE_ASN_PATH` | Путь к GeoLite ASN MMDB | `/app/data/GeoLite2-ASN.mmdb` |
+| `GEOLITE_CITY_PATH` | Путь к GeoLite City MMDB | `/app/data/GeoLite2-City.mmdb` |
+| `SCORE_THRESHOLD_WARN` | Порог `warn` | `50` |
+| `SCORE_THRESHOLD_BLOCK` | Порог `hard_disable` | `85` |
 
-### Redis / Scheduler
+### Необязательное learning и logging
 
-| Переменная                | Описание                              | По умолчанию |
-| ------------------------- | ------------------------------------- | ------------ |
-| `CLEAR_IPS_DELAY_SECONDS` | Задержка перед очисткой записей IP    | `30`         |
-| `REENABLE_TICK_SECONDS`   | Интервал планировщика разблокирования | `10`         |
+| Переменная | Описание | По умолчанию |
+| --- | --- | --- |
+| `UNKNOWN_PROVIDERS_LOG_ENABLED` | Логировать неизвестные provider classification | `false` |
+| `AUTO_LEARNING_ENABLED` | Включить provider auto-learning | `false` |
+| `AUTO_LEARNING_INTERVAL_HOURS` | Интервал auto-learning | `24` |
+| `AUTO_LEARNING_MIN_COUNT` | Минимум совпадений для learned keyword | `10` |
+| `AUTO_LEARNING_MIN_CONFIDENCE` | Минимальная уверенность: `high`, `medium`, `low` | `high` |
+| `AUTO_LEARNING_MAX_ADDS_PER_RUN` | Максимум добавлений за цикл | `20` |
+| `AUTO_LEARNING_OUTPUT_FILE` | Имя выходного overlay файла | `providers.learned.yaml` |
+| `AUTO_LEARN_MIN_DISTINCT_USERS` | Мин. число distinct users для Postgres-backed learning | `3` |
+| `AUTO_LEARN_AUTO_APPROVE_THRESHOLD` | Порог auto-approve | `0.8` |
 
 ---
 
-## Мониторинг
+## Мониторинг и метрики
 
-Каждые 5 минут Observer выводит сводку ASN-пулов в stdout:
+Каждые 5 минут Observer печатает в stdout summary по hot-window провайдеров. Количество ASN там теперь **только информационное**. Реальное enforcement-решение определяется последним scoring action.
 
-```
-[2026-02-27 20:30:42] === ASN POOLS MONITORING START ===
-SUMMARY:
-   Total active users: 95
-   Monitor actions: 11
-   Warn or challenge actions: 3
-   Blocking actions: 0
+Runtime-метрики логируются каждые 60 секунд:
 
-TOP USERS BY PROVIDER COUNT AND SCORE:
-    1. [MONITOR] 12345
-       Providers: 5 | TTL: 0.6-12.0h
-       Score: 47.4 [monitor]
-       ASNs: AS3267(11.6h)[1 IPs], AS31133(0.6h)[2 IPs], AS39264(0.7h)[2 IPs], ...
-       Geo: countries: RU, cities: Moscow, Samara, Saint Petersburg
-       Details:
-          AS31133: 2 IP -> 178.176.87.28 -> RU, Samara (53.21, 50.15) [src:mmdb+2ip]
-          AS3267:  1 IP -> 82.179.192.10 -> RU, Moscow  (55.74, 37.61) [src:mmdb+2ip]
-```
-
-Строка **Score** показывает последнюю anti-abuse оценку и текущее действие. Количество провайдеров в мониторинге теперь только информационное и само по себе не приводит к бану.
-
-### Метрики времени выполнения (логируются каждые 60с)
-
-```
-[metrics] requests_total=166842 rejected=0 geoip_ok=1353
+```text
+[metrics] requests_total=166842 rejected=0 geoip_ok=1353 geoip_fail=0 geoip_timeout=0
           rw_disable_ok=12 rw_disable_fail=0 rw_enable_ok=8 rw_enable_fail=0
-          uuid_cache_hit=450 uuid_cache_miss=50
+          uuid_cache_hit=450 uuid_cache_miss=50 user_resolve_cache_hit=120 user_resolve_cache_miss=6
+          panel_submit_ok=94 panel_submit_fail=0 panel_result_ok=94 panel_result_fail=0 panel_timeout=0 panel_no_data=3 panel_dedup_hit=211
+          executor_block_ok=4 executor_block_fail=0 discarded_unspecified_ip=17 excluded_squad_users=25
 ```
 
-| Метрика           | Условие оповещения                                      |
-| ----------------- | ------------------------------------------------------- |
-| `rw_disable_fail` | > 5% попыток блокировок → проверьте Remnawave API       |
-| `rw_enable_fail`  | > 0 → пользователи застряли в заблокированном состоянии |
-| `uuid_cache_miss` | > 20% → увеличьте `USER_ID_UUID_CACHE_TTL_HOURS`        |
+Самые полезные счетчики:
+
+- `rw_disable_fail`, `rw_enable_fail`: здоровье enforcement через Remnawave
+- `panel_submit_fail`, `panel_result_fail`, `panel_timeout`: проблемы panel ingest
+- `panel_dedup_hit`: повторные snapshots, отброшенные watermark-логикой
+- `discarded_unspecified_ip`: шум `0.0.0.0` / `::`
+- `excluded_squad_users`: пользователи, исключенные по Internal Squad
 
 ---
 
-## Уведомления через вебхук
+## Webhook Payload
 
-Observer отправляет POST-запрос на `ALERT_WEBHOOK_URL` при каждом scoring alert с действием `warn` и выше.
-
-**Scoring payload:**
+Алерты отправляются для `warn` и выше.
 
 ```json
 {
-	"user_identifier": "12345",
-	"violation_type": "scoring_action",
-	"score": 82.4,
-	"score_action": "temp_disable",
-	"block_duration": "10m",
-	"all_user_asns": ["AS31133", "AS3267"],
-	"asn_details": {
-		"AS31133": {
-			"asn": "AS31133",
-			"organization": "MTS PJSC",
-			"ips": ["185.22.64.15", "91.108.4.22"],
-			"ip_count": 2
-		}
-	},
-	"score_breakdown": [
-		{ "name": "geo", "score": 90, "weight": 0.55, "confidence": 0.9 },
-		{ "name": "asn", "score": 70, "weight": 0.30, "confidence": 0.8 }
-	]
+  "user_identifier": "12345",
+  "violation_type": "scoring_action",
+  "score": 82.4,
+  "score_action": "temp_disable",
+  "score_confidence": 0.88,
+  "block_duration": "10m",
+  "all_user_asns": ["AS31133", "AS3267"],
+  "score_modifiers": ["hwid_srh_single_device_consistency"],
+  "score_breakdown": [
+    { "name": "geo", "score": 90, "weight": 0.55, "confidence": 0.9 },
+    { "name": "asn", "score": 70, "weight": 0.30, "confidence": 0.8 },
+    { "name": "hwid_evidence", "score": 0, "weight": 0, "confidence": 0.9 }
+  ],
+  "geo_analysis": {
+    "unique_countries": ["RU", "DE"],
+    "unique_cities": ["Moscow", "Berlin"],
+    "agglomerations": [],
+    "max_distance_km": 1608.0,
+    "geo_score": 90,
+    "geo_flags": ["cross_border"]
+  }
 }
 ```
 
 ---
 
-## Тестирование
-
-```bash
-# Юнит-тесты
-cd observer
-go test -count=1 ./...
-
-# Интеграционные тесты (требуется Docker)
-docker compose -f docker-compose.test.yml up -d
-go test -tags=integration -count=1 ./...
-docker compose -f docker-compose.test.yml down
-```
-
----
-
-## Производительность
-
-| Метрика                         | Значение     |
-| ------------------------------- | ------------ |
-| Пропускная способность Observer | ~5 000 req/s |
-| Задержка Remnawave API          | 50–200 мс    |
-| Задержка Redis                  | < 5 мс       |
-| Накладные расходы legacy Vector (`http` режим) | < 10 МБ RAM  |
-| RAM Observer                    | ~150 МБ      |
-
----
-
-## Безопасность
-
-- Используйте надёжные API-токены (32+ символов)
-- TLS для запросов Remnawave Panel → Observer API
-- Если используется legacy-режим `Vector`, дополнительно защитите трафик Vector → Observer
-- Redis изолирован в Docker-сети, не доступен снаружи
-- Настройте rate limiting nginx на эндпоинт Observer
-- Используйте секретный путь для `ALERT_WEBHOOK_URL`
-
----
-
 ## Устранение неполадок
 
-**Observer не блокирует пользователей:**
+**Нет данных из панели**
 
-```bash
-docker logs observer | grep -i "disable\|error"
-# Частые причины:
-# - Неверный REMNAWAVE_API_TOKEN
-# - REMNAWAVE_BASE_URL недоступен из контейнера
-# - user_email содержит email-строку вместо числового ID
-```
+Проверь:
 
-**Legacy-режим Vector не отправляет логи:**
+- `REMNAWAVE_BASE_URL` и `REMNAWAVE_API_TOKEN`
+- `Remnawave Panel/Node >= 2.7.0`
+- метрики `panel_submit_fail`, `panel_result_fail`, `panel_timeout`
+
+**Пользователь не блокируется**
+
+Смотри последний score action в мониторинге или в `user_score_events`.
+
+- `monitor`, `warn`, `soft_challenge` не делают disable
+- только `temp_disable` и `hard_disable` запускают enforcement
+
+**Некоторые пользователи вообще не попадают в anti-sharing**
+
+Проверь:
+
+- `EXCLUDED_INTERNAL_SQUAD_UUIDS`
+- `EXCLUDED_USERS`
+- `EXCLUDED_IPS`
+- `EXCLUDED_ASNS`
+
+Пользователи из исключенных Internal Squad обходят scoring, persistence, alerts и enforcement целиком.
+
+**Не видно трафика с `0.0.0.0` или `::`**
+
+Это нормально. Unspecified IP отбрасываются на ingest-этапе и удаляются из hot-window/history при startup cleanup.
+
+**Legacy Vector не шлет логи**
+
+Актуально только для `LOG_SOURCE_MODE=http|hybrid`:
 
 ```bash
 docker logs vector-agent | grep -i error
-# Проверьте, что последняя строка лога содержит числовой user_email:
 docker exec vector-agent tail -1 /var/log/xray/access.log
 ```
 
-**Пользователь не разблокирован:**
+**Не работает node-side block IP**
 
-```bash
-docker logs observer | grep -i "enable\|scheduler"
-docker exec redis redis-cli ZRANGE rw:reenable:zset 0 -1 WITHSCORES
-```
+Проверь:
+
+- `NODE_EXECUTOR_BLOCK_ENABLED=true`
+- на node-контейнерах есть `cap_add: NET_ADMIN`
+- метрику `executor_block_fail`
 
 ---
 
-## Документация
+## Дополнительная документация
 
-- 📖 [Настройка Vector Agent](observer/docs/VECTOR-AGENT-SETUP.md) — legacy-руководство для `LOG_SOURCE_MODE=http|hybrid`
+- [observer/docs/VECTOR-AGENT-SETUP.md](observer/docs/VECTOR-AGENT-SETUP.md) — legacy-настройка Vector для `LOG_SOURCE_MODE=http|hybrid`
 
 ---
 
 ## Системные требования
 
-**Сервер Observer (центральный):**
+Сервер Observer:
 
 - Debian 12+ / Ubuntu 22.04+
-- 2 ГБ RAM, 1 vCPU
-- Docker 24.0+, Docker Compose v2
+- 2 ГБ RAM
+- 1 vCPU
+- Docker 24.0+ и Docker Compose v2
 
-**Ноды Remnawave:**
+Сторона Remnawave:
 
-- Remnawave Node 2.7.0+
-- `cap_add: NET_ADMIN`, если включён временный node-side block IP
-- Для legacy-режима `Vector` дополнительно нужны ~512 МБ RAM, 0.25 vCPU и Docker 24.0+
+- `Remnawave Panel >= 2.7.0`
+- `Remnawave Node >= 2.7.0`
+- `cap_add: NET_ADMIN`, если включен временный node-side block IP
+
+Legacy-режим `Vector` дополнительно требует per-node agent ресурсы и больше не является основной архитектурой.
 
 ---
 

@@ -12,171 +12,135 @@
 
 ## Overview
 
-**Remnawave Observer** automatically detects and blocks users who share their VPN subscriptions.
+**Remnawave Observer** is a panel-level anti-sharing service for Remnawave.
 
-Unlike simple IP-based blocking (easily bypassed), **Observer blocks at the Remnawave panel level** — violators lose access on **all servers simultaneously**, regardless of which IP they switch to.
+It no longer depends on `Vector` by default. The primary data source is **Remnawave Panel 2.7.0+**: Observer polls the panel for per-user IP snapshots, normalizes them into the internal event format, runs scoring, and only then decides whether the user should be disabled.
 
-**Key features:**
+Current behavior:
 
-- ✅ Cannot be bypassed by changing IP
-- ✅ CGNAT-aware — mobile carriers with 50+ dynamic IPs are not false-positived
-- ✅ Multi-signal scoring: geography + provider type + IP density
-- ✅ Global blocking and re-enable across all nodes via Remnawave API
+- default ingest mode is `panel`
+- bans are **scoring-only**
+- raw ASN count is **informational only** and does not trigger blocking
+- users from configured `Internal Squads` are fully bypassed
+- garbage IPs like `0.0.0.0` and `::` are discarded silently and cleaned from Redis/PostgreSQL on startup
+- `HWID` and subscription request history (`SRH`) are used as anti-false-positive evidence
+- legacy `/log-entry` and `Vector` mode still exist via `LOG_SOURCE_MODE=http|hybrid`
 
 ---
 
 ## How It Works
 
 ```
-User → Xray / Remnawave Node → Remnawave Panel → Observer panel poller
-                                                           │
-                                         ┌─────────────────┴─────────────────┐
-                                         ▼                                   ▼
-                                      Redis                            PostgreSQL
-                                   (hot window,                      (history, score
-                                 reenables, sightings)                  and events)
-                                         │
-                                         ▼
-                               Anti-Abuse Scoring + Enforcement
-                           (DisableUser + temporary node IP block)
+User -> Xray / Remnawave Node -> Remnawave Panel -> Observer panel poller
+                                                      |
+                               +----------------------+----------------------+
+                               |                                             |
+                             Redis                                       PostgreSQL
+                  (hot window, sightings, watermarks,            (history, score events,
+                   alert cooldowns, reenables)                    anti-abuse actions)
+                               |
+                               v
+                    Anti-Abuse Scoring + Enforcement
+                 (DisableUser + optional node-side IP block)
 ```
 
-1. **Observer** polls Remnawave Panel `2.7.0+` for per-user IP snapshots on active nodes
-2. The poller normalizes each observation into the existing `user_email` (numeric ID) + `source_ip` event format
-3. **Observer** tracks unique providers (ASNs) per user in a sliding TTL window (default: 12h)
-4. **Anti-Abuse Scorer** runs a multi-feature analysis on every new ASN event
-5. **On blocking score actions only** → `DisableUser()` is called and offending IPs can be blocked temporarily on the nodes where they were seen
-6. **Redis ZSET** schedules automatic re-enable, while stale observations expire automatically
+Processing flow:
+
+1. Observer polls active nodes through Remnawave panel jobs.
+2. `fetch-users-ips` results are normalized into `user_email=<internal numeric ID>` and `source_ip`.
+3. Unspecified IPs (`0.0.0.0`, `::`) are dropped immediately.
+4. Users from `EXCLUDED_INTERNAL_SQUAD_UUIDS`, `EXCLUDED_USERS`, `EXCLUDED_IPS`, and `EXCLUDED_ASNS` are bypassed.
+5. Panel observations are deduplicated by `(nodeUUID, userID, ip, lastSeen)` watermark.
+6. A hot ASN window is updated in Redis and the scoring pipeline runs for new provider events.
+7. Only `temp_disable` and `hard_disable` trigger enforcement:
+   - global `DisableUser` through Remnawave
+   - optional temporary node-side IP block through `POST /api/node-plugins/executor`
+8. A Redis scheduler re-enables users automatically after `BLOCK_DURATION`.
+
+Important: the executor path does **not** require creating a separate node plugin first. It only requires `Remnawave Panel >= 2.7.0`, `Remnawave Node >= 2.7.0`, and `cap_add: NET_ADMIN` on nodes.
 
 ---
 
-## Detection
+## Scoring Model
 
-### ASN / Provider Mode
+Observer is now **scoring-only**. Exceeding `MAX_ASNS_PER_USER` does not disable users and does not affect the score directly.
 
-Groups all IPs from the same internet provider (AS number) as a single entity. One legitimate user typically connects from 2–5 providers maximum (home ISP + mobile carrier + maybe work VPN).
+### Base signals
 
-**Legitimate user (1 person):**
+| Signal | Weight | Meaning |
+| --- | ---: | --- |
+| `GeoFeature` | 55% | Geographic spread between observed IPs |
+| `ASNFeature` | 30% | Provider-type mix: mobile lowers risk, VPN/hosting raises it |
+| `IPDensityFeature` | 15% | Unique IP density inside non-mobile providers |
+| `ProviderMixFeature` | modifier | Raises the floor when VPN/hosting dominates |
 
-```
-176.59.40.10  → AS12389 (Rostelecom, home)
-213.87.120.5  → AS8359  (MTS, mobile)
-→ 2 providers ✅
-```
+### Remnawave evidence
 
-**Account sharing (multiple people):**
+After the base score is calculated, Observer optionally queries Remnawave for:
 
-```
-176.59.40.10  → AS12389 (Rostelecom, Moscow)
-91.108.4.50   → AS31200 (Beeline, Kazakhstan)
-185.22.64.10  → AS48642 (Kyivstar, Ukraine)
-→ 3 providers in 3 countries ⚠️ → BLOCK
-```
+- `HWID` devices
+- subscription request history (`SRH`)
 
-The ASN database auto-downloads from [iptoasn.com](https://iptoasn.com) on startup and refreshes hourly.
+These evidence signals do **not** add an extra penalty. They are used to reduce false positives:
 
----
+- strong single-device consistency can reduce the final score by `40%`
+- low device / agent diversity can reduce the final score by `20%`
 
-## Anti-Abuse Scoring
+This means `HWID` and `SRH` can downgrade a user from `temp_disable` to `warn`, but they do not create an extra ban by themselves.
 
-Observer uses a **multi-feature scoring pipeline** that considers the full picture before taking action. This prevents false positives and keeps bans tied only to score actions, not raw ASN counts.
+### Default action thresholds
 
-### Scoring Pipeline
+`SCORE_THRESHOLD_WARN` and `SCORE_THRESHOLD_BLOCK` control the `warn` and `hard_disable` boundaries. With the current defaults:
 
-```
-ScoringInput
-  ├── ASN Classifications   (provider type + modifier per ASN)
-  ├── GeoIP Analysis        (countries, cities, max distance between IPs)
-  └── IPs per ASN           (per-provider IP density)
-         │
-         ▼
-   ┌────────────────────────────────────────────────────┐
-   │  GeoFeature        weight=55%  → geographic spread │
-   │  ASNFeature        weight=30%  → provider type mix │
-   │  IPDensityFeature  weight=15%  → IPs per provider  │
-   │  ProviderMixFeature modifier   → VPN/hosting boost │
-   └────────────────────────────────────────────────────┘
-         │
-         ▼
-   FinalScore (0–100)  →  Action
-```
+| Score | Action | Actual effect |
+| ---: | --- | --- |
+| `< 25` | `none` | No action |
+| `25-49` | `monitor` | Persisted and visible in monitoring |
+| `50-59` | `warn` | Webhook alert |
+| `60-74` | `soft_challenge` | Elevated alert state, no disable |
+| `75-84` | `temp_disable` | User disable + optional node-side IP block |
+| `85+` | `hard_disable` | User disable + optional node-side IP block |
 
-### Feature Descriptions
-
-| Feature              | Weight   | What it detects                                                                         |
-| -------------------- | -------- | --------------------------------------------------------------------------------------- |
-| `GeoFeature`         | 55%      | Simultaneous connections from different cities/countries — the strongest sharing signal |
-| `ASNFeature`         | 30%      | Mix of high-risk provider types (VPN/hosting raises score, mobile lowers it)            |
-| `IPDensityFeature`   | 15%      | High unique IP count per non-mobile provider (CGNAT mobile is excluded entirely)        |
-| `ProviderMixFeature` | modifier | If >50% VPN/hosting providers — enforces a minimum score of 50                          |
-
-### IPDensityFeature — Mobile-Aware
-
-Mobile carriers (CGNAT) cause legitimate users to appear with 50+ IPs in a 12h window. `IPDensityFeature` handles this correctly:
-
-| Provider type                | Modifier | IP threshold for score=100      |
-| ---------------------------- | -------- | ------------------------------- |
-| Mobile (MTS, Megafon)        | ≤ 0.6    | **SKIPPED** — excluded entirely |
-| Regional ISP                 | ~0.7     | ~71 IPs                         |
-| Fixed ISP (MGTS, Rostelecom) | 1.0      | 50 IPs                          |
-| Corporate / Hosting          | 1.5      | ~33 IPs                         |
-| VPN / Proxy                  | 1.8      | ~28 IPs                         |
-
-Even at max score, `IPDensityFeature` contributes only **10 points** to the final score. Blocking (score > 75) requires simultaneously high geographic spread.
-
-### Score → Action
-
-| Score | Action           | Effect                       |
-| ----- | ---------------- | ---------------------------- |
-| < 25  | `none`           | No action                    |
-| 25–44 | `monitor`        | Logged, no enforcement       |
-| 45–59 | `warn`           | Alert sent                   |
-| 60–74 | `soft_challenge` | Temporary access restriction |
-| 75–89 | `temp_disable`   | Account suspended            |
-| 90+   | `hard_disable`   | Account blocked              |
-
-Low-confidence results are automatically downgraded one level.
+Low-confidence results are downgraded one level automatically.
 
 ---
 
 ## Quick Start
 
-### 1. Observer Setup (central server)
+### 1. Observer setup
 
 ```bash
 git clone https://github.com/dd-devgroup/remnawave-observer.git
 cd remnawave-observer/observer_conf
 
 cp docker-compose.example.yml docker-compose.yml
-# Edit .env:
 ```
 
-**Minimal `.env`:**
+Minimal `.env`:
 
 ```bash
-# --- Required ---
-REMNAWAVE_BASE_URL=https://panel.example.com
-REMNAWAVE_API_TOKEN=your_api_token_here
 POSTGRES_DSN=postgres://observer:password@postgres:5432/observer?sslmode=disable
 REDIS_URL=redis://redis:6379/0
 
-# --- Core behavior ---
+REMNAWAVE_BASE_URL=https://panel.example.com
+REMNAWAVE_API_TOKEN=your_api_token_here
+LOG_SOURCE_MODE=panel
+
 BLOCK_DURATION=10m
 USER_ASN_TTL_SECONDS=43200
 GEOIP_ENABLED=true
 SCORE_THRESHOLD_WARN=50.0
 SCORE_THRESHOLD_BLOCK=85.0
 
-# --- Exclusions ---
-EXCLUDED_USERS=admin@example.com,test@example.com
-EXCLUDED_IPS=8.8.8.8,1.1.1.1
+EXCLUDED_USERS=
+EXCLUDED_IPS=
 EXCLUDED_INTERNAL_SQUAD_UUIDS=
+EXCLUDED_ASNS=
 
-# --- Notifications ---
 ALERT_WEBHOOK_URL=https://bot.example.com/webhook
 ```
 
-Panel-only ingest, scoring and temporary node-side IP blocking are already enabled by default. Add advanced overrides only when you actually need non-default behavior.
+Start:
 
 ```bash
 docker compose up -d
@@ -185,13 +149,11 @@ docker logs observer -f
 
 ### 2. Remnawave requirements
 
-Panel ingest requires:
-
 - `Remnawave Panel >= 2.7.0`
 - `Remnawave Node >= 2.7.0`
-- `cap_add: NET_ADMIN` on nodes if local node-side IP blocking is enabled
+- `cap_add: NET_ADMIN` on nodes if `NODE_EXECUTOR_BLOCK_ENABLED=true`
 
-Observer now works without deploying Vector on every node by default. The old Vector path remains available as a legacy ingest mode via `LOG_SOURCE_MODE=http|hybrid`.
+`Vector` is no longer required for the default deployment. Legacy ingest is still available via `LOG_SOURCE_MODE=http|hybrid`.
 
 ---
 
@@ -199,221 +161,202 @@ Observer now works without deploying Vector on every node by default. The old Ve
 
 ### Core
 
-| Variable                 | Description                         | Default                    |
-| ------------------------ | ----------------------------------- | -------------------------- |
-| `PORT`                   | HTTP listen port                    | `9000`                     |
-| `POSTGRES_DSN`           | PostgreSQL connection string        | **required**               |
-| `REDIS_URL`              | Redis URL                           | `redis://localhost:6379/0` |
-| `REMNAWAVE_BASE_URL`     | Remnawave panel URL                 | **required**               |
-| `REMNAWAVE_API_TOKEN`    | Remnawave API bearer token          | **required**               |
-| `LOG_SOURCE_MODE`        | Ingest mode: `panel`, `http`, `hybrid` | `panel`                 |
-| `PANEL_POLL_INTERVAL_SECONDS` | Panel poll interval             | `60`                      |
-| `PANEL_FETCH_TIMEOUT_SECONDS` | Timeout for one fetch job        | `20`                      |
-| `PANEL_FETCH_RESULT_POLL_SECONDS` | Poll interval for job result | `2`                       |
-| `PANEL_FETCH_MAX_INFLIGHT` | Max concurrent fetch jobs         | `3`                       |
-| `NODE_EXECUTOR_BLOCK_ENABLED` | Enable temporary node-side IP block | `true`               |
-| `BLOCK_DURATION`         | Block duration (e.g. `10m`, `1h`)   | `5m`                       |
-| `EXCLUDED_USERS`         | Comma-separated user IDs to skip    | —                          |
-| `EXCLUDED_IPS`           | Comma-separated IPs to skip         | —                          |
-| `EXCLUDED_INTERNAL_SQUAD_UUIDS` | Internal squad UUIDs to bypass anti-sharing | —       |
-| `EXCLUDED_ASNS`          | Comma-separated ASNs to skip        | —                          |
-| `ALERT_WEBHOOK_URL`      | Webhook URL for block notifications | —                          |
-| `ALERT_COOLDOWN_SECONDS` | Min seconds between alerts per user | `3600`                     |
+| Variable | Description | Default |
+| --- | --- | --- |
+| `PORT` | HTTP listen port | `9000` |
+| `POSTGRES_DSN` | PostgreSQL connection string | required |
+| `REDIS_URL` | Redis URL | `redis://localhost:6379/0` |
+| `REMNAWAVE_BASE_URL` | Remnawave panel URL | required |
+| `REMNAWAVE_API_TOKEN` | Remnawave API token | required |
+| `REMNAWAVE_HEADER` | Optional reverse-proxy gate header in `KEY=VALUE` format | empty |
+| `LOG_SOURCE_MODE` | Ingest mode: `panel`, `http`, `hybrid` | `panel` |
+| `REMNAWAVE_TIMEOUT_SECONDS` | Timeout for Remnawave API requests | `5` |
+| `USERID_UUID_CACHE_TTL_HOURS` | Internal ID -> UUID cache TTL | `24` |
+| `BLOCK_DURATION` | Disable duration | `5m` |
+| `ALERT_WEBHOOK_URL` | Webhook URL for alerts | empty |
+| `ALERT_COOLDOWN_SECONDS` | Per-user alert cooldown | `3600` |
 
-### Provider Hot Window
+### Panel ingest
 
-| Variable                          | Description                        | Default |
-| --------------------------------- | ---------------------------------- | ------- |
-| `MAX_ASNS_PER_USER`               | Legacy monitoring threshold only; not used for bans/scoring | `4` |
-| `USER_ASN_TTL_SECONDS`            | Sliding window TTL for ASN records | `3600`  |
-| `IPTOASN_UPDATE_INTERVAL_MINUTES` | ASN DB refresh interval            | `60`    |
+| Variable | Description | Default |
+| --- | --- | --- |
+| `PANEL_POLL_INTERVAL_SECONDS` | Main poll interval | `60` |
+| `PANEL_FETCH_TIMEOUT_SECONDS` | Timeout for one `fetch-users-ips` job | `20` |
+| `PANEL_FETCH_RESULT_POLL_SECONDS` | Result polling interval | `2` |
+| `PANEL_FETCH_MAX_INFLIGHT` | Max concurrent fetch jobs | `3` |
+| `NODE_EXECUTOR_BLOCK_ENABLED` | Enable temporary node-side IP block | `true` |
 
-### GeoIP
+### Exclusions and hot window
 
-| Variable                        | Description                          | Default    |
-| ------------------------------- | ------------------------------------ | ---------- |
-| `GEOIP_ENABLED`                 | Enable GeoIP analysis                | `false`    |
-| `GEOIP_CACHE_TTL_HOURS`         | In-memory GeoIP cache TTL            | `24`       |
-| `GEO_FALLBACK_ENABLED`          | Enable 2IP fallback API              | `false`    |
-| `TWOIP_TOKEN`                   | 2IP API token                        | —          |
-| `GEOLITE_ASN_DOWNLOAD_URL`      | GeoLite2-ASN.mmdb auto-download URL  | —          |
-| `GEOLITE_CITY_DOWNLOAD_URL`     | GeoLite2-City.mmdb auto-download URL | —          |
-| `GEOLITE_UPDATE_INTERVAL_HOURS` | MMDB auto-update interval            | `168` (7d) |
+| Variable | Description | Default |
+| --- | --- | --- |
+| `EXCLUDED_USERS` | Comma-separated internal user IDs to skip | empty |
+| `EXCLUDED_IPS` | Comma-separated IPs or CIDRs to skip | empty |
+| `EXCLUDED_INTERNAL_SQUAD_UUIDS` | Internal squad UUIDs fully bypassed by anti-sharing | empty |
+| `EXCLUDED_ASNS` | Comma-separated ASNs to skip | empty |
+| `USER_ASN_TTL_SECONDS` | TTL of the hot ASN window | `86400` |
+| `MAX_ASNS_PER_USER` | Legacy monitoring-only threshold; does not affect score or bans | `4` |
+| `CLEAR_IPS_DELAY_SECONDS` | Delay before clearing ASN hot-window state after disable | `30` |
 
-### Anti-Abuse Scoring
+### Scoring and GeoIP
 
-| Variable                | Description                      | Default |
-| ----------------------- | -------------------------------- | ------- |
-| `SCORE_THRESHOLD_WARN`  | Score threshold for warn action  | `45`    |
-| `SCORE_THRESHOLD_BLOCK` | Score threshold for block action | `75`    |
+| Variable | Description | Default |
+| --- | --- | --- |
+| `GEOIP_ENABLED` | Enable GeoIP enrichment | `false` |
+| `GEOIP_CACHE_TTL_HOURS` | GeoIP cache TTL | `24` |
+| `GEO_FALLBACK_ENABLED` | Enable 2IP fallback | `false` |
+| `TWOIP_TOKEN` | 2IP token | empty |
+| `TWOIP_BASE_URL` | 2IP API base URL | `https://api.2ip.io` |
+| `GEOLITE_ASN_PATH` | GeoLite ASN MMDB path | `/app/data/GeoLite2-ASN.mmdb` |
+| `GEOLITE_CITY_PATH` | GeoLite City MMDB path | `/app/data/GeoLite2-City.mmdb` |
+| `SCORE_THRESHOLD_WARN` | `warn` threshold | `50` |
+| `SCORE_THRESHOLD_BLOCK` | `hard_disable` threshold | `85` |
 
-### Redis / Scheduler
+### Optional learning and logging
 
-| Variable                  | Description                         | Default |
-| ------------------------- | ----------------------------------- | ------- |
-| `CLEAR_IPS_DELAY_SECONDS` | Delay before cleaning up IP records | `30`    |
-| `REENABLE_TICK_SECONDS`   | Re-enable scheduler interval        | `10`    |
+| Variable | Description | Default |
+| --- | --- | --- |
+| `UNKNOWN_PROVIDERS_LOG_ENABLED` | Persist unknown provider classifications | `false` |
+| `AUTO_LEARNING_ENABLED` | Enable provider auto-learning | `false` |
+| `AUTO_LEARNING_INTERVAL_HOURS` | Auto-learning interval | `24` |
+| `AUTO_LEARNING_MIN_COUNT` | Min occurrences for learned keyword | `10` |
+| `AUTO_LEARNING_MIN_CONFIDENCE` | Min confidence: `high`, `medium`, `low` | `high` |
+| `AUTO_LEARNING_MAX_ADDS_PER_RUN` | Max additions per run | `20` |
+| `AUTO_LEARNING_OUTPUT_FILE` | Output overlay filename | `providers.learned.yaml` |
+| `AUTO_LEARN_MIN_DISTINCT_USERS` | Min distinct users for Postgres-backed learning | `3` |
+| `AUTO_LEARN_AUTO_APPROVE_THRESHOLD` | Auto-approve threshold | `0.8` |
 
 ---
 
-## Monitoring
+## Monitoring and Metrics
 
-Every 5 minutes Observer prints an ASN pool summary to stdout:
+Every 5 minutes Observer prints a provider hot-window summary to stdout. Provider counts there are **informational only**. The real enforcement decision comes from the latest scoring action.
 
-```
-[2026-02-27 20:30:42] === ASN POOLS MONITORING START ===
-SUMMARY:
-   Total active users: 95
-   Monitor actions: 11
-   Warn or challenge actions: 3
-   Blocking actions: 0
+Runtime metrics are logged every 60 seconds:
 
-TOP USERS BY PROVIDER COUNT AND SCORE:
-    1. [MONITOR] 12345
-       Providers: 5 | TTL: 0.6-12.0h
-       Score: 47.4 [monitor]
-       ASNs: AS3267(11.6h)[1 IPs], AS31133(0.6h)[2 IPs], AS39264(0.7h)[2 IPs], ...
-       Geo: countries: RU, cities: Moscow, Samara, Saint Petersburg
-       Details:
-          AS31133: 2 IP -> 178.176.87.28 -> RU, Samara (53.21, 50.15) [src:mmdb+2ip]
-          AS3267:  1 IP -> 82.179.192.10 -> RU, Moscow  (55.74, 37.61) [src:mmdb+2ip]
-```
-
-The **Score** line shows the latest anti-abuse score and current action. Provider counts in monitoring are informational only and no longer trigger bans by themselves.
-
-### Runtime Metrics (logged every 60s)
-
-```
-[metrics] requests_total=166842 rejected=0 geoip_ok=1353
+```text
+[metrics] requests_total=166842 rejected=0 geoip_ok=1353 geoip_fail=0 geoip_timeout=0
           rw_disable_ok=12 rw_disable_fail=0 rw_enable_ok=8 rw_enable_fail=0
-          uuid_cache_hit=450 uuid_cache_miss=50
+          uuid_cache_hit=450 uuid_cache_miss=50 user_resolve_cache_hit=120 user_resolve_cache_miss=6
+          panel_submit_ok=94 panel_submit_fail=0 panel_result_ok=94 panel_result_fail=0 panel_timeout=0 panel_no_data=3 panel_dedup_hit=211
+          executor_block_ok=4 executor_block_fail=0 discarded_unspecified_ip=17 excluded_squad_users=25
 ```
 
-| Metric            | Alert condition                                 |
-| ----------------- | ----------------------------------------------- |
-| `rw_disable_fail` | > 5% of disable attempts → check Remnawave API  |
-| `rw_enable_fail`  | > 0 → users stuck disabled                      |
-| `uuid_cache_miss` | > 20% → increase `USER_ID_UUID_CACHE_TTL_HOURS` |
+The most useful counters for current deployments:
+
+- `rw_disable_fail`, `rw_enable_fail`: Remnawave enforcement health
+- `panel_submit_fail`, `panel_result_fail`, `panel_timeout`: panel ingest issues
+- `panel_dedup_hit`: repeated snapshots filtered by watermark
+- `discarded_unspecified_ip`: dropped `0.0.0.0` / `::` noise
+- `excluded_squad_users`: users bypassed because of internal squad exclusions
 
 ---
 
-## Webhook Notifications
+## Webhook Payload
 
-Observer sends a POST request to `ALERT_WEBHOOK_URL` on every scoring alert with action `warn` or higher.
-
-**Scoring payload:**
+Alerts are sent for `warn` and above.
 
 ```json
 {
-	"user_identifier": "12345",
-	"violation_type": "scoring_action",
-	"score": 82.4,
-	"score_action": "temp_disable",
-	"block_duration": "10m",
-	"all_user_asns": ["AS31133", "AS3267"],
-	"asn_details": {
-		"AS31133": {
-			"asn": "AS31133",
-			"organization": "MTS PJSC",
-			"ips": ["185.22.64.15", "91.108.4.22"],
-			"ip_count": 2
-		}
-	},
-	"score_breakdown": [
-		{ "name": "geo", "score": 90, "weight": 0.55, "confidence": 0.9 },
-		{ "name": "asn", "score": 70, "weight": 0.30, "confidence": 0.8 }
-	]
+  "user_identifier": "12345",
+  "violation_type": "scoring_action",
+  "score": 82.4,
+  "score_action": "temp_disable",
+  "score_confidence": 0.88,
+  "block_duration": "10m",
+  "all_user_asns": ["AS31133", "AS3267"],
+  "score_modifiers": ["hwid_srh_single_device_consistency"],
+  "score_breakdown": [
+    { "name": "geo", "score": 90, "weight": 0.55, "confidence": 0.9 },
+    { "name": "asn", "score": 70, "weight": 0.30, "confidence": 0.8 },
+    { "name": "hwid_evidence", "score": 0, "weight": 0, "confidence": 0.9 }
+  ],
+  "geo_analysis": {
+    "unique_countries": ["RU", "DE"],
+    "unique_cities": ["Moscow", "Berlin"],
+    "agglomerations": [],
+    "max_distance_km": 1608.0,
+    "geo_score": 90,
+    "geo_flags": ["cross_border"]
+  }
 }
 ```
 
 ---
 
-## Testing
-
-```bash
-# Unit tests
-cd observer
-go test -count=1 ./...
-
-# Integration tests (requires Docker)
-docker compose -f docker-compose.test.yml up -d
-go test -tags=integration -count=1 ./...
-docker compose -f docker-compose.test.yml down
-```
-
----
-
-## Performance
-
-| Metric                   | Value        |
-| ------------------------ | ------------ |
-| Observer throughput      | ~5 000 req/s |
-| Remnawave API latency    | 50–200 ms    |
-| Redis latency            | < 5 ms       |
-| Legacy Vector overhead per node (`http` mode) | < 10 MB RAM  |
-| Observer RAM             | ~150 MB      |
-
----
-
-## Security
-
-- Use strong API tokens (32+ characters)
-- TLS for Remnawave Panel → Observer API requests
-- If legacy `Vector` mode is used, also secure Vector → Observer traffic
-- Redis isolated in Docker network, not exposed externally
-- Configure nginx rate limiting on the Observer endpoint
-- Use a secret path for `ALERT_WEBHOOK_URL`
-
----
-
 ## Troubleshooting
 
-**Observer not blocking users:**
+**No panel data appears**
 
-```bash
-docker logs observer | grep -i "disable\|error"
-# Common causes:
-# - Invalid REMNAWAVE_API_TOKEN
-# - REMNAWAVE_BASE_URL not reachable from container
-# - user_email contains email string instead of numeric ID
-```
+Check:
 
-**Legacy Vector mode not sending logs:**
+- `REMNAWAVE_BASE_URL` and `REMNAWAVE_API_TOKEN`
+- `Remnawave Panel/Node >= 2.7.0`
+- `panel_submit_fail`, `panel_result_fail`, `panel_timeout` metrics
+
+**User is not blocked**
+
+Check the latest score action in monitoring or `user_score_events`.
+
+- `monitor`, `warn`, `soft_challenge` do not disable users
+- only `temp_disable` and `hard_disable` trigger enforcement
+
+**Some users never enter anti-sharing**
+
+Check:
+
+- `EXCLUDED_INTERNAL_SQUAD_UUIDS`
+- `EXCLUDED_USERS`
+- `EXCLUDED_IPS`
+- `EXCLUDED_ASNS`
+
+Users from excluded internal squads are bypassed before scoring, persistence, alerts, and enforcement.
+
+**`0.0.0.0` or `::` traffic seems missing**
+
+That is expected. Unspecified IPs are discarded on ingest and removed from persisted hot-window/history state during startup cleanup.
+
+**Legacy Vector mode not sending logs**
+
+Only relevant for `LOG_SOURCE_MODE=http|hybrid`:
 
 ```bash
 docker logs vector-agent | grep -i error
-# Verify last log line contains a numeric user_email:
 docker exec vector-agent tail -1 /var/log/xray/access.log
 ```
 
-**User not re-enabled:**
+**Node-side IP block does not work**
 
-```bash
-docker logs observer | grep -i "enable\|scheduler"
-docker exec redis redis-cli ZRANGE rw:reenable:zset 0 -1 WITHSCORES
-```
+Check:
+
+- `NODE_EXECUTOR_BLOCK_ENABLED=true`
+- node containers have `cap_add: NET_ADMIN`
+- `executor_block_fail` metric
 
 ---
 
-## Documentation
+## Additional Docs
 
-- 📖 [Vector Agent Setup](observer/docs/VECTOR-AGENT-SETUP.md) — legacy per-node deployment guide for `LOG_SOURCE_MODE=http|hybrid`
+- [observer/docs/VECTOR-AGENT-SETUP.md](observer/docs/VECTOR-AGENT-SETUP.md) — legacy per-node Vector setup for `LOG_SOURCE_MODE=http|hybrid`
 
 ---
 
 ## System Requirements
 
-**Observer server (central):**
+Observer server:
 
 - Debian 12+ / Ubuntu 22.04+
-- 2 GB RAM, 1 vCPU
-- Docker 24.0+, Docker Compose v2
+- 2 GB RAM
+- 1 vCPU
+- Docker 24.0+ and Docker Compose v2
 
-**Remnawave nodes:**
+Remnawave side:
 
-- Remnawave Node 2.7.0+
-- `cap_add: NET_ADMIN` if temporary node-side IP block is enabled
-- Legacy `Vector` mode additionally needs ~512 MB RAM, 0.25 vCPU and Docker 24.0+
+- `Remnawave Panel >= 2.7.0`
+- `Remnawave Node >= 2.7.0`
+- `cap_add: NET_ADMIN` if temporary node-side IP blocking is enabled
+
+Legacy `Vector` mode additionally needs per-node agent resources and is no longer the default architecture.
 
 ---
 
