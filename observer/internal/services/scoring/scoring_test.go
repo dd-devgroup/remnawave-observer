@@ -133,40 +133,6 @@ func TestGeoFeature_ScoreClamped(t *testing.T) {
 	}
 }
 
-// --- CountFeature tests ---
-
-func TestCountFeature_NoLimit(t *testing.T) {
-	f := &CountFeature{}
-	result := f.Calculate(&ScoringInput{Limit: 0, UniqueCount: 5})
-	if result.Score != 0 {
-		t.Errorf("expected score 0, got %.2f", result.Score)
-	}
-}
-
-func TestCountFeature_HalfLimit(t *testing.T) {
-	f := &CountFeature{}
-	result := f.Calculate(&ScoringInput{Limit: 10, UniqueCount: 5})
-	if result.Score != 50 {
-		t.Errorf("expected score 50, got %.2f", result.Score)
-	}
-}
-
-func TestCountFeature_AtLimit(t *testing.T) {
-	f := &CountFeature{}
-	result := f.Calculate(&ScoringInput{Limit: 10, UniqueCount: 10})
-	if result.Score != 100 {
-		t.Errorf("expected score 100, got %.2f", result.Score)
-	}
-}
-
-func TestCountFeature_OverLimit(t *testing.T) {
-	f := &CountFeature{}
-	result := f.Calculate(&ScoringInput{Limit: 10, UniqueCount: 15})
-	if result.Score != 100 {
-		t.Errorf("expected score clamped to 100, got %.2f", result.Score)
-	}
-}
-
 // --- ProviderMixFeature tests ---
 
 func TestProviderMixFeature_NoData(t *testing.T) {
@@ -287,15 +253,13 @@ func TestScorer_FullCalculation(t *testing.T) {
 			GeoScore:        30,
 			UniqueCountries: []string{"RU"},
 		},
-		UniqueCount: 5,
-		Limit:       10,
 	})
 
 	if result.FinalScore < 0 || result.FinalScore > 100 {
 		t.Errorf("FinalScore out of range: %.2f", result.FinalScore)
 	}
-	if len(result.Features) != 5 {
-		t.Errorf("expected 5 feature results, got %d", len(result.Features))
+	if len(result.Features) != 4 {
+		t.Errorf("expected 4 feature results, got %d", len(result.Features))
 	}
 	if result.Confidence <= 0 || result.Confidence > 1 {
 		t.Errorf("confidence out of range: %.2f", result.Confidence)
@@ -320,8 +284,6 @@ func TestScorer_ConfidenceGating(t *testing.T) {
 			GeoScore:        90,
 			UniqueCountries: []string{"RU", "DE", "US"},
 		},
-		UniqueCount: 10,
-		Limit:       10,
 	})
 
 	// Without confidence gating this would be hard_disable
@@ -353,8 +315,6 @@ func TestScorer_HighRiskModifier(t *testing.T) {
 			GeoScore:        10,
 			UniqueCountries: []string{"RU"},
 		},
-		UniqueCount: 2,
-		Limit:       10,
 	})
 
 	if result.FinalScore < 50 {
@@ -384,8 +344,6 @@ func TestScorer_MobileHomePattern(t *testing.T) {
 			GeoScore:        20,
 			UniqueCountries: []string{"RU"},
 		},
-		UniqueCount: 2,
-		Limit:       10,
 	})
 
 	hasMobileHome := false
@@ -409,8 +367,6 @@ func TestScorer_GetFeatureScore(t *testing.T) {
 			GeoScore:        50,
 			UniqueCountries: []string{"RU"},
 		},
-		UniqueCount: 5,
-		Limit:       10,
 	})
 
 	asnScore := result.GetFeatureScore("asn")
@@ -474,9 +430,7 @@ func TestScorer_NilGeoResult(t *testing.T) {
 		ASNClassifications: map[string]*asn.ASNClassification{
 			"AS1": {Modifier: 1.0, ProviderType: "isp", Confidence: 0.8},
 		},
-		GeoResult:   nil,
-		UniqueCount: 3,
-		Limit:       10,
+		GeoResult: nil,
 	})
 
 	geoScore := result.GetFeatureScore("geo")

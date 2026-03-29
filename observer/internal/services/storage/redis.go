@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"observer_service/internal/iputil"
 	"observer_service/internal/metrics"
 	"observer_service/internal/models"
 	"os"
@@ -39,6 +40,7 @@ type Storage interface {
 	GetASNOrgName(ctx context.Context, asn string) (string, error)
 	GetUserActiveASNs(ctx context.Context, userEmail string) (map[string]*models.ASNInfo, error)
 	HasAlertCooldown(ctx context.Context, userEmail string) (bool, error)
+	AcquireAlertPermit(ctx context.Context, userEmail string, cooldown time.Duration) (bool, error)
 	ClearUserASNData(ctx context.Context, email string) (int, error)
 	Ping(ctx context.Context) error
 	Close() error
@@ -153,17 +155,16 @@ func (s *RedisStore) SetScanTimeBudget(d time.Duration) {
 	}
 }
 
-// CheckAndAddASN выполняет Lua-скрипт для атомарной проверки и добавления ASN с фильтрацией "мертвых" ASN.
+// CheckAndAddASN atomically adds an ASN to the user's hot window and prunes expired ASN markers.
 func (s *RedisStore) CheckAndAddASN(ctx context.Context, email, asn string, limit int, ttl, cooldown time.Duration) (*models.CheckResult, error) {
+	_ = limit
+	_ = cooldown
 	userASNsSetKey := fmt.Sprintf("user_asns:%s", email)
-	alertSentKey := fmt.Sprintf("alert_sent:%s", email)
 	args := []interface{}{
 		asn,
 		int(ttl.Seconds()),
-		limit,
-		int(cooldown.Seconds()),
 	}
-	result, err := s.client.EvalSha(ctx, s.addCheckASNScriptSHA, []string{userASNsSetKey, alertSentKey}, args...).Result()
+	result, err := s.client.EvalSha(ctx, s.addCheckASNScriptSHA, []string{userASNsSetKey}, args...).Result()
 	if err != nil {
 		return nil, fmt.Errorf("ошибка выполнения Lua-скрипта (asn) для %s: %w", email, err)
 	}
@@ -194,11 +195,8 @@ func parseCheckResult(result interface{}, identifier string) (*models.CheckResul
 		if checkResult.CurrentCount == 0 && len(checkResult.AllUserItems) > 0 {
 			checkResult.CurrentCount = int64(len(checkResult.AllUserItems))
 		}
-	case 1: // Limit exceeded, block
-		checkResult.AllUserItems = parseStringList(resSlice[1])
-		checkResult.CurrentCount = int64(len(checkResult.AllUserItems))
-	case 2: // Limit exceeded, on cooldown
-		checkResult.CurrentCount, _ = resSlice[1].(int64)
+	default:
+		return nil, fmt.Errorf("неожиданный status code %d от Lua-скрипта для %s", statusCode, identifier)
 	}
 	return checkResult, nil
 }
@@ -277,6 +275,20 @@ func (s *RedisStore) HasAlertCooldown(ctx context.Context, userEmail string) (bo
 		return false, err
 	}
 	return res > 0, nil
+}
+
+// AcquireAlertPermit sets alert cooldown and returns true only for the first caller inside the cooldown window.
+func (s *RedisStore) AcquireAlertPermit(ctx context.Context, userEmail string, cooldown time.Duration) (bool, error) {
+	if cooldown <= 0 {
+		return true, nil
+	}
+
+	alertCooldownKey := fmt.Sprintf("alert_sent:%s", userEmail)
+	allowed, err := s.client.SetNX(ctx, alertCooldownKey, "1", cooldown).Result()
+	if err != nil {
+		return false, err
+	}
+	return allowed, nil
 }
 
 // Ping проверяет соединение с Redis.
@@ -455,6 +467,62 @@ func (s *RedisStore) GetUserActiveASNs(ctx context.Context, userEmail string) (m
 // GetClient возвращает Redis клиент для использования в других сервисах
 func (s *RedisStore) GetClient() *redis.Client {
 	return s.client
+}
+
+// CleanupGarbageIPs removes unspecified source IPs from Redis hot-window sets.
+func (s *RedisStore) CleanupGarbageIPs(ctx context.Context) (int, int, error) {
+	scanCtx, cancel := context.WithTimeout(ctx, s.scanTimeBudget)
+	defer cancel()
+
+	iter := s.client.Scan(scanCtx, 0, "user_asn_ips:*", int64(s.scanCount)).Iterator()
+	processedKeys := 0
+	removedIPs := 0
+
+	for iter.Next(scanCtx) {
+		processedKeys++
+		if processedKeys > s.scanMaxKeys {
+			log.Printf("CleanupGarbageIPs: scan limit %d keys reached", s.scanMaxKeys)
+			break
+		}
+
+		key := iter.Val()
+		members, err := s.client.SMembers(scanCtx, key).Result()
+		if err != nil {
+			return removedIPs, processedKeys, fmt.Errorf("scan members %s: %w", key, err)
+		}
+
+		var garbage []interface{}
+		for _, member := range members {
+			if iputil.IsUnspecified(member) {
+				garbage = append(garbage, member)
+			}
+		}
+
+		if len(garbage) == 0 {
+			continue
+		}
+
+		removedIPs += len(garbage)
+		if err := s.client.SRem(scanCtx, key, garbage...).Err(); err != nil {
+			return removedIPs, processedKeys, fmt.Errorf("remove garbage members from %s: %w", key, err)
+		}
+
+		count, err := s.client.SCard(scanCtx, key).Result()
+		if err != nil {
+			return removedIPs, processedKeys, fmt.Errorf("scard %s: %w", key, err)
+		}
+		if count == 0 {
+			if err := s.client.Del(scanCtx, key).Err(); err != nil {
+				return removedIPs, processedKeys, fmt.Errorf("delete empty set %s: %w", key, err)
+			}
+		}
+	}
+
+	if err := iter.Err(); err != nil {
+		return removedIPs, processedKeys, err
+	}
+
+	return removedIPs, processedKeys, nil
 }
 
 // --- Remnawave Enforcement: Disable Schedule Methods (MIG-4) ---

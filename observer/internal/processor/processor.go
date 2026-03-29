@@ -6,19 +6,23 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"math"
 	"net"
 	"observer_service/internal/config"
 	"observer_service/internal/database"
+	"observer_service/internal/iputil"
 	"observer_service/internal/metrics"
 	"observer_service/internal/models"
 	"observer_service/internal/services/alerter"
 	"observer_service/internal/services/asn"
 	"observer_service/internal/services/enforcement"
 	"observer_service/internal/services/geoip"
+	"observer_service/internal/services/remnawave"
 	"observer_service/internal/services/scoring"
 	"observer_service/internal/services/storage"
 	"runtime"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -41,6 +45,10 @@ type LogProcessor struct {
 	geoAnalyzer   *geoip.GeoAnalyzer  // Анализатор географии
 	asnClassifier *asn.ASNClassifier  // Классификатор провайдеров
 	scorer        *scoring.Scorer     // Система скоринга
+	userEvidence  UserEvidenceProvider
+	userExcluder  UserExcluder
+	nodeRecorder  NodeObservationRecorder
+	ipMitigator   UserIPMitigator
 
 	excludedIPsParsed []*net.IPNet // Для случаев когда в ExcludedIPs указан CIDR
 
@@ -58,6 +66,26 @@ const (
 	defaultEnforcementTimeout = 10 * time.Second
 	defaultASNClearTimeout    = 10 * time.Second
 )
+
+// UserExcluder decides whether a user should bypass anti-sharing.
+type UserExcluder interface {
+	IsExcludedByInternalID(ctx context.Context, internalID int64) (bool, error)
+}
+
+// NodeObservationRecorder stores user/IP -> node observations.
+type NodeObservationRecorder interface {
+	RecordNodeObservation(ctx context.Context, userID, ip, nodeUUID string, ttl time.Duration) error
+}
+
+// UserIPMitigator applies local IP mitigation on nodes.
+type UserIPMitigator interface {
+	BlockUserIPs(ctx context.Context, userID string, ips []string, duration time.Duration) error
+}
+
+// UserEvidenceProvider loads Remnawave evidence for scoring decisions.
+type UserEvidenceProvider interface {
+	GetUserEvidenceByInternalID(ctx context.Context, internalID int64) (*remnawave.UserEvidence, error)
+}
 
 func resolveBaseLogWorkerCount(configured int) int {
 	if configured > 0 {
@@ -396,6 +424,26 @@ func (p *LogProcessor) calculateEnqueueBackpressureWait() time.Duration {
 	return wait
 }
 
+// SetUserExcluder configures optional squad-based user exclusions.
+func (p *LogProcessor) SetUserExcluder(excluder UserExcluder) {
+	p.userExcluder = excluder
+}
+
+// SetNodeObservationRecorder configures optional user/IP -> node tracking.
+func (p *LogProcessor) SetNodeObservationRecorder(recorder NodeObservationRecorder) {
+	p.nodeRecorder = recorder
+}
+
+// SetUserIPMitigator configures optional local IP mitigation.
+func (p *LogProcessor) SetUserIPMitigator(mitigator UserIPMitigator) {
+	p.ipMitigator = mitigator
+}
+
+// SetUserEvidenceProvider configures optional Remnawave evidence lookups.
+func (p *LogProcessor) SetUserEvidenceProvider(provider UserEvidenceProvider) {
+	p.userEvidence = provider
+}
+
 // enqueueSideEffectTask adds a side-effect task to the execution queue.
 func (p *LogProcessor) enqueueSideEffectTask(task func(context.Context)) {
 	defer func() {
@@ -428,6 +476,14 @@ func (p *LogProcessor) ProcessEntries(ctx context.Context, entries []models.LogE
 func (p *LogProcessor) processSingleEntry(ctx context.Context, entry models.LogEntry) {
 	if p.cfg.ExcludedUsers[entry.UserEmail] {
 		return // User is in exclusion list
+	}
+	if p.isExcludedByInternalSquad(ctx, entry.UserEmail) {
+		return
+	}
+	if p.nodeRecorder != nil && entry.NodeUUID != "" {
+		if err := p.nodeRecorder.RecordNodeObservation(ctx, entry.UserEmail, entry.SourceIP, entry.NodeUUID, p.cfg.UserASNTTL); err != nil {
+			log.Printf("Node observation record error for %s/%s on %s: %v", entry.UserEmail, entry.SourceIP, entry.NodeUUID, err)
+		}
 	}
 
 	p.processEntryByASN(ctx, entry)
@@ -466,6 +522,22 @@ func (p *LogProcessor) filterExcludedIPs(ips []string, email string) []string {
 		}
 	}
 	return filtered
+}
+
+func (p *LogProcessor) isExcludedByInternalSquad(ctx context.Context, userEmail string) bool {
+	if p.userExcluder == nil {
+		return false
+	}
+	internalID, err := strconv.ParseInt(userEmail, 10, 64)
+	if err != nil {
+		return false
+	}
+	excluded, err := p.userExcluder.IsExcludedByInternalID(ctx, internalID)
+	if err != nil {
+		log.Printf("Internal squad exclusion check failed for %s: %v", userEmail, err)
+		return false
+	}
+	return excluded
 }
 
 // processEntryByASN processes connections by ASN (providers)
@@ -507,7 +579,6 @@ func (p *LogProcessor) processEntryByASN(ctx context.Context, entry models.LogEn
 			entry.SourceIP, entry.UserEmail)
 	}
 
-	userASNLimit := p.cfg.MaxASNsPerUser
 	debugMarker := p.getDebugMarker(entry.UserEmail)
 
 	// Save ASN -> IP mapping BEFORE limit check
@@ -517,7 +588,7 @@ func (p *LogProcessor) processEntryByASN(ctx context.Context, entry models.LogEn
 	}
 
 	// Check and add ASN
-	res, err := p.storage.CheckAndAddASN(ctx, entry.UserEmail, identifier, userASNLimit, p.cfg.UserASNTTL, p.cfg.AlertCooldown)
+	res, err := p.storage.CheckAndAddASN(ctx, entry.UserEmail, identifier, 0, p.cfg.UserASNTTL, 0)
 	if err != nil {
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			log.Printf("CheckAndAddASN operation cancelled for %s: %v", entry.UserEmail, err)
@@ -527,7 +598,12 @@ func (p *LogProcessor) processEntryByASN(ctx context.Context, entry models.LogEn
 		return
 	}
 
-	if res.StatusCode == 0 && res.IsNew {
+	if res.StatusCode != 0 {
+		log.Printf("[Anti-Abuse] Ignoring legacy ASN status=%d for %s; scoring-only mode is active", res.StatusCode, entry.UserEmail)
+		return
+	}
+
+	if res.IsNew {
 		if orgName != "" {
 			// Get GeoIP data ONCE for classifier and logging
 			var countryCode string
@@ -553,8 +629,8 @@ func (p *LogProcessor) processEntryByASN(ctx context.Context, entry models.LogEn
 				classification := p.asnClassifier.ClassifyWithCountry(identifier, orgName, countryCode)
 				providerInfo = fmt.Sprintf(" [%s, risk:%.1f]", classification.ProviderType, classification.Modifier)
 			}
-			log.Printf("New ASN for user %s%s: %s (%s)%s | IP: %s. Total: %d/%d",
-				entry.UserEmail, debugMarker, identifier, orgName, providerInfo, entry.SourceIP, res.CurrentCount, userASNLimit)
+			log.Printf("New ASN for user %s%s: %s (%s)%s | IP: %s. Active providers: %d",
+				entry.UserEmail, debugMarker, identifier, orgName, providerInfo, entry.SourceIP, res.CurrentCount)
 
 			// Log GeoIP analysis (using already obtained data)
 			if geoLoc != nil {
@@ -563,8 +639,8 @@ func (p *LogProcessor) processEntryByASN(ctx context.Context, entry models.LogEn
 					geoLoc.Latitude, geoLoc.Longitude)
 			}
 		} else {
-			log.Printf("New ASN for user %s%s: %s | IP: %s. Total: %d/%d",
-				entry.UserEmail, debugMarker, identifier, entry.SourceIP, res.CurrentCount, userASNLimit)
+			log.Printf("New ASN for user %s%s: %s | IP: %s. Active providers: %d",
+				entry.UserEmail, debugMarker, identifier, entry.SourceIP, res.CurrentCount)
 		}
 
 		// Persist connection to PostgreSQL via batch writer
@@ -598,7 +674,7 @@ func (p *LogProcessor) processEntryByASN(ctx context.Context, entry models.LogEn
 
 		// Calculate and persist scoring for the new ASN
 		// This enables progressive enforcement (monitor/warn/temp_disable) based on score
-		if p.cfg.ScoringEnabled && p.scorer != nil && p.repo != nil {
+		if p.scorer != nil && p.repo != nil {
 			scoreASNs := res.AllUserItems
 			if len(scoreASNs) == 0 && identifier != "" {
 				scoreASNs = []string{identifier}
@@ -606,114 +682,6 @@ func (p *LogProcessor) processEntryByASN(ctx context.Context, entry models.LogEn
 			}
 			_, _, _ = p.calculateAndPersistScore(ctx, entry, identifier, orgName, true, scoreASNs)
 		}
-	}
-
-	if res.StatusCode == 1 { // Limit exceeded, enforcement
-		log.Printf("ASN LIMIT EXCEEDED%s: User %s, count: %d/%d",
-			debugMarker, entry.UserEmail, res.CurrentCount, userASNLimit)
-
-		alertPayload := models.AlertPayload{
-			UserIdentifier: entry.UserEmail,
-			Limit:          userASNLimit,
-			BlockDuration:  p.cfg.BlockDuration,
-			ViolationType:  "asn_limit_exceeded",
-		}
-
-		asnCount := int(res.CurrentCount)
-		alertPayload.DetectedASNCount = &asnCount
-		alertPayload.AllUserASNs = res.AllUserItems
-		alertPayload.ASNDetails = p.collectASNDetails(ctx, entry.UserEmail, res.AllUserItems, identifier, entry.SourceIP)
-
-		// Calculate and persist scoring (this also handles enforcement for high scores)
-		var geoResult *models.GeoAnalysisResult
-		var providerTypes map[string]string
-		var violationScore *scoring.ViolationScore
-		if p.cfg.ScoringEnabled && p.scorer != nil && p.repo != nil {
-			geoResult, providerTypes, violationScore = p.calculateAndPersistScore(ctx, entry, identifier, orgName, res.IsNew, res.AllUserItems)
-
-			// Populate alert payload with geo and provider data
-			if geoResult != nil {
-				alertPayload.GeoAnalysis = geoResult
-			}
-			if providerTypes != nil {
-				alertPayload.ProviderTypes = providerTypes
-			}
-
-			// Populate alert payload with scoring data
-			if violationScore != nil {
-				score := violationScore.FinalScore
-				alertPayload.Score = &score
-				alertPayload.ScoreAction = string(violationScore.Action)
-				conf := violationScore.Confidence
-				alertPayload.ScoreConfidence = &conf
-				alertPayload.ScoreModifiers = violationScore.Modifiers
-
-				// Convert feature results to model for alert
-				breakdown := make([]models.ScoreFeatureResult, 0, len(violationScore.Features))
-				for _, f := range violationScore.Features {
-					breakdown = append(breakdown, models.ScoreFeatureResult{
-						Name:       f.Name,
-						Score:      f.Score,
-						Weight:     f.Weight,
-						Confidence: f.Confidence,
-						Details:    f.Details,
-					})
-				}
-				alertPayload.ScoreBreakdown = breakdown
-
-				// If score says "none" action, cancel the limit-based block
-				if violationScore.Action == scoring.ActionNone {
-					log.Printf("[Anti-Abuse] Score %.1f for %s, action=none, limit-based block cancelled",
-						violationScore.FinalScore, entry.UserEmail)
-					return
-				}
-			}
-		}
-
-		// Perform geo analysis for alert payload (if GeoIP enabled but scoring disabled)
-		if p.cfg.GeoIPEnabled && p.geoService != nil && p.geoAnalyzer != nil && geoResult == nil {
-			geoResultInternal, provTypes, _ := p.performEnhancedAnalytics(
-				ctx,
-				entry.UserEmail,
-				res.AllUserItems,
-				alertPayload.ASNDetails,
-			)
-			if geoResultInternal != nil {
-				alertPayload.GeoAnalysis = &models.GeoAnalysisResult{
-					UniqueCountries: geoResultInternal.UniqueCountries,
-					UniqueCities:    geoResultInternal.UniqueCities,
-					Agglomerations:  geoResultInternal.Agglomerations,
-					MaxDistanceKM:   geoResultInternal.MaxDistanceKM,
-					GeoScore:        geoResultInternal.GeoScore,
-					GeoFlags:        geoResultInternal.GeoFlags,
-				}
-			}
-			if provTypes != nil {
-				alertPayload.ProviderTypes = provTypes
-			}
-		}
-
-		// User-level enforcement
-		enfReason := fmt.Sprintf("asn_limit_exceeded: %d/%d ASNs", res.CurrentCount, userASNLimit)
-		var enfScore int
-		if alertPayload.Score != nil {
-			enfScore = int(*alertPayload.Score)
-		} else {
-			enfScore = 85
-		}
-
-		if err := p.disableUser(ctx, entry.UserEmail, enfReason, enfScore); err != nil {
-			log.Printf("Enforcement error for %s: %v", entry.UserEmail, err)
-		} else {
-			// Reset ASN/IP hot-window state after successful enforcement.
-			p.scheduleASNClear(ctx, entry.UserEmail)
-		}
-
-		p.enqueueSideEffectTask(func(ctx context.Context) {
-			if err := p.alerter.SendAlert(ctx, alertPayload); err != nil {
-				log.Printf("Webhook notification send error: %v", err)
-			}
-		})
 	}
 }
 
@@ -901,6 +869,7 @@ func (p *LogProcessor) scheduleASNClear(ctx context.Context, userEmail string) {
 func (p *LogProcessor) performEnhancedAnalytics(
 	ctx context.Context,
 	email string,
+	currentSourceIP string,
 	allASNs []string,
 	asnDetails map[string]*models.ASNInfo,
 ) (
@@ -908,7 +877,7 @@ func (p *LogProcessor) performEnhancedAnalytics(
 	map[string]string,
 	*scoring.ViolationScore,
 ) {
-	if p.geoService == nil || p.geoAnalyzer == nil || p.asnClassifier == nil || p.scorer == nil {
+	if p.asnClassifier == nil || p.scorer == nil {
 		return nil, nil, nil
 	}
 
@@ -918,16 +887,19 @@ func (p *LogProcessor) performEnhancedAnalytics(
 		allIPs = append(allIPs, info.IPs...)
 	}
 
-	// 2. Geographic analysis
-	geoResultInternal := p.geoAnalyzer.AnalyzeUserIPs(ctx, allIPs)
-
-	geoResult := &models.GeoAnalysisResult{
-		UniqueCountries: geoResultInternal.UniqueCountries,
-		UniqueCities:    geoResultInternal.UniqueCities,
-		Agglomerations:  geoResultInternal.Agglomerations,
-		MaxDistanceKM:   geoResultInternal.MaxDistanceKM,
-		GeoScore:        geoResultInternal.GeoScore,
-		GeoFlags:        geoResultInternal.GeoFlags,
+	// 2. Geographic analysis (optional).
+	var geoResultInternal *geoip.GeoAnalysisResult
+	var geoResult *models.GeoAnalysisResult
+	if p.geoService != nil && p.geoAnalyzer != nil {
+		geoResultInternal = p.geoAnalyzer.AnalyzeUserIPs(ctx, allIPs)
+		geoResult = &models.GeoAnalysisResult{
+			UniqueCountries: geoResultInternal.UniqueCountries,
+			UniqueCities:    geoResultInternal.UniqueCities,
+			Agglomerations:  geoResultInternal.Agglomerations,
+			MaxDistanceKM:   geoResultInternal.MaxDistanceKM,
+			GeoScore:        geoResultInternal.GeoScore,
+			GeoFlags:        geoResultInternal.GeoFlags,
+		}
 	}
 
 	// 3. Classify providers
@@ -944,13 +916,16 @@ func (p *LogProcessor) performEnhancedAnalytics(
 	}
 
 	// 4. Calculate score
-	geoResultForScorer := &geoip.GeoAnalysisResult{
-		UniqueCountries: geoResult.UniqueCountries,
-		UniqueCities:    geoResult.UniqueCities,
-		Agglomerations:  geoResult.Agglomerations,
-		MaxDistanceKM:   geoResult.MaxDistanceKM,
-		GeoScore:        geoResult.GeoScore,
-		GeoFlags:        geoResult.GeoFlags,
+	var geoResultForScorer *geoip.GeoAnalysisResult
+	if geoResult != nil {
+		geoResultForScorer = &geoip.GeoAnalysisResult{
+			UniqueCountries: geoResult.UniqueCountries,
+			UniqueCities:    geoResult.UniqueCities,
+			Agglomerations:  geoResult.Agglomerations,
+			MaxDistanceKM:   geoResult.MaxDistanceKM,
+			GeoScore:        geoResult.GeoScore,
+			GeoFlags:        geoResult.GeoFlags,
+		}
 	}
 
 	// Build per-ASN IP count map for IPDensityFeature.
@@ -962,13 +937,16 @@ func (p *LogProcessor) performEnhancedAnalytics(
 	violationScore := p.scorer.Calculate(&scoring.ScoringInput{
 		ASNClassifications: asnClassifications,
 		GeoResult:          geoResultForScorer,
-		UniqueCount:        len(allASNs),
-		Limit:              p.cfg.MaxASNsPerUser,
 		IPsPerASN:          ipsPerASN,
 	})
+	p.applyRemnawaveEvidence(ctx, email, currentSourceIP, violationScore)
 
+	geoScore := 0
+	if geoResult != nil {
+		geoScore = geoResult.GeoScore
+	}
 	log.Printf("[Anti-Abuse] Analysis for %s: GeoScore=%d, ASNScore=%.1f, FinalScore=%.1f, Confidence=%.2f, Action=%s",
-		email, geoResult.GeoScore, violationScore.GetFeatureScore("asn"),
+		email, geoScore, violationScore.GetFeatureScore("asn"),
 		violationScore.FinalScore, violationScore.Confidence, violationScore.Action)
 
 	return geoResult, providerTypes, violationScore
@@ -986,7 +964,7 @@ func (p *LogProcessor) calculateAndPersistScore(
 	allASNs []string,
 ) (*models.GeoAnalysisResult, map[string]string, *scoring.ViolationScore) {
 	// Skip if scoring disabled or components not initialized
-	if !p.cfg.ScoringEnabled || p.scorer == nil || p.repo == nil {
+	if p.scorer == nil || p.repo == nil || p.asnClassifier == nil {
 		return nil, nil, nil
 	}
 
@@ -1001,6 +979,7 @@ func (p *LogProcessor) calculateAndPersistScore(
 	geoResultInternal, providerTypes, violationScore := p.performEnhancedAnalytics(
 		ctx,
 		entry.UserEmail,
+		entry.SourceIP,
 		allASNs,
 		asnDetails,
 	)
@@ -1068,13 +1047,15 @@ func (p *LogProcessor) calculateAndPersistScore(
 		}
 	}
 
+	p.maybeQueueScoringAlert(ctx, entry, allASNs, asnDetails, geoResult, providerTypes, violationScore)
+
 	// Apply enforcement for temp_disable or hard_disable actions
 	if violationScore.Action == scoring.ActionTempDisable || violationScore.Action == scoring.ActionHardDisable {
 		enfReason := fmt.Sprintf("scoring_threshold_exceeded: ASN=%s, score=%.1f, action=%s",
 			identifier, violationScore.FinalScore, violationScore.Action)
 		enfScore := int(violationScore.FinalScore)
 
-		if err := p.disableUser(ctx, entry.UserEmail, enfReason, enfScore); err != nil {
+		if err := p.applyBlockingEnforcement(ctx, entry, enfReason, enfScore, allASNs); err != nil {
 			log.Printf("[Scoring] Enforcement error for %s: %v", entry.UserEmail, err)
 		} else {
 			log.Printf("[Scoring] User %s disabled due to score=%.1f, action=%s",
@@ -1093,4 +1074,223 @@ func (p *LogProcessor) calculateAndPersistScore(
 	}
 
 	return geoResult, providerTypes, violationScore
+}
+
+func toModelScoreBreakdown(features []scoring.FeatureResult) []models.ScoreFeatureResult {
+	breakdown := make([]models.ScoreFeatureResult, 0, len(features))
+	for _, f := range features {
+		breakdown = append(breakdown, models.ScoreFeatureResult{
+			Name:       f.Name,
+			Score:      f.Score,
+			Weight:     f.Weight,
+			Confidence: f.Confidence,
+			Details:    f.Details,
+		})
+	}
+	return breakdown
+}
+
+func (p *LogProcessor) maybeQueueScoringAlert(
+	ctx context.Context,
+	entry models.LogEntry,
+	allASNs []string,
+	asnDetails map[string]*models.ASNInfo,
+	geoResult *models.GeoAnalysisResult,
+	providerTypes map[string]string,
+	violationScore *scoring.ViolationScore,
+) {
+	if p.alerter == nil || violationScore == nil || !violationScore.IsWarningAction() {
+		return
+	}
+
+	if p.storage != nil {
+		allowed, err := p.storage.AcquireAlertPermit(ctx, entry.UserEmail, p.cfg.AlertCooldown)
+		if err != nil {
+			log.Printf("[Scoring] Alert cooldown acquisition failed for %s: %v", entry.UserEmail, err)
+		} else if !allowed {
+			return
+		}
+	}
+
+	score := violationScore.FinalScore
+	confidence := violationScore.Confidence
+	alertPayload := models.AlertPayload{
+		UserIdentifier:  entry.UserEmail,
+		ViolationType:   "scoring_action",
+		AllUserASNs:     append([]string(nil), allASNs...),
+		ASNDetails:      asnDetails,
+		Score:           &score,
+		ScoreAction:     string(violationScore.Action),
+		ScoreConfidence: &confidence,
+		ScoreBreakdown:  toModelScoreBreakdown(violationScore.Features),
+		ScoreModifiers:  append([]string(nil), violationScore.Modifiers...),
+		GeoAnalysis:     geoResult,
+		ProviderTypes:   providerTypes,
+	}
+	if violationScore.IsBlockingAction() {
+		alertPayload.BlockDuration = p.cfg.BlockDuration
+	}
+
+	p.enqueueSideEffectTask(func(ctx context.Context) {
+		if err := p.alerter.SendAlert(ctx, alertPayload); err != nil {
+			log.Printf("Webhook notification send error: %v", err)
+		}
+	})
+}
+
+func (p *LogProcessor) applyBlockingEnforcement(ctx context.Context, entry models.LogEntry, reason string, score int, allASNs []string) error {
+	if err := p.disableUser(ctx, entry.UserEmail, reason, score); err != nil {
+		return err
+	}
+
+	blockIPs := p.filterExcludedIPs(p.collectIPsForASNBlock(ctx, entry.UserEmail, allASNs, entry.SourceIP), entry.UserEmail)
+	if p.ipMitigator != nil && len(blockIPs) > 0 {
+		duration, err := parseBlockDuration(p.cfg.BlockDuration)
+		if err != nil {
+			log.Printf("Warning: invalid BlockDuration config %q for local mitigation, using default 5m", p.cfg.BlockDuration)
+			duration = 5 * time.Minute
+		}
+		if err := p.ipMitigator.BlockUserIPs(ctx, entry.UserEmail, blockIPs, duration); err != nil {
+			log.Printf("Local IP mitigation error for %s: %v", entry.UserEmail, err)
+		}
+	}
+
+	p.scheduleASNClear(ctx, entry.UserEmail)
+	return nil
+}
+
+func (p *LogProcessor) applyRemnawaveEvidence(ctx context.Context, userIdentifier, currentSourceIP string, violationScore *scoring.ViolationScore) {
+	if p.userEvidence == nil || p.scorer == nil || violationScore == nil {
+		return
+	}
+
+	internalID, err := strconv.ParseInt(strings.TrimSpace(userIdentifier), 10, 64)
+	if err != nil || internalID <= 0 {
+		return
+	}
+
+	evidence, err := p.userEvidence.GetUserEvidenceByInternalID(ctx, internalID)
+	if err != nil {
+		log.Printf("[Scoring] Remnawave evidence fetch failed for %s: %v", userIdentifier, err)
+		return
+	}
+	if evidence == nil {
+		return
+	}
+
+	summary := summarizeUserEvidence(evidence, currentSourceIP)
+	if !summary.hasSignals() {
+		return
+	}
+
+	violationScore.Features = append(violationScore.Features,
+		scoring.FeatureResult{
+			Name:       "hwid_evidence",
+			Score:      evidenceDeviceScore(summary.hwidCount, summary.hwidAgentCount),
+			Weight:     0,
+			Confidence: 0.9,
+			Details:    fmt.Sprintf("devices=%d,agents=%d", summary.hwidCount, summary.hwidAgentCount),
+		},
+		scoring.FeatureResult{
+			Name:       "srh_evidence",
+			Score:      evidenceSRHScore(summary.requestIPCount, summary.requestAgentCount),
+			Weight:     0,
+			Confidence: 0.9,
+			Details:    fmt.Sprintf("records=%d,ips=%d,agents=%d,current_ip_match=%t", summary.requestCount, summary.requestIPCount, summary.requestAgentCount, summary.currentIPSeenInSRH),
+		},
+	)
+
+	originalScore := violationScore.FinalScore
+	switch {
+	case summary.hwidCount == 1 && summary.requestCount > 0 && summary.requestAgentCount <= 1 && summary.currentIPSeenInSRH:
+		violationScore.FinalScore *= 0.60
+		violationScore.Modifiers = append(violationScore.Modifiers, "hwid_srh_single_device_consistency")
+	case summary.hwidCount > 0 && summary.requestCount > 0 && summary.hwidCount <= 2 && summary.requestAgentCount <= 2 && summary.requestIPCount <= 2:
+		violationScore.FinalScore *= 0.80
+		violationScore.Modifiers = append(violationScore.Modifiers, "hwid_srh_low_device_diversity")
+	default:
+		return
+	}
+
+	violationScore.FinalScore = math.Min(100, math.Max(0, violationScore.FinalScore))
+	violationScore.Action = p.scorer.DetermineAction(violationScore.FinalScore, violationScore.Confidence)
+	log.Printf("[Scoring] Applied Remnawave evidence for %s: score %.1f -> %.1f, action=%s",
+		userIdentifier, originalScore, violationScore.FinalScore, violationScore.Action)
+}
+
+type userEvidenceSummary struct {
+	hwidCount          int
+	hwidAgentCount     int
+	requestCount       int
+	requestIPCount     int
+	requestAgentCount  int
+	currentIPSeenInSRH bool
+}
+
+func (s userEvidenceSummary) hasSignals() bool {
+	return s.hwidCount > 0 || s.requestCount > 0
+}
+
+func summarizeUserEvidence(evidence *remnawave.UserEvidence, currentSourceIP string) userEvidenceSummary {
+	var summary userEvidenceSummary
+	hwidSet := make(map[string]struct{})
+	hwidAgentSet := make(map[string]struct{})
+	requestIPSet := make(map[string]struct{})
+	requestAgentSet := make(map[string]struct{})
+	currentSourceIP = strings.TrimSpace(currentSourceIP)
+
+	for _, device := range evidence.HwidDevices {
+		if hwid := strings.TrimSpace(device.HWID); hwid != "" {
+			hwidSet[hwid] = struct{}{}
+		}
+		if agent := normalizeUserAgent(device.UserAgent); agent != "" {
+			hwidAgentSet[agent] = struct{}{}
+		}
+	}
+
+	for _, record := range evidence.SubscriptionRequests {
+		summary.requestCount++
+		if ip := strings.TrimSpace(record.RequestIP); ip != "" && !iputil.IsUnspecified(ip) {
+			requestIPSet[ip] = struct{}{}
+			if currentSourceIP != "" && ip == currentSourceIP {
+				summary.currentIPSeenInSRH = true
+			}
+		}
+		if agent := normalizeUserAgent(record.UserAgent); agent != "" {
+			requestAgentSet[agent] = struct{}{}
+		}
+	}
+
+	summary.hwidCount = len(hwidSet)
+	summary.hwidAgentCount = len(hwidAgentSet)
+	summary.requestIPCount = len(requestIPSet)
+	summary.requestAgentCount = len(requestAgentSet)
+	return summary
+}
+
+func normalizeUserAgent(value string) string {
+	return strings.ToLower(strings.TrimSpace(value))
+}
+
+func evidenceDeviceScore(deviceCount, agentCount int) float64 {
+	score := float64(maxInt(deviceCount-1, 0)*20 + maxInt(agentCount-1, 0)*10)
+	if score > 100 {
+		return 100
+	}
+	return score
+}
+
+func evidenceSRHScore(ipCount, agentCount int) float64 {
+	score := float64(maxInt(ipCount-1, 0)*20 + maxInt(agentCount-1, 0)*20)
+	if score > 100 {
+		return 100
+	}
+	return score
+}
+
+func maxInt(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
 }

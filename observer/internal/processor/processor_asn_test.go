@@ -20,17 +20,26 @@ func (m *MockStorage) CheckAndAddASN(_ context.Context, _, _ string, _ int, _, _
 	return &models.CheckResult{StatusCode: 0, CurrentCount: int64(m.checkAndAddASNCalls), IsNew: true}, nil
 }
 
-func (m *MockStorage) AddIPToASNMapping(_ context.Context, _, _, _ string, _ time.Duration) error { return nil }
-func (m *MockStorage) SetASNOrgName(_ context.Context, _, _ string, _ time.Duration) error        { return nil }
-func (m *MockStorage) GetIPsForUserASN(_ context.Context, _, _ string) ([]string, error)          { return nil, nil }
-func (m *MockStorage) GetASNOrgName(_ context.Context, _ string) (string, error)                  { return "", nil }
+func (m *MockStorage) AddIPToASNMapping(_ context.Context, _, _, _ string, _ time.Duration) error {
+	return nil
+}
+func (m *MockStorage) SetASNOrgName(_ context.Context, _, _ string, _ time.Duration) error {
+	return nil
+}
+func (m *MockStorage) GetIPsForUserASN(_ context.Context, _, _ string) ([]string, error) {
+	return nil, nil
+}
+func (m *MockStorage) GetASNOrgName(_ context.Context, _ string) (string, error) { return "", nil }
 func (m *MockStorage) GetUserActiveASNs(_ context.Context, _ string) (map[string]*models.ASNInfo, error) {
 	return make(map[string]*models.ASNInfo), nil
 }
 func (m *MockStorage) HasAlertCooldown(_ context.Context, _ string) (bool, error) { return false, nil }
+func (m *MockStorage) AcquireAlertPermit(_ context.Context, _ string, _ time.Duration) (bool, error) {
+	return true, nil
+}
 func (m *MockStorage) ClearUserASNData(_ context.Context, _ string) (int, error) { return 0, nil }
-func (m *MockStorage) Ping(_ context.Context) error                            { return nil }
-func (m *MockStorage) Close() error                                            { return nil }
+func (m *MockStorage) Ping(_ context.Context) error                              { return nil }
+func (m *MockStorage) Close() error                                              { return nil }
 
 type MockAlerter struct {
 	alertsSent int

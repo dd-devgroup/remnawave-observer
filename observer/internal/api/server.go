@@ -8,8 +8,8 @@ import (
 	"io"
 	"log"
 	"net/http"
-	"net/netip"
 	"observer_service/internal/config"
+	"observer_service/internal/iputil"
 	"observer_service/internal/metrics"
 	"observer_service/internal/models"
 	"observer_service/internal/services/storage"
@@ -109,7 +109,7 @@ func (s *Server) handleProcessLogEntries(c *gin.Context) {
 			})
 			return
 		}
-		addr, err := netip.ParseAddr(entry.SourceIP)
+		addr, err := iputil.ParseSourceIP(entry.SourceIP)
 		if err != nil {
 			log.Printf("Invalid source_ip in entry %d for user %s: %q", i, entry.UserEmail, entry.SourceIP)
 			c.JSON(http.StatusBadRequest, gin.H{
@@ -119,7 +119,7 @@ func (s *Server) handleProcessLogEntries(c *gin.Context) {
 			return
 		}
 		if addr.IsUnspecified() {
-			log.Printf("Skipping unspecified source_ip %q for user %s (entry %d)", entry.SourceIP, entry.UserEmail, i)
+			metrics.DiscardedUnspecifiedIP.Add(1)
 			continue
 		}
 		filtered = append(filtered, entry)

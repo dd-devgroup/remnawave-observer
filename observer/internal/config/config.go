@@ -14,9 +14,10 @@ type Config struct {
 	Port                        string
 	PostgresDSN                 string // DSN for PostgreSQL (required, fatal if empty)
 	RedisURL                    string
-	ScanMaxKeys                 int // Макс. количество ключей при SCAN (default: 10000)
-	ScanCount                   int // Hint COUNT для Redis SCAN (default: 100)
-	ScanTimeBudgetSeconds       int // Макс. время одной SCAN операции в секундах (default: 30)
+	LogSourceMode               string // panel|http|hybrid
+	ScanMaxKeys                 int    // Макс. количество ключей при SCAN (default: 10000)
+	ScanCount                   int    // Hint COUNT для Redis SCAN (default: 100)
+	ScanTimeBudgetSeconds       int    // Макс. время одной SCAN операции в секундах (default: 30)
 	AlertWebhookURL             string
 	AlertCooldown               time.Duration
 	ClearIPsDelay               time.Duration
@@ -32,10 +33,10 @@ type Config struct {
 	SideEffectChannelBufferSize int
 	SideEffectTimeout           time.Duration // Таймаут на одну побочную задачу (default: 10s)
 
-	// --- ПАРАМЕТРЫ ДЛЯ РЕЖИМА ASN ---
+	// --- ASN/provider hot-window settings ---
 	IPtoASNDownloadURL    string          // URL для скачивания базы iptoasn.com
 	IPtoASNUpdateInterval time.Duration   // Интервал обновления базы ASN
-	MaxASNsPerUser        int             // Лимит уникальных ASN на пользователя
+	MaxASNsPerUser        int             // Legacy monitoring threshold, not used for blocking/scoring
 	UserASNTTL            time.Duration   // TTL для ASN записей пользователя
 	ExcludedASNs          map[string]bool // ASN которые не считаются (например Cloudflare, Google)
 
@@ -55,7 +56,6 @@ type Config struct {
 	GeoDataDataDir         string        // Директория для записываемых данных (unknown_providers.json, backups)
 
 	// --- ПАРАМЕТРЫ СКОРИНГА ---
-	ScoringEnabled      bool    // Включить систему скоринга
 	ScoreThresholdWarn  float64 // Порог для предупреждения (default: 50)
 	ScoreThresholdBlock float64 // Порог для блокировки (default: 85)
 
@@ -82,13 +82,19 @@ type Config struct {
 	CAIDARefreshHours int    // Интервал обновления в часах (default: 168 = 7 дней)
 
 	// --- ПАРАМЕТРЫ REMNAWAVE ENFORCEMENT ---
-	RemnawaveBaseURL        string // Base URL Remnawave панели (например: https://panel.example.com)
-	RemnawaveAPIToken       string // API token for Remnawave Authorization (Bearer)
-	RemnawaveTimeoutSeconds int    // Таймаут HTTP запросов к Remnawave (default: 5)
-	RemnawaveHeader         string // Optional reverse-proxy gate KEY=VALUE (added as query+cookie on each API request)
-	UserIDUUIDCacheTTLHours int    // TTL кэша internal_id→uuid в часах (default: 24)
-	ReenableTickSeconds     int    // Интервал проверки просроченных disable в секундах (default: 10)
-	ReenableBatchSize       int    // Максимальное количество enable за одну итерацию (default: 100)
+	RemnawaveBaseURL         string // Base URL Remnawave панели (например: https://panel.example.com)
+	RemnawaveAPIToken        string // API token for Remnawave Authorization (Bearer)
+	RemnawaveTimeoutSeconds  int    // Таймаут HTTP запросов к Remnawave (default: 5)
+	RemnawaveHeader          string // Optional reverse-proxy gate KEY=VALUE (added as query+cookie on each API request)
+	UserIDUUIDCacheTTLHours  int    // TTL кэша internal_id→uuid в часах (default: 24)
+	PanelPollInterval        time.Duration
+	PanelFetchTimeout        time.Duration
+	PanelFetchResultPoll     time.Duration
+	PanelFetchMaxInflight    int
+	NodeExecutorBlockEnabled bool
+	ExcludedInternalSquads   map[string]bool
+	ReenableTickSeconds      int // Интервал проверки просроченных disable в секундах (default: 10)
+	ReenableBatchSize        int // Максимальное количество enable за одну итерацию (default: 100)
 }
 
 const (
@@ -173,6 +179,7 @@ func New() *Config {
 		Port:                        getEnv("PORT", "9000"),
 		PostgresDSN:                 getEnv("POSTGRES_DSN", ""),
 		RedisURL:                    getEnv("REDIS_URL", "redis://localhost:6379/0"),
+		LogSourceMode:               strings.ToLower(getEnv("LOG_SOURCE_MODE", "panel")),
 		ScanMaxKeys:                 getEnvInt("SCAN_MAX_KEYS", 10000),
 		ScanCount:                   getEnvInt("SCAN_COUNT", 100),
 		ScanTimeBudgetSeconds:       getEnvInt("SCAN_TIME_BUDGET_SECONDS", 30),
@@ -218,7 +225,6 @@ func New() *Config {
 		GeoDataDataDir:         getEnv("GEODATA_DATA_DIR", "/app/data"),
 
 		// --- Загрузка параметров скоринга ---
-		ScoringEnabled:      getEnvBool("SCORING_ENABLED", false),
 		ScoreThresholdWarn:  getEnvFloat("SCORE_THRESHOLD_WARN", 50.0),
 		ScoreThresholdBlock: getEnvFloat("SCORE_THRESHOLD_BLOCK", 85.0),
 
@@ -239,13 +245,19 @@ func New() *Config {
 		CAIDARefreshHours: getEnvInt("CAIDA_REFRESH_HOURS", 168),
 
 		// --- Загрузка параметров Remnawave enforcement ---
-		RemnawaveBaseURL:        remnawaveBaseURL,
-		RemnawaveAPIToken:       getEnv("REMNAWAVE_API_TOKEN", ""),
-		RemnawaveTimeoutSeconds: getEnvInt("REMNAWAVE_TIMEOUT_SECONDS", 5),
-		RemnawaveHeader:         remnawaveHeader,
-		UserIDUUIDCacheTTLHours: getEnvInt("USERID_UUID_CACHE_TTL_HOURS", 24),
-		ReenableTickSeconds:     defaultReenableTickSeconds,
-		ReenableBatchSize:       defaultReenableBatchSize,
+		RemnawaveBaseURL:         remnawaveBaseURL,
+		RemnawaveAPIToken:        getEnv("REMNAWAVE_API_TOKEN", ""),
+		RemnawaveTimeoutSeconds:  getEnvInt("REMNAWAVE_TIMEOUT_SECONDS", 5),
+		RemnawaveHeader:          remnawaveHeader,
+		UserIDUUIDCacheTTLHours:  getEnvInt("USERID_UUID_CACHE_TTL_HOURS", 24),
+		PanelPollInterval:        time.Duration(getEnvInt("PANEL_POLL_INTERVAL_SECONDS", 60)) * time.Second,
+		PanelFetchTimeout:        time.Duration(getEnvInt("PANEL_FETCH_TIMEOUT_SECONDS", 20)) * time.Second,
+		PanelFetchResultPoll:     time.Duration(getEnvInt("PANEL_FETCH_RESULT_POLL_SECONDS", 2)) * time.Second,
+		PanelFetchMaxInflight:    getEnvInt("PANEL_FETCH_MAX_INFLIGHT", 3),
+		NodeExecutorBlockEnabled: getEnvBool("NODE_EXECUTOR_BLOCK_ENABLED", true),
+		ExcludedInternalSquads:   parseSet(getEnv("EXCLUDED_INTERNAL_SQUAD_UUIDS", "")),
+		ReenableTickSeconds:      defaultReenableTickSeconds,
+		ReenableBatchSize:        defaultReenableBatchSize,
 	}
 
 	// Validation: timeout не может быть отрицательным
@@ -254,6 +266,21 @@ func New() *Config {
 	}
 	if cfg.UserIDUUIDCacheTTLHours < 1 {
 		cfg.UserIDUUIDCacheTTLHours = 24
+	}
+	if cfg.LogSourceMode != "panel" && cfg.LogSourceMode != "http" && cfg.LogSourceMode != "hybrid" {
+		cfg.LogSourceMode = "panel"
+	}
+	if cfg.PanelPollInterval < 1*time.Second {
+		cfg.PanelPollInterval = 60 * time.Second
+	}
+	if cfg.PanelFetchTimeout < 1*time.Second {
+		cfg.PanelFetchTimeout = 20 * time.Second
+	}
+	if cfg.PanelFetchResultPoll < 1*time.Second {
+		cfg.PanelFetchResultPoll = 2 * time.Second
+	}
+	if cfg.PanelFetchMaxInflight < 1 {
+		cfg.PanelFetchMaxInflight = 3
 	}
 	if cfg.ReenableTickSeconds < 1 {
 		cfg.ReenableTickSeconds = 10
@@ -269,8 +296,12 @@ func New() *Config {
 	}
 
 	log.Printf("Configuration loaded. Port: %s", cfg.Port)
-	log.Printf("Detection mode: ASN (providers). Limit: %d providers per user", cfg.MaxASNsPerUser)
-	log.Printf("    Source: iptoasn.com, Update interval: %v", cfg.IPtoASNUpdateInterval)
+	log.Printf("Log source mode: %s", cfg.LogSourceMode)
+	log.Printf("Provider tracking mode: scoring-only over ASN hot window")
+	log.Printf("    Source: iptoasn.com, Update interval: %v, ASN TTL: %v", cfg.IPtoASNUpdateInterval, cfg.UserASNTTL)
+	if cfg.MaxASNsPerUser > 0 {
+		log.Printf("    MAX_ASNS_PER_USER=%d is legacy monitoring-only and does not trigger bans or scoring", cfg.MaxASNsPerUser)
+	}
 	if len(cfg.ExcludedASNs) > 0 {
 		log.Printf("    Excluded ASNs: %d", len(cfg.ExcludedASNs))
 	}
@@ -281,6 +312,9 @@ func New() *Config {
 	}
 	if len(cfg.ExcludedIPs) > 0 {
 		log.Printf("IP exclusion list loaded: %d", len(cfg.ExcludedIPs))
+	}
+	if len(cfg.ExcludedInternalSquads) > 0 {
+		log.Printf("Internal squad exclusion list loaded: %d", len(cfg.ExcludedInternalSquads))
 	}
 	if cfg.DebugEmail != "" {
 		log.Printf("Debug mode enabled for email: %s with limit: %d", cfg.DebugEmail, cfg.DebugIPLimit)
@@ -293,9 +327,7 @@ func New() *Config {
 			log.Printf("GeoIP fallback enabled but TWOIP_TOKEN is empty; fallback lookups are disabled")
 		}
 	}
-	if cfg.ScoringEnabled {
-		log.Printf("Scoring system enabled. Warn threshold: %.1f, Block threshold: %.1f", cfg.ScoreThresholdWarn, cfg.ScoreThresholdBlock)
-	}
+	log.Printf("Scoring system enabled. Warn threshold: %.1f, Block threshold: %.1f", cfg.ScoreThresholdWarn, cfg.ScoreThresholdBlock)
 	if cfg.UnknownProvidersLogEnabled {
 		log.Printf("Unknown providers logging enabled")
 	}
@@ -310,6 +342,10 @@ func New() *Config {
 		if name, _, ok := parseNameValue(cfg.RemnawaveHeader); ok {
 			log.Printf("Remnawave gate header enabled from REMNAWAVE_HEADER: %s=<hidden>", name)
 		}
+	}
+	if cfg.LogSourceMode == "panel" || cfg.LogSourceMode == "hybrid" {
+		log.Printf("Panel ingest enabled. poll=%v fetch_timeout=%v result_poll=%v inflight=%d executor_block=%v",
+			cfg.PanelPollInterval, cfg.PanelFetchTimeout, cfg.PanelFetchResultPoll, cfg.PanelFetchMaxInflight, cfg.NodeExecutorBlockEnabled)
 	}
 
 	return cfg

@@ -1,49 +1,53 @@
 package models
 
+import "time"
+
 // LogEntry представляет запись лога, поступающую в сервис.
 type LogEntry struct {
-	UserEmail string `json:"user_email" binding:"required"`
-	SourceIP  string `json:"source_ip" binding:"required"`
+	UserEmail string     `json:"user_email" binding:"required"`
+	SourceIP  string     `json:"source_ip" binding:"required"`
+	NodeUUID  string     `json:"node_uuid,omitempty"`
+	LastSeen  *time.Time `json:"last_seen,omitempty"`
 }
 
 // AlertPayload представляет данные для отправки в вебхук.
 type AlertPayload struct {
-	UserIdentifier   string                `json:"user_identifier"`
-	Limit            int                   `json:"limit"`
-	BlockDuration    string                `json:"block_duration"`
-	ViolationType    string                `json:"violation_type"`
+	UserIdentifier string `json:"user_identifier"`
+	Limit          int    `json:"limit,omitempty"`
+	BlockDuration  string `json:"block_duration,omitempty"`
+	ViolationType  string `json:"violation_type"`
 
-	// Поля для режима по ASN (violation_type: asn_limit_exceeded)
-	DetectedASNCount *int                  `json:"detected_asn_count,omitempty"` // Количество уникальных провайдеров (ASN)
-	AllUserASNs      []string              `json:"all_user_asns,omitempty"`      // Список ASN (например: ["AS31133", "AS3267"])
-	ASNDetails       map[string]*ASNInfo   `json:"asn_details,omitempty"`        // Детальная информация по каждому ASN
+	// Optional provider context for scoring alerts.
+	DetectedASNCount *int                `json:"detected_asn_count,omitempty"`
+	AllUserASNs      []string            `json:"all_user_asns,omitempty"`
+	ASNDetails       map[string]*ASNInfo `json:"asn_details,omitempty"`
 
 	// Scoring and GeoIP analysis fields
-	Score           *float64              `json:"score,omitempty"`
-	ScoreAction     string                `json:"score_action,omitempty"`
-	ScoreConfidence *float64              `json:"score_confidence,omitempty"`
-	ScoreBreakdown  []ScoreFeatureResult  `json:"score_breakdown,omitempty"`
-	ScoreModifiers  []string              `json:"score_modifiers,omitempty"`
-	GeoAnalysis     *GeoAnalysisResult    `json:"geo_analysis,omitempty"`
-	ProviderTypes   map[string]string     `json:"provider_types,omitempty"`
+	Score           *float64             `json:"score,omitempty"`
+	ScoreAction     string               `json:"score_action,omitempty"`
+	ScoreConfidence *float64             `json:"score_confidence,omitempty"`
+	ScoreBreakdown  []ScoreFeatureResult `json:"score_breakdown,omitempty"`
+	ScoreModifiers  []string             `json:"score_modifiers,omitempty"`
+	GeoAnalysis     *GeoAnalysisResult   `json:"geo_analysis,omitempty"`
+	ProviderTypes   map[string]string    `json:"provider_types,omitempty"`
 }
 
 // UserIPStats содержит статистику по IP-адресам пользователя для мониторинга.
 type UserIPStats struct {
-	Email            string   `json:"email"`
-	IPCount          int      `json:"ip_count"`
-	Limit            int      `json:"limit"`
-	IPs              []string `json:"ips"`
-	IPsWithTTL       []string `json:"ips_with_ttl"`
-	MinTTLHours      float64  `json:"min_ttl_hours"`
-	MaxTTLHours      float64  `json:"max_ttl_hours"`
-	Status           string   `json:"status"`
-	HasAlertCooldown bool     `json:"has_alert_cooldown"`
-	IsExcluded       bool     `json:"excluded"`
-	IsDebug          bool     `json:"is_debug"`
-	LatestScore      *float64 `json:"latest_score,omitempty"`       // Latest scoring result
-	LatestScoreAction string  `json:"latest_score_action,omitempty"` // Action from latest score
-	ASNDetails       map[string]*ASNInfo `json:"asn_details,omitempty"` // Детали по каждому ASN (для ASN режима)
+	Email             string              `json:"email"`
+	IPCount           int                 `json:"ip_count"`
+	Limit             int                 `json:"limit"`
+	IPs               []string            `json:"ips"`
+	IPsWithTTL        []string            `json:"ips_with_ttl"`
+	MinTTLHours       float64             `json:"min_ttl_hours"`
+	MaxTTLHours       float64             `json:"max_ttl_hours"`
+	Status            string              `json:"status"`
+	HasAlertCooldown  bool                `json:"has_alert_cooldown"`
+	IsExcluded        bool                `json:"excluded"`
+	IsDebug           bool                `json:"is_debug"`
+	LatestScore       *float64            `json:"latest_score,omitempty"`        // Latest scoring result
+	LatestScoreAction string              `json:"latest_score_action,omitempty"` // Action from latest score
+	ASNDetails        map[string]*ASNInfo `json:"asn_details,omitempty"`         // Детали по каждому ASN (для ASN режима)
 }
 
 // ASNInfo содержит информацию об ASN и связанных IP-адресах
@@ -53,7 +57,7 @@ type ASNInfo struct {
 	Country      string   `json:"country,omitempty"`      // Код страны (RU, UA, KZ, и т.д.)
 	TTLSeconds   int      `json:"ttl_seconds"`
 	IPs          []string `json:"ips"`
-	IPCount      int      `json:"ip_count"`       // Количество IP в этом ASN
+	IPCount      int      `json:"ip_count"`                // Количество IP в этом ASN
 	ProviderType string   `json:"provider_type,omitempty"` // Тип провайдера (mobile, hosting, vpn_proxy, isp)
 	Modifier     float64  `json:"modifier,omitempty"`      // Модификатор подозрительности (0.3-1.8)
 }

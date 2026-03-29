@@ -102,7 +102,7 @@ func (m *PoolMonitor) performMonitoring(ctx context.Context) {
 
 	m.printSummary(&buf, allStats)
 	m.printTopUsers(ctx, &buf, allStats)
-	m.printOverLimitUsers(ctx, &buf, allStats)
+	m.printUsersWithBlockingActions(ctx, &buf, allStats)
 
 	buf.WriteString(fmt.Sprintf("[%s] === ASN POOLS MONITORING END ===\n\n", time.Now().Format("2006-01-02 15:04:05")))
 
@@ -137,15 +137,7 @@ func (m *PoolMonitor) buildUserStatsByASN(ctx context.Context, email string) (*m
 	if len(activeASNs) == 0 {
 		return nil, nil
 	}
-	userLimit := m.getUserLimit(email)
 	itemCount := len(activeASNs)
-	status := "NORMAL"
-	if float64(itemCount) >= float64(userLimit)*0.8 {
-		status = "NEAR_LIMIT"
-	}
-	if itemCount > userLimit {
-		status = "OVER_LIMIT"
-	}
 	hasCooldown, _ := m.storage.HasAlertCooldown(ctx, email)
 	var items, itemsWithTTL []string
 	var ttlValues []int
@@ -174,11 +166,11 @@ func (m *PoolMonitor) buildUserStatsByASN(ctx context.Context, email string) (*m
 			latestScoreAction = scoreEvent.ScoreAction
 		}
 	}
+	status := deriveMonitorStatus(latestScoreAction)
 
 	return &models.UserIPStats{
 		Email:             email,
 		IPCount:           itemCount,
-		Limit:             userLimit,
 		IPs:               items,
 		IPsWithTTL:        itemsWithTTL,
 		MinTTLHours:       math.Round(minTTL*10) / 10,
@@ -194,14 +186,16 @@ func (m *PoolMonitor) buildUserStatsByASN(ctx context.Context, email string) (*m
 }
 
 func (m *PoolMonitor) printSummary(buf *strings.Builder, stats []models.UserIPStats) {
-	var total, nearLimit, overLimit, excluded, debug int
+	var total, monitorCount, warnCount, blockingCount, excluded, debug int
 	total = len(stats)
 	for _, s := range stats {
-		if s.Status == "NEAR_LIMIT" {
-			nearLimit++
-		}
-		if s.Status == "OVER_LIMIT" {
-			overLimit++
+		switch s.Status {
+		case "monitor":
+			monitorCount++
+		case "warn", "soft_challenge":
+			warnCount++
+		case "temp_disable", "hard_disable":
+			blockingCount++
 		}
 		if s.IsExcluded {
 			excluded++
@@ -212,8 +206,9 @@ func (m *PoolMonitor) printSummary(buf *strings.Builder, stats []models.UserIPSt
 	}
 	buf.WriteString("SUMMARY:\n")
 	buf.WriteString(fmt.Sprintf("   Total active users: %d\n", total))
-	buf.WriteString(fmt.Sprintf("   Near limit: %d\n", nearLimit))
-	buf.WriteString(fmt.Sprintf("   Over limit: %d\n", overLimit))
+	buf.WriteString(fmt.Sprintf("   Monitor actions: %d\n", monitorCount))
+	buf.WriteString(fmt.Sprintf("   Warn or challenge actions: %d\n", warnCount))
+	buf.WriteString(fmt.Sprintf("   Blocking actions: %d\n", blockingCount))
 	buf.WriteString(fmt.Sprintf("   Excluded users: %d\n", excluded))
 	if m.cfg.DebugEmail != "" {
 		buf.WriteString(fmt.Sprintf("   Debug users: %d\n", debug))
@@ -381,7 +376,7 @@ func maxDistanceKM(locations []*geoip.GeoLocation) float64 {
 }
 
 func (m *PoolMonitor) printTopUsers(ctx context.Context, buf *strings.Builder, stats []models.UserIPStats) {
-	buf.WriteString("\nTOP USERS BY PROVIDER COUNT (ASN):\n")
+	buf.WriteString("\nTOP USERS BY PROVIDER COUNT AND SCORE:\n")
 	limit := 10
 	if len(stats) < limit {
 		limit = len(stats)
@@ -389,7 +384,7 @@ func (m *PoolMonitor) printTopUsers(ctx context.Context, buf *strings.Builder, s
 	for i := 0; i < limit; i++ {
 		user := stats[i]
 		buf.WriteString(fmt.Sprintf("   %2d. %s %s%s\n", i+1, getStatusEmoji(user.Status), user.Email, getMarkers(user)))
-		buf.WriteString(fmt.Sprintf("       Providers: %d/%d | TTL: %.1f-%.1fh\n", user.IPCount, user.Limit, user.MinTTLHours, user.MaxTTLHours))
+		buf.WriteString(fmt.Sprintf("       Providers: %d | TTL: %.1f-%.1fh\n", user.IPCount, user.MinTTLHours, user.MaxTTLHours))
 		if user.LatestScore != nil {
 			buf.WriteString(fmt.Sprintf("       Score: %.1f [%s]\n", *user.LatestScore, user.LatestScoreAction))
 		}
@@ -422,18 +417,18 @@ func (m *PoolMonitor) printTopUsers(ctx context.Context, buf *strings.Builder, s
 	}
 }
 
-func (m *PoolMonitor) printOverLimitUsers(ctx context.Context, buf *strings.Builder, stats []models.UserIPStats) {
-	var overLimitUsers []models.UserIPStats
+func (m *PoolMonitor) printUsersWithBlockingActions(ctx context.Context, buf *strings.Builder, stats []models.UserIPStats) {
+	var blockingUsers []models.UserIPStats
 	for _, user := range stats {
-		if user.Status == "OVER_LIMIT" {
-			overLimitUsers = append(overLimitUsers, user)
+		if user.Status == "temp_disable" || user.Status == "hard_disable" {
+			blockingUsers = append(blockingUsers, user)
 		}
 	}
-	if len(overLimitUsers) > 0 {
-		buf.WriteString("\nUSERS OVER LIMIT:\n")
-		for _, user := range overLimitUsers {
+	if len(blockingUsers) > 0 {
+		buf.WriteString("\nUSERS WITH BLOCKING SCORE ACTIONS:\n")
+		for _, user := range blockingUsers {
 			buf.WriteString(fmt.Sprintf("   %s%s\n", user.Email, getMarkers(user)))
-			buf.WriteString(fmt.Sprintf("     Providers: %d/%d | TTL: %.1f-%.1fh\n", user.IPCount, user.Limit, user.MinTTLHours, user.MaxTTLHours))
+			buf.WriteString(fmt.Sprintf("     Providers: %d | TTL: %.1f-%.1fh\n", user.IPCount, user.MinTTLHours, user.MaxTTLHours))
 			if user.LatestScore != nil {
 				buf.WriteString(fmt.Sprintf("     Score: %.1f [%s]\n", *user.LatestScore, user.LatestScoreAction))
 			}
@@ -467,23 +462,29 @@ func (m *PoolMonitor) printOverLimitUsers(ctx context.Context, buf *strings.Buil
 	}
 }
 
-func (m *PoolMonitor) getUserLimit(userEmail string) int {
-	if m.cfg.DebugEmail != "" && userEmail == m.cfg.DebugEmail {
-		return m.cfg.DebugIPLimit
-	}
-	return m.cfg.MaxASNsPerUser
-}
-
 func getStatusEmoji(status string) string {
 	switch status {
-	case "NORMAL":
-		return "[OK]"
-	case "NEAR_LIMIT":
+	case "monitor":
+		return "[MONITOR]"
+	case "warn":
 		return "[WARN]"
-	case "OVER_LIMIT":
-		return "[OVER]"
+	case "soft_challenge":
+		return "[CHALLENGE]"
+	case "temp_disable":
+		return "[TEMP]"
+	case "hard_disable":
+		return "[BLOCK]"
 	default:
-		return "[?]"
+		return "[ACTIVE]"
+	}
+}
+
+func deriveMonitorStatus(latestScoreAction string) string {
+	switch latestScoreAction {
+	case "monitor", "warn", "soft_challenge", "temp_disable", "hard_disable":
+		return latestScoreAction
+	default:
+		return "active"
 	}
 }
 

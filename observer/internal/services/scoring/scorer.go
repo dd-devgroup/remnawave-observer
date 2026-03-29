@@ -28,7 +28,6 @@ func NewScorer(thresholds ScoreThresholds) *Scorer {
 		features: []Feature{
 			&ASNFeature{},
 			&GeoFeature{},
-			&CountFeature{},
 			&IPDensityFeature{},
 			&ProviderMixFeature{},
 		},
@@ -84,11 +83,8 @@ func (s *Scorer) Calculate(input *ScoringInput) *ViolationScore {
 	}
 
 	// Determine action from score
-	action := s.thresholds.DetermineAction(finalScore)
-
-	// Confidence gating: if min confidence < 0.3, downgrade action
+	action := s.DetermineAction(finalScore, minConfidence)
 	if minConfidence < 0.3 {
-		action = DowngradeAction(action)
 		modifiers = append(modifiers, "low_confidence_downgrade")
 	}
 
@@ -125,4 +121,13 @@ func (v *ViolationScore) IsBlockingAction() bool {
 // IsWarningAction returns true if the action is a warning or higher.
 func (v *ViolationScore) IsWarningAction() bool {
 	return IsWarningAction(v.Action)
+}
+
+// DetermineAction maps score/confidence to the effective violation action.
+func (s *Scorer) DetermineAction(score, confidence float64) ViolationAction {
+	action := s.thresholds.DetermineAction(score)
+	if confidence < 0.3 {
+		action = DowngradeAction(action)
+	}
+	return action
 }

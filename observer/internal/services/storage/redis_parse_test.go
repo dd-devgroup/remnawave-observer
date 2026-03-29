@@ -55,24 +55,17 @@ func TestParseCheckResultStatus0LegacyFormat(t *testing.T) {
 	}
 }
 
-func TestParseCheckResultStatus1WithItems(t *testing.T) {
+func TestParseCheckResultUnexpectedStatus(t *testing.T) {
 	raw := []interface{}{
 		int64(1),
 		[]interface{}{"AS10", "AS20", "AS30"},
 	}
 
 	res, err := parseCheckResult(raw, "u3")
-	if err != nil {
-		t.Fatalf("parseCheckResult returned error: %v", err)
+	if err == nil {
+		t.Fatal("expected error for unexpected legacy status, got nil")
 	}
-
-	if res.StatusCode != 1 {
-		t.Fatalf("expected status 1, got %d", res.StatusCode)
-	}
-	if res.CurrentCount != 3 {
-		t.Fatalf("expected CurrentCount=3, got %d", res.CurrentCount)
-	}
-	if len(res.AllUserItems) != 3 {
-		t.Fatalf("expected 3 AllUserItems, got %d", len(res.AllUserItems))
+	if res != nil {
+		t.Fatalf("expected nil result on error, got %#v", res)
 	}
 }

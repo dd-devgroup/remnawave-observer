@@ -17,8 +17,8 @@ import (
 // --- test doubles ---
 
 type testEnqueuer struct {
-	err       error
-	enqueued  int
+	err      error
+	enqueued int
 }
 
 func (t *testEnqueuer) EnqueueEntries(entries []models.LogEntry) error {
@@ -34,17 +34,26 @@ type testStorage struct{}
 func (t *testStorage) CheckAndAddASN(_ context.Context, _, _ string, _ int, _, _ time.Duration) (*models.CheckResult, error) {
 	return nil, nil
 }
-func (t *testStorage) AddIPToASNMapping(_ context.Context, _, _, _ string, _ time.Duration) error { return nil }
-func (t *testStorage) SetASNOrgName(_ context.Context, _, _ string, _ time.Duration) error        { return nil }
-func (t *testStorage) GetIPsForUserASN(_ context.Context, _, _ string) ([]string, error)          { return nil, nil }
-func (t *testStorage) GetASNOrgName(_ context.Context, _ string) (string, error)                  { return "", nil }
+func (t *testStorage) AddIPToASNMapping(_ context.Context, _, _, _ string, _ time.Duration) error {
+	return nil
+}
+func (t *testStorage) SetASNOrgName(_ context.Context, _, _ string, _ time.Duration) error {
+	return nil
+}
+func (t *testStorage) GetIPsForUserASN(_ context.Context, _, _ string) ([]string, error) {
+	return nil, nil
+}
+func (t *testStorage) GetASNOrgName(_ context.Context, _ string) (string, error) { return "", nil }
 func (t *testStorage) GetUserActiveASNs(_ context.Context, _ string) (map[string]*models.ASNInfo, error) {
 	return nil, nil
 }
 func (t *testStorage) HasAlertCooldown(_ context.Context, _ string) (bool, error) { return false, nil }
+func (t *testStorage) AcquireAlertPermit(_ context.Context, _ string, _ time.Duration) (bool, error) {
+	return true, nil
+}
 func (t *testStorage) ClearUserASNData(_ context.Context, _ string) (int, error) { return 0, nil }
-func (t *testStorage) Ping(_ context.Context) error                            { return nil }
-func (t *testStorage) Close() error                                            { return nil }
+func (t *testStorage) Ping(_ context.Context) error                              { return nil }
+func (t *testStorage) Close() error                                              { return nil }
 
 // --- helpers ---
 

@@ -4,6 +4,7 @@ import (
 	"context"
 	"observer_service/internal/config"
 	"observer_service/internal/models"
+	"observer_service/internal/services/scoring"
 	"sync"
 	"testing"
 	"time"
@@ -14,9 +15,10 @@ import (
 // asnMockStorage returns a fixed CheckResult for CheckAndAddASN.
 type asnMockStorage struct {
 	MockStorage
-	mu      sync.Mutex
-	result  *models.CheckResult
-	clearCh chan struct{}
+	mu                 sync.Mutex
+	result             *models.CheckResult
+	clearCh            chan struct{}
+	acquireAlertPermit bool
 }
 
 func (s *asnMockStorage) CheckAndAddASN(_ context.Context, _, _ string, _ int, _, _ time.Duration) (*models.CheckResult, error) {
@@ -38,6 +40,12 @@ func (s *asnMockStorage) ClearUserASNData(_ context.Context, _ string) (int, err
 	}
 
 	return 1, nil
+}
+
+func (s *asnMockStorage) AcquireAlertPermit(_ context.Context, _ string, _ time.Duration) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.acquireAlertPermit, nil
 }
 
 // capturingEnforcer captures disable calls for testing.
@@ -120,9 +128,9 @@ func asnCfg(maxASNs int) *config.Config {
 	}
 }
 
-// --- Test 1: ASN limit exceeded triggers enforcement --------------------
+// --- Test 1: legacy ASN limit statuses are ignored in scoring-only mode ---
 
-func TestIntegration_ASNMode_LimitExceeded_DisablesUser(t *testing.T) {
+func TestIntegration_ASNMode_LegacyLimitExceeded_IsIgnored(t *testing.T) {
 	allASNs := []string{"AS13335", "AS15169", "AS32934", "AS16509"}
 	stor := &asnMockStorage{
 		result: &models.CheckResult{
@@ -151,34 +159,16 @@ func TestIntegration_ASNMode_LimitExceeded_DisablesUser(t *testing.T) {
 
 	time.Sleep(50 * time.Millisecond)
 
-	if enf.count() != 1 {
-		t.Fatalf("expected 1 disable call, got %d", enf.count())
-	}
-	call := enf.get(0)
-	if call.internalID != 12345 {
-		t.Errorf("expected internalID 12345, got %d", call.internalID)
-	}
-	// BlockDuration "3600" is invalid (no unit), so disableUser falls back to 5m
-	if call.duration != 5*time.Minute {
-		t.Errorf("expected duration 5m0s, got %v", call.duration)
-	}
-	if call.reason != "asn_limit_exceeded: 4/3 ASNs" {
-		t.Errorf("expected reason 'asn_limit_exceeded: 4/3 ASNs', got %q", call.reason)
+	if enf.count() != 0 {
+		t.Fatalf("expected 0 disable calls, got %d", enf.count())
 	}
 
-	if alrt.count() != 1 {
-		t.Fatalf("expected 1 alert, got %d", alrt.count())
-	}
-	alert := alrt.get(0)
-	if alert.UserIdentifier != "12345" {
-		t.Errorf("alert user = %q, want 12345", alert.UserIdentifier)
-	}
-	if alert.ViolationType != "asn_limit_exceeded" {
-		t.Errorf("violation_type = %q, want asn_limit_exceeded", alert.ViolationType)
+	if alrt.count() != 0 {
+		t.Fatalf("expected 0 alerts, got %d", alrt.count())
 	}
 }
 
-func TestIntegration_ASNMode_LimitExceeded_SchedulesASNCleanup(t *testing.T) {
+func TestIntegration_ASNMode_LegacyLimitExceeded_DoesNotScheduleCleanup(t *testing.T) {
 	stor := &asnMockStorage{
 		result: &models.CheckResult{
 			StatusCode:   1,
@@ -201,18 +191,15 @@ func TestIntegration_ASNMode_LimitExceeded_SchedulesASNCleanup(t *testing.T) {
 
 	select {
 	case <-stor.clearCh:
-		// Expected cleanup call after successful enforcement.
+		t.Fatal("did not expect ClearUserASNData call without blocking score-based enforcement")
 	case <-time.After(200 * time.Millisecond):
-		t.Fatal("expected ClearUserASNData call after enforcement, got timeout")
+		// No cleanup expected.
 	}
 }
 
-// --- Test 2: excluded IPs are filtered from block IP collection ---------
+// --- Test 2: legacy limit status does not bypass excluded-IP behavior ---
 
-func TestIntegration_ASNMode_ExcludedIPs_FilteredFromBlock(t *testing.T) {
-	// Excluded IPs are still processed for ASN tracking but filtered
-	// from the IP list sent in block events (filterExcludedIPs).
-	// Entry-level processing is not skipped for excluded IPs.
+func TestIntegration_ASNMode_ExcludedIPs_NoDirectDisableOnLegacyLimit(t *testing.T) {
 	stor := &asnMockStorage{
 		result: &models.CheckResult{
 			StatusCode:   1,
@@ -235,9 +222,58 @@ func TestIntegration_ASNMode_ExcludedIPs_FilteredFromBlock(t *testing.T) {
 		{UserEmail: "22222", SourceIP: "192.168.1.100"},
 	})
 
-	// User-level enforcement still triggers (excluded IPs only filter block IP lists)
-	if enf.count() != 1 {
-		t.Errorf("expected 1 disable call (excluded IPs don't prevent enforcement), got %d", enf.count())
+	if enf.count() != 0 {
+		t.Errorf("expected 0 disable calls, got %d", enf.count())
+	}
+}
+
+func TestIntegration_ScoringWarn_QueuesAlert(t *testing.T) {
+	stor := &asnMockStorage{acquireAlertPermit: true}
+	alrt := &capturingAlerter{}
+	cfg := asnCfg(3)
+
+	enf := &capturingEnforcer{}
+	proc := NewLogProcessor(stor, enf, alrt, cfg, nil, nil, nil, nil, nil, nil)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go proc.StartSideEffectWorkerPool(ctx, &wg)
+
+	proc.maybeQueueScoringAlert(
+		ctx,
+		models.LogEntry{UserEmail: "12345", SourceIP: "10.0.0.4"},
+		[]string{"AS13335"},
+		map[string]*models.ASNInfo{"AS13335": {ASN: "AS13335", IPs: []string{"10.0.0.4"}, IPCount: 1}},
+		nil,
+		map[string]string{"AS13335": "hosting"},
+		&scoring.ViolationScore{
+			FinalScore: 55,
+			Confidence: 0.9,
+			Action:     scoring.ActionWarn,
+			Features: []scoring.FeatureResult{
+				{Name: "geo", Score: 70, Weight: 0.55, Confidence: 0.9, Details: "countries=2"},
+			},
+		},
+	)
+
+	time.Sleep(50 * time.Millisecond)
+
+	if alrt.count() != 1 {
+		t.Fatalf("expected 1 alert, got %d", alrt.count())
+	}
+
+	alert := alrt.get(0)
+	if alert.ViolationType != "scoring_action" {
+		t.Fatalf("expected scoring_action violation type, got %q", alert.ViolationType)
+	}
+	if alert.ScoreAction != string(scoring.ActionWarn) {
+		t.Fatalf("expected score action warn, got %q", alert.ScoreAction)
+	}
+	if alert.Score == nil || *alert.Score != 55 {
+		t.Fatalf("expected score 55, got %#v", alert.Score)
 	}
 }
 

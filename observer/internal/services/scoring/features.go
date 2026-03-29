@@ -21,13 +21,13 @@ type FeatureResult struct {
 	Details    string
 }
 
-// --- ASNFeature: provider mix analysis (weight 0.40) ---
+// --- ASNFeature: provider risk analysis ---
 
 // ASNFeature scores based on provider types (modifiers).
 type ASNFeature struct{}
 
 func (f *ASNFeature) Name() string    { return "asn" }
-func (f *ASNFeature) Weight() float64 { return 0.25 }
+func (f *ASNFeature) Weight() float64 { return 0.30 }
 
 func (f *ASNFeature) Calculate(input *ScoringInput) FeatureResult {
 	if len(input.ASNClassifications) == 0 {
@@ -58,13 +58,13 @@ func (f *ASNFeature) Calculate(input *ScoringInput) FeatureResult {
 	}
 }
 
-// --- GeoFeature: geographic dispersion (weight 0.35) ---
+// --- GeoFeature: geographic dispersion ---
 
 // GeoFeature scores based on geographic analysis results.
 type GeoFeature struct{}
 
 func (f *GeoFeature) Name() string    { return "geo" }
-func (f *GeoFeature) Weight() float64 { return 0.50 }
+func (f *GeoFeature) Weight() float64 { return 0.55 }
 
 func (f *GeoFeature) Calculate(input *ScoringInput) FeatureResult {
 	if input.GeoResult == nil {
@@ -85,31 +85,6 @@ func (f *GeoFeature) Calculate(input *ScoringInput) FeatureResult {
 		Weight:     f.Weight(),
 		Confidence: confidence,
 		Details:    "countries=" + itoa(len(input.GeoResult.UniqueCountries)),
-	}
-}
-
-// --- CountFeature: closeness to limit (weight 0.25) ---
-
-// CountFeature scores based on how close the user is to the ASN limit.
-type CountFeature struct{}
-
-func (f *CountFeature) Name() string    { return "count" }
-func (f *CountFeature) Weight() float64 { return 0.15 }
-
-func (f *CountFeature) Calculate(input *ScoringInput) FeatureResult {
-	if input.Limit <= 0 {
-		return FeatureResult{Name: f.Name(), Score: 0, Weight: f.Weight(), Confidence: 1.0, Details: "no limit"}
-	}
-
-	ratio := float64(input.UniqueCount) / float64(input.Limit)
-	score := math.Min(100, ratio*100)
-
-	return FeatureResult{
-		Name:       f.Name(),
-		Score:      score,
-		Weight:     f.Weight(),
-		Confidence: 1.0,
-		Details:    itoa(input.UniqueCount) + "/" + itoa(input.Limit),
 	}
 }
 
@@ -164,7 +139,7 @@ func (f *ProviderMixFeature) Calculate(input *ScoringInput) FeatureResult {
 	}
 }
 
-// --- IPDensityFeature: weighted IP density for non-mobile providers (weight 0.10) ---
+// --- IPDensityFeature: weighted IP density for non-mobile providers ---
 
 // IPDensityFeature detects sharing by counting unique IPs per non-mobile ASN.
 // Mobile providers (modifier <= 0.6) are excluded because CGNAT causes legitimate
@@ -173,7 +148,7 @@ func (f *ProviderMixFeature) Calculate(input *ScoringInput) FeatureResult {
 type IPDensityFeature struct{}
 
 func (f *IPDensityFeature) Name() string    { return "ip_density" }
-func (f *IPDensityFeature) Weight() float64 { return 0.10 }
+func (f *IPDensityFeature) Weight() float64 { return 0.15 }
 
 func (f *IPDensityFeature) Calculate(input *ScoringInput) FeatureResult {
 	if len(input.IPsPerASN) == 0 || len(input.ASNClassifications) == 0 {
@@ -243,4 +218,3 @@ func formatFloat(f float64) string {
 func itoa(n int) string {
 	return strconv.Itoa(n)
 }
-

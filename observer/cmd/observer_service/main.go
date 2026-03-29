@@ -21,9 +21,12 @@ import (
 	"observer_service/internal/services/enforcement"
 	"observer_service/internal/services/geodata"
 	"observer_service/internal/services/geoip"
+	"observer_service/internal/services/observations"
+	"observer_service/internal/services/panelingest"
 	"observer_service/internal/services/remnawave"
 	"observer_service/internal/services/scoring"
 	"observer_service/internal/services/storage"
+	"observer_service/internal/services/userpolicy"
 	"observer_service/internal/updater"
 )
 
@@ -69,10 +72,29 @@ func main() {
 	defer repo.Close()
 	log.Println("PostgreSQL initialized and migrated")
 
+	cleanupCtx, cleanupCancel := context.WithTimeout(ctx, time.Duration(cfg.ScanTimeBudgetSeconds)*time.Second)
+	removedRows, cleanupErr := database.CleanupGarbageIPs(cleanupCtx, db)
+	cleanupCancel()
+	if cleanupErr != nil {
+		log.Printf("Warning: failed to cleanup garbage IPs in PostgreSQL: %v", cleanupErr)
+	} else if removedRows > 0 {
+		log.Printf("Startup cleanup: removed %d garbage IP rows from PostgreSQL", removedRows)
+	}
+
+	cleanupCtx, cleanupCancel = context.WithTimeout(ctx, time.Duration(cfg.ScanTimeBudgetSeconds)*time.Second)
+	removedRedisIPs, scannedRedisKeys, cleanupErr := redisStore.CleanupGarbageIPs(cleanupCtx)
+	cleanupCancel()
+	if cleanupErr != nil {
+		log.Printf("Warning: failed to cleanup garbage IPs in Redis: %v", cleanupErr)
+	} else if removedRedisIPs > 0 {
+		log.Printf("Startup cleanup: removed %d garbage IP entries from Redis hot-window (%d keys scanned)", removedRedisIPs, scannedRedisKeys)
+	}
+
 	log.Println("[Startup] Stage 3/5: initializing observer core")
 	// MIG-9: RabbitMQ publisher removed, using Remnawave enforcement
 	var enforcer enforcement.Enforcer
 	var remnawaveClient *remnawave.Client
+	var squadExcluder *userpolicy.Excluder
 	if cfg.RemnawaveBaseURL != "" && cfg.RemnawaveAPIToken != "" {
 		remnawaveClient = remnawave.NewClientWithHeader(
 			cfg.RemnawaveBaseURL,
@@ -90,12 +112,27 @@ func main() {
 		pingCancel()
 		enforcer = enforcement.NewRemnawaveEnforcer(remnawaveClient, redisStore)
 		log.Printf("✅ Remnawave Enforcer initialized (URL: %s)", cfg.RemnawaveBaseURL)
+		squadExcluder = userpolicy.NewExcluder(remnawaveClient, cfg.ExcludedInternalSquads)
+		if squadExcluder != nil {
+			validateCtx, validateCancel := context.WithTimeout(ctx, time.Duration(cfg.RemnawaveTimeoutSeconds)*time.Second)
+			missingSquads, err := squadExcluder.ValidateConfiguredSquads(validateCtx)
+			validateCancel()
+			if err != nil {
+				log.Printf("Warning: failed to validate excluded internal squads: %v", err)
+			} else if len(missingSquads) > 0 {
+				log.Printf("Warning: configured excluded internal squads are missing in panel: %v", missingSquads)
+			}
+		}
 	} else {
 		enforcer = enforcement.NewNoopEnforcer()
 		log.Printf("⚠️  Remnawave not configured, using noop enforcer")
 	}
+	if (cfg.LogSourceMode == "panel" || cfg.LogSourceMode == "hybrid") && remnawaveClient == nil {
+		log.Fatalf("Critical error: LOG_SOURCE_MODE=%s requires REMNAWAVE_BASE_URL and REMNAWAVE_API_TOKEN", cfg.LogSourceMode)
+	}
 
 	webhookAlerter := alerter.NewWebhookAlerter(cfg.AlertWebhookURL)
+	observationStore := observations.NewStore(redisStore.GetClient())
 
 	// Initialize ASN lookup service
 	asnLookup, err := asn.NewASNLookupReadOnly(cfg.GeoDataDataDir)
@@ -105,7 +142,7 @@ func main() {
 	defer asnLookup.Close()
 	log.Printf("[Observer] ASN lookup loaded from file (records: %d)", asnLookup.Count())
 
-	log.Println("[Startup] Stage 4/5: initializing optional GeoIP/Scoring services")
+	log.Println("[Startup] Stage 4/5: initializing policy and scoring services")
 	// Initialize GeoData loader (optional)
 	var geoDataLoader *geodata.GeoDataLoader
 	var geoService *geoip.GeoIPService
@@ -114,17 +151,17 @@ func main() {
 	var scorer *scoring.Scorer
 	var fallbackWorkerEnabled bool
 
-	if cfg.GeoIPEnabled || cfg.ScoringEnabled {
-		// Initialize unknown providers logging
-		geodata.InitUnknownProvidersLog(cfg.GeoDataDataDir, cfg.UnknownProvidersLogEnabled)
+	// Initialize unknown providers logging
+	geodata.InitUnknownProvidersLog(cfg.GeoDataDataDir, cfg.UnknownProvidersLogEnabled)
 
-		// Load provider and agglomeration configs
-		geoDataLoader, err = geodata.NewGeoDataLoader(cfg.GeoDataConfigDir, cfg.GeoDataDataDir)
-		if err != nil {
-			log.Fatalf("Critical error: failed to load geodata: %v", err)
-		}
-		log.Printf("✅ GeoData loaded (agglomerations: %d)", len(geoDataLoader.GetAgglomerations()))
+	// Load provider and agglomeration configs
+	geoDataLoader, err = geodata.NewGeoDataLoader(cfg.GeoDataConfigDir, cfg.GeoDataDataDir)
+	if err != nil {
+		log.Fatalf("Critical error: failed to load geodata: %v", err)
+	}
+	log.Printf("✅ GeoData loaded (agglomerations: %d)", len(geoDataLoader.GetAgglomerations()))
 
+	if cfg.GeoIPEnabled {
 		// Initialize MMDB reader (optional — files may not exist)
 		var mmdbReader *geoip.MMDBReader
 		mmdbReader, err = geoip.NewMMDBReader(cfg.GeoLiteASNPath, cfg.GeoLiteCityPath)
@@ -146,27 +183,27 @@ func main() {
 			}
 		}
 		geoAnalyzer = geoip.NewGeoAnalyzer(geoService, geoDataLoader)
-		log.Printf("[Observer] GeoIP service initialized (cache TTL: %v, MMDB: %v)", cfg.GeoIPCacheTTL, mmdbReader != nil)
+		log.Printf("[Observer] GeoIP service initialized (cache TTL: %v)", cfg.GeoIPCacheTTL)
 		updaterManager.SetGeoService(geoService)
-
-		// Initialize ASN classifier
-		asnClassifier = asn.NewASNClassifier(geoDataLoader)
-		log.Printf("✅ ASN classifier initialized")
-
-		// Initialize scoring system
-		if cfg.ScoringEnabled {
-			thresholds := scoring.ScoreThresholds{
-				MonitorThreshold:       25,
-				WarnThreshold:          cfg.ScoreThresholdWarn,
-				SoftChallengeThreshold: 60,
-				TempDisableThreshold:   75,
-				HardDisableThreshold:   cfg.ScoreThresholdBlock,
-			}
-			scorer = scoring.NewScorer(thresholds)
-			log.Printf("✅ Scoring system initialized (warn: %.1f, hard_disable: %.1f)",
-				cfg.ScoreThresholdWarn, cfg.ScoreThresholdBlock)
-		}
+	} else {
+		log.Printf("[Observer] GeoIP enrichment disabled; scoring will run without geographic evidence")
 	}
+
+	// Initialize ASN classifier
+	asnClassifier = asn.NewASNClassifier(geoDataLoader)
+	log.Printf("✅ ASN classifier initialized")
+
+	// Initialize scoring system
+	thresholds := scoring.ScoreThresholds{
+		MonitorThreshold:       25,
+		WarnThreshold:          cfg.ScoreThresholdWarn,
+		SoftChallengeThreshold: 60,
+		TempDisableThreshold:   75,
+		HardDisableThreshold:   cfg.ScoreThresholdBlock,
+	}
+	scorer = scoring.NewScorer(thresholds)
+	log.Printf("✅ Scoring system initialized (warn: %.1f, hard_disable: %.1f)",
+		cfg.ScoreThresholdWarn, cfg.ScoreThresholdBlock)
 
 	logProcessor := processor.NewLogProcessor(
 		redisStore,
@@ -180,6 +217,14 @@ func main() {
 		asnClassifier,
 		scorer,
 	)
+	logProcessor.SetUserExcluder(squadExcluder)
+	logProcessor.SetNodeObservationRecorder(observationStore)
+	if remnawaveClient != nil {
+		logProcessor.SetUserEvidenceProvider(remnawaveClient)
+	}
+	if cfg.NodeExecutorBlockEnabled && remnawaveClient != nil {
+		logProcessor.SetUserIPMitigator(enforcement.NewLocalIPBlocker(remnawaveClient, observationStore))
+	}
 
 	// GeoIP service cleanup
 	if geoService != nil {
@@ -188,6 +233,10 @@ func main() {
 
 	poolMonitor := monitor.NewPoolMonitor(redisStore, repo, cfg, geoService)
 	apiServer := api.NewServer(cfg.Port, logProcessor, redisStore, cfg)
+	var panelIngestService *panelingest.Service
+	if (cfg.LogSourceMode == "panel" || cfg.LogSourceMode == "hybrid") && remnawaveClient != nil {
+		panelIngestService = panelingest.NewService(remnawaveClient, logProcessor, squadExcluder, observationStore, cfg)
+	}
 
 	// Initialize CAIDA AS2Org (read-only mode - files managed by integrated updater)
 	var as2orgLoader *geodata.AS2OrgLoader
@@ -247,6 +296,9 @@ func main() {
 	if fallbackWorkerEnabled {
 		goroutineCount++
 	}
+	if panelIngestService != nil {
+		goroutineCount++
+	}
 
 	wg.Add(goroutineCount)
 	log.Println("[Startup] Stage 5/5: launching background workers")
@@ -257,6 +309,9 @@ func main() {
 	go metrics.StartDumper(ctx, &wg, 60*time.Second)
 	if fallbackWorkerEnabled && geoService != nil {
 		go geoService.StartFallbackWorker(ctx, &wg)
+	}
+	if panelIngestService != nil {
+		go panelIngestService.Run(ctx, &wg)
 	}
 
 	// Start Auto-Learner if enabled
