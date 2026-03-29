@@ -1,0 +1,17 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(go test:*)",
+      "Bash(go mod tidy:*)",
+      "Bash(go build:*)",
+      "Bash(go get:*)",
+      "Bash(git add:*)",
+      "Bash(git restore:*)",
+      "Bash(git commit -m \"$\\(cat <<''EOF''\nfeat: Detection v2 — PR0-PR3 \\(ASN-only, Postgres, GeoLite, persistence, enrichment\\)\n\nPR0: ASN-only refactor\n- Delete IP/Subnet Lua scripts and processing paths\n- Remove DetectBySubnet, MaxIPsPerUser, MaxSubnetsPerUser config\n- Rename IPStorage → Storage, expand interface with all ASN methods\n- Remove type assertions p.storage.\\(*storage.RedisStore\\)\n- UNKNOWN fallback when ASN lookup fails \\(high risk modifier\\)\n- Simplify monitor to ASN-only path\n\nPR1: PostgreSQL foundation + GORM\n- gorm.io/gorm + gorm.io/driver/postgres dependencies\n- 5 GORM models: UserConnection, UserDailyProfile, UserProviderFingerprint,\n  AntiAbuseAction, UserScoreEvent\n- Repository interface + GormRepository implementation\n- AutoMigrate, POSTGRES_DSN mandatory \\(fatal if empty\\)\n\nPR4: GeoLite-only local enrichment\n- MMDBReader \\(GeoLite2-ASN + GeoLite2-City .mmdb\\) via maxminddb-golang\n- Remove ip-api.com HTTP client, rate limiter, IPAPIResponse\n- ASN double-check \\(iptoasn vs GeoLite2-ASN\\), Source/Confidence in GeoLocation\n\nPR2: Event persistence pipeline\n- BatchWriter \\(buffered chan, batchSize=100, flushInterval=5s, WaitGroup\\)\n- Repo + batchWriter fields in LogProcessor, StartBatchWriter goroutine\n\nPR3: Enrichment cache layer\n- IPEnrichmentCache GORM model with Postgres persistence\n- Enricher service: tiered lookup \\(Postgres → GeoIPService\\)\n- Write-through caching, expired record cleanup\n\nTests: 4 database + 4 batch writer + 6 enricher + 12 geoip + 4 processor ASN +\n4 processor integration = 34 tests, all green.\n\nCo-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>\nEOF\n\\)\")",
+      "Bash(git commit:*)",
+      "WebFetch(domain:github.com)",
+      "Bash(find:*)",
+      "Bash(grep:*)"
+    ]
+  }
+}

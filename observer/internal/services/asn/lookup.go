@@ -19,7 +19,7 @@ type ASNLookup struct {
 // updateInterval - интервал обновления (0 = default 1 час)
 func NewASNLookup(downloadURL string, updateInterval time.Duration) (*ASNLookup, error) {
 	db := NewIPtoASNDatabase()
-	updater := NewASNUpdater(db, downloadURL, updateInterval)
+	updater := NewASNUpdater(db, downloadURL, updateInterval, "") // no file saving in legacy mode
 
 	// Запускаем загрузку базы и фоновое обновление
 	ctx := context.Background()
@@ -27,14 +27,30 @@ func NewASNLookup(downloadURL string, updateInterval time.Duration) (*ASNLookup,
 		return nil, fmt.Errorf("не удалось инициализировать ASN lookup: %w", err)
 	}
 
-	log.Printf("ASN lookup сервис инициализирован (источник: iptoasn.com)")
+	log.Printf("ASN lookup service initialized (source: iptoasn.com)")
 	return &ASNLookup{
 		db:      db,
 		updater: updater,
 	}, nil
 }
 
-// Lookup возвращает ASN и имя организации для IP-адреса
+// NewASNLookupReadOnly создает ASN lookup сервис в read-only режиме (без скачивания)
+// Загружает базу из локального файла ip2asn-v4.tsv.gz в dataDir.
+func NewASNLookupReadOnly(dataDir string) (*ASNLookup, error) {
+	db := NewIPtoASNDatabase()
+	updater := NewASNUpdater(db, "", 0, "") // dummy updater, no download, no file saving
+
+	if err := updater.LoadFromLocalFile(dataDir); err != nil {
+		return nil, fmt.Errorf("failed to load ASN database from file: %w", err)
+	}
+
+	return &ASNLookup{
+		db:      db,
+		updater: updater,
+	}, nil
+}
+
+// Lookup returns ASN and organization name for IP address
 func (a *ASNLookup) Lookup(ipStr string) (uint, string, error) {
 	asn, org, err := a.db.Lookup(ipStr)
 	if err != nil {
@@ -67,10 +83,10 @@ func (a *ASNLookup) Reload() error {
 	return a.updater.ForceReload()
 }
 
-// Close останавливает фоновое обновление
+// Close stops background update
 func (a *ASNLookup) Close() error {
 	a.updater.Stop()
-	log.Println("ASN lookup сервис остановлен")
+	log.Println("ASN lookup service stopped")
 	return nil
 }
 

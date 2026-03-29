@@ -1,1 +1,11 @@
 .env
+
+# Observer config (use .example files as templates)
+observer_conf/docker-compose.yml
+observer_conf/nginx.conf
+observer_conf/vector.toml
+observer_conf/.env.antiabuse
+
+# Runtime data
+observer_conf/data/
+observer_conf/geodata/

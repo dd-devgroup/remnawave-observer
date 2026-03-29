@@ -28,6 +28,15 @@ provider_types:
   vpn_proxy:
     modifier: 1.8
     description: 'VPN and proxy services'
+  education:
+    modifier: 1.1
+    description: 'Educational institutions'
+  cdn:
+    modifier: 1.2
+    description: 'Content delivery networks'
+  satellite:
+    modifier: 0.4
+    description: 'Satellite internet providers'
 
 # Keywords for classification (checked in organization name)
 # Order matters - first match determines the type
@@ -354,3 +363,36 @@ keywords:
     - level 3
     - centurylink
     - gtt communications
+
+  education:
+    - university
+    - college
+    - academic
+    - education
+    - school
+    - institute
+    - polytechnic
+    - academia
+
+  cdn:
+    - fastly
+    - bunny
+    - stackpath
+    - keycdn
+    - cdn77
+    - edgecast
+    - imperva
+    - incapsula
+    - sucuri
+
+  satellite:
+    - starlink
+    - vsat
+    - hughesnet
+    - viasat
+    - ses satellite
+    - eutelsat
+    - inmarsat
+    - iridium
+    - globalstar
+    - thuraya

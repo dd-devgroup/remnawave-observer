@@ -94,16 +94,16 @@ func (l *AS2OrgLoader) RunRefresh(ctx context.Context, wg *sync.WaitGroup) {
 	for {
 		select {
 		case <-ctx.Done():
-			log.Println("[AS2Org] Остановка фонового обновления")
+			log.Println("[AS2Org] Background refresh stopped")
 			return
 		case <-ticker.C:
-			log.Println("[AS2Org] Плановое обновление...")
+			log.Println("[AS2Org] Scheduled refresh...")
 			if err := l.download(ctx); err != nil {
-				log.Printf("[AS2Org] Ошибка скачивания: %v", err)
+				log.Printf("[AS2Org] Download error: %v", err)
 				continue
 			}
 			if err := l.loadFromFile(); err != nil {
-				log.Printf("[AS2Org] Ошибка загрузки файла после скачивания: %v", err)
+				log.Printf("[AS2Org] File load error after download: %v", err)
 			}
 		}
 	}
@@ -176,7 +176,7 @@ func (l *AS2OrgLoader) download(ctx context.Context) error {
 		return fmt.Errorf("rename tmp→final: %w", err)
 	}
 
-	log.Printf("[AS2Org] Файл успешно скачан (%s)", finalPath)
+	log.Printf("[AS2Org] File successfully downloaded (%s)", finalPath)
 	return nil
 }
 
@@ -267,6 +267,13 @@ func (l *AS2OrgLoader) loadFromFile() error {
 	l.lastUpdated = time.Now()
 	l.mu.Unlock()
 
-	log.Printf("[AS2Org] Загружено: %d ASN, %d организаций", len(asnMap), len(orgMap))
+	log.Printf("[AS2Org] Loaded: %d ASNs, %d organizations", len(asnMap), len(orgMap))
 	return nil
+}
+
+// LoadFromLocalFile загружает CAIDA данные из локального файла (read-only, без скачивания)
+// Используется в режиме когда observer-updater сервис скачивает файлы
+func (l *AS2OrgLoader) LoadFromLocalFile() error {
+	log.Printf("[Observer] Loading CAIDA AS2Org from local file...")
+	return l.loadFromFile()
 }

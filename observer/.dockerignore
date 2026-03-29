@@ -1,0 +1,46 @@
+# Git files
+.git
+.gitignore
+.gitattributes
+
+# Development files
+*.md
+README*
+LICENSE*
+.vscode
+.idea
+*.swp
+*.swo
+*~
+
+# Build artifacts
+*.exe
+*.test
+*.out
+observer_service
+observer_updater
+*.log
+
+# Data directories (don't copy local data into image)
+data/
+*.mmdb
+*.tsv
+*.gz
+*.dat
+
+# Test files
+*_test.go
+testdata/
+
+# CI/CD
+.github
+.gitlab-ci.yml
+
+# Docker files (don't recursively copy Docker files)
+Dockerfile*
+.dockerignore
+docker-compose*.yml
+
+# OS files
+.DS_Store
+Thumbs.db

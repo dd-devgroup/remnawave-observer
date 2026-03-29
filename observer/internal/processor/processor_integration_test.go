@@ -4,6 +4,7 @@ import (
 	"context"
 	"observer_service/internal/config"
 	"observer_service/internal/models"
+	"observer_service/internal/services/scoring"
 	"sync"
 	"testing"
 	"time"
@@ -11,64 +12,82 @@ import (
 
 // --- controllable mocks ------------------------------------------------
 
-// ipMockStorage returns a fixed CheckResult for CheckAndAddIP; other methods
-// delegate to the embedded MockStorage so the interface stays satisfied.
-type ipMockStorage struct {
+// asnMockStorage returns a fixed CheckResult for CheckAndAddASN.
+type asnMockStorage struct {
 	MockStorage
-	mu      sync.Mutex
-	result  *models.CheckResult // what CheckAndAddIP returns
+	mu                 sync.Mutex
+	result             *models.CheckResult
+	clearCh            chan struct{}
+	acquireAlertPermit bool
 }
 
-func (s *ipMockStorage) CheckAndAddIP(_ context.Context, _, _ string, _ int, _, _ time.Duration) (*models.CheckResult, error) {
+func (s *asnMockStorage) CheckAndAddASN(_ context.Context, _, _ string, _ int, _, _ time.Duration) (*models.CheckResult, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.result, nil
 }
 
-// subnetMockStorage returns a fixed result for CheckAndAddSubnet.
-type subnetMockStorage struct {
-	MockStorage
-	mu     sync.Mutex
-	result *models.CheckResult
+func (s *asnMockStorage) ClearUserASNData(_ context.Context, _ string) (int, error) {
+	s.mu.Lock()
+	clearCh := s.clearCh
+	s.mu.Unlock()
+
+	if clearCh != nil {
+		select {
+		case clearCh <- struct{}{}:
+		default:
+		}
+	}
+
+	return 1, nil
 }
 
-func (s *subnetMockStorage) CheckAndAddSubnet(_ context.Context, _, _ string, _ int, _, _ time.Duration) (*models.CheckResult, error) {
+func (s *asnMockStorage) AcquireAlertPermit(_ context.Context, _ string, _ time.Duration) (bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.result, nil
+	return s.acquireAlertPermit, nil
 }
 
-// capturingPublisher records every BlockMessage it receives (thread-safe).
-type capturingPublisher struct {
-	mu   sync.Mutex
-	msgs []models.BlockMessage
+// capturingEnforcer captures disable calls for testing.
+type capturingEnforcer struct {
+	mu       sync.Mutex
+	disables []disableCall
 }
 
-func (p *capturingPublisher) PublishBlockMessage(msg models.BlockMessage) error {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	p.msgs = append(p.msgs, msg)
+type disableCall struct {
+	internalID int64
+	duration   time.Duration
+	reason     string
+	score      int
+}
+
+func (e *capturingEnforcer) DisableTempByInternalID(_ context.Context, internalID int64, duration time.Duration, reason string, score int) error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.disables = append(e.disables, disableCall{internalID, duration, reason, score})
 	return nil
 }
-func (p *capturingPublisher) Close() error { return nil }
-func (p *capturingPublisher) Ping() error  { return nil }
 
-func (p *capturingPublisher) count() int {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	return len(p.msgs)
+func (e *capturingEnforcer) Ping(_ context.Context) error {
+	return nil
 }
 
-func (p *capturingPublisher) get(i int) models.BlockMessage {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	return p.msgs[i]
+func (e *capturingEnforcer) count() int {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return len(e.disables)
+}
+
+func (e *capturingEnforcer) get(i int) disableCall {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.disables[i]
 }
 
 // capturingAlerter records every AlertPayload.
 type capturingAlerter struct {
-	mu      sync.Mutex
-	alerts  []models.AlertPayload
+	mu     sync.Mutex
+	alerts []models.AlertPayload
 }
 
 func (a *capturingAlerter) SendAlert(_ context.Context, payload models.AlertPayload) error {
@@ -92,319 +111,217 @@ func (a *capturingAlerter) get(i int) models.AlertPayload {
 
 // --- helpers ------------------------------------------------------------
 
-func ipCfg(maxIPs int, chunkSize int) *config.Config {
+func asnCfg(maxASNs int) *config.Config {
 	return &config.Config{
-		MaxIPsPerUser:              maxIPs,
-		MaxIPsPerBlockEvent:        chunkSize,
-		UserIPTTL:                  time.Hour,
-		AlertCooldown:              time.Minute,
-		ClearIPsDelay:              time.Hour, // never fires during test
-		BlockDuration:              "3600",
-		LogChannelBufferSize:       16,
+		MaxASNsPerUser:              maxASNs,
+		UserASNTTL:                  time.Hour,
+		AlertCooldown:               time.Minute,
+		BlockDuration:               "3600",
+		LogChannelBufferSize:        16,
 		SideEffectChannelBufferSize: 16,
-		WorkerPoolSize:             2,
-		SideEffectWorkerPoolSize:   2,
-		SideEffectTimeout:          5 * time.Second,
-		ExcludedUsers:              map[string]bool{},
-		ExcludedIPs:                map[string]bool{},
-		ExcludedSubnets:            map[string]bool{},
-		ExcludedASNs:               map[string]bool{},
+		WorkerPoolSize:              2,
+		SideEffectWorkerPoolSize:    2,
+		SideEffectTimeout:           5 * time.Second,
+		ExcludedUsers:               map[string]bool{},
+		ExcludedIPs:                 map[string]bool{},
+		ExcludedASNs:                map[string]bool{},
 	}
 }
 
-func subnetCfg(maxSubnets int) *config.Config {
-	cfg := ipCfg(3, 500)
-	cfg.DetectBySubnet      = true
-	cfg.MaxSubnetsPerUser   = maxSubnets
-	cfg.SubnetMaskIPv4      = 24
-	cfg.UserSubnetTTL       = time.Hour
-	cfg.MaxIPsPerBlockEvent = 500
-	return cfg
-}
+// --- Test 1: legacy ASN limit statuses are ignored in scoring-only mode ---
 
-// makeIPs returns n synthetic IPs like "10.0.X.Y".
-func makeIPs(n int) []string {
-	ips := make([]string, n)
-	for i := range n {
-		ips[i] = "10." + itoa(i/256/256%256) + "." + itoa(i/256%256) + "." + itoa(i%256)
-	}
-	return ips
-}
-
-func itoa(n int) string {
-	if n == 0 {
-		return "0"
-	}
-	var buf [3]byte
-	pos := 2
-	for n > 0 {
-		buf[pos] = byte('0' + n%10)
-		n /= 10
-		pos--
-	}
-	return string(buf[pos+1:])
-}
-
-// --- Test 1: IP-mode limit exceeded triggers a single publish -----------
-
-func TestIntegration_IPMode_LimitExceeded_Publishes(t *testing.T) {
-	allIPs := []string{"10.0.0.1", "10.0.0.2", "10.0.0.3", "10.0.0.4"}
-	stor := &ipMockStorage{
+func TestIntegration_ASNMode_LegacyLimitExceeded_IsIgnored(t *testing.T) {
+	allASNs := []string{"AS13335", "AS15169", "AS32934", "AS16509"}
+	stor := &asnMockStorage{
 		result: &models.CheckResult{
-			StatusCode:   1,                // limit exceeded
+			StatusCode:   1, // limit exceeded
 			CurrentCount: 4,
 			IsNew:        false,
-			AllUserItems: allIPs,
+			AllUserItems: allASNs,
 		},
 	}
-	pub := &capturingPublisher{}
 	alrt := &capturingAlerter{}
-	cfg := ipCfg(3, 500)
+	cfg := asnCfg(3)
 
-	proc := NewLogProcessor(stor, pub, alrt, cfg, nil, nil, nil, nil, nil)
+	enf := &capturingEnforcer{}
+	proc := NewLogProcessor(stor, enf, alrt, cfg, nil, nil, nil, nil, nil, nil)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	// Start side-effect workers so alert tasks actually execute.
 	var wg sync.WaitGroup
 	wg.Add(1)
 	go proc.StartSideEffectWorkerPool(ctx, &wg)
 
 	proc.ProcessEntries(ctx, []models.LogEntry{
-		{UserEmail: "alice@test.com", SourceIP: "10.0.0.4"},
+		{UserEmail: "12345", SourceIP: "10.0.0.4"},
 	})
 
-	// Give side-effect worker a tick to pick up the alert task.
 	time.Sleep(50 * time.Millisecond)
 
-	// Exactly one block message with all 4 IPs (no chunking needed).
-	if pub.count() != 1 {
-		t.Fatalf("expected 1 published message, got %d", pub.count())
-	}
-	msg := pub.get(0)
-	if len(msg.IPs) != 4 {
-		t.Errorf("expected 4 IPs in block message, got %d", len(msg.IPs))
-	}
-	if msg.Duration != "3600" {
-		t.Errorf("expected duration 3600, got %q", msg.Duration)
-	}
-	// Single-chunk messages must NOT have chunking envelope.
-	if msg.EventID != "" || msg.ChunkIndex != nil || msg.ChunkTotal != nil || msg.SchemaVersion != 0 {
-		t.Errorf("single-chunk message must not have chunking fields; got %+v", msg)
+	if enf.count() != 0 {
+		t.Fatalf("expected 0 disable calls, got %d", enf.count())
 	}
 
-	// Alert must have been delivered via side-effect.
-	if alrt.count() != 1 {
-		t.Fatalf("expected 1 alert, got %d", alrt.count())
-	}
-	alert := alrt.get(0)
-	if alert.UserIdentifier != "alice@test.com" {
-		t.Errorf("alert user = %q, want alice@test.com", alert.UserIdentifier)
-	}
-	if alert.ViolationType != "ip_limit_exceeded" {
-		t.Errorf("violation_type = %q, want ip_limit_exceeded", alert.ViolationType)
+	if alrt.count() != 0 {
+		t.Fatalf("expected 0 alerts, got %d", alrt.count())
 	}
 }
 
-// --- Test 2: chunking — 600 IPs with chunkSize 500 → 2 messages ---------
-
-func TestIntegration_IPMode_Chunking_600IPs(t *testing.T) {
-	allIPs := makeIPs(600)
-	stor := &ipMockStorage{
+func TestIntegration_ASNMode_LegacyLimitExceeded_DoesNotScheduleCleanup(t *testing.T) {
+	stor := &asnMockStorage{
 		result: &models.CheckResult{
 			StatusCode:   1,
-			CurrentCount: 600,
-			IsNew:        false,
-			AllUserItems: allIPs,
+			CurrentCount: 4,
+			AllUserItems: []string{"AS13335", "AS15169", "AS32934", "AS16509"},
 		},
+		clearCh: make(chan struct{}, 1),
 	}
-	pub := &capturingPublisher{}
 	alrt := &capturingAlerter{}
-	cfg := ipCfg(5, 500) // chunkSize = 500
+	cfg := asnCfg(3)
+	cfg.ClearIPsDelay = 10 * time.Millisecond
 
-	proc := NewLogProcessor(stor, pub, alrt, cfg, nil, nil, nil, nil, nil)
+	enf := &capturingEnforcer{}
+	proc := NewLogProcessor(stor, enf, alrt, cfg, nil, nil, nil, nil, nil, nil)
 	ctx := context.Background()
 
 	proc.ProcessEntries(ctx, []models.LogEntry{
-		{UserEmail: "bob@test.com", SourceIP: "10.0.0.1"},
+		{UserEmail: "12345", SourceIP: "10.0.0.4"},
 	})
 
-	if pub.count() != 2 {
-		t.Fatalf("expected 2 chunks, got %d", pub.count())
-	}
-
-	// Chunk 0
-	c0 := pub.get(0)
-	if len(c0.IPs) != 500 {
-		t.Errorf("chunk 0: expected 500 IPs, got %d", len(c0.IPs))
-	}
-	if c0.ChunkIndex == nil || *c0.ChunkIndex != 0 {
-		t.Errorf("chunk 0: ChunkIndex should be 0, got %v", c0.ChunkIndex)
-	}
-	if c0.ChunkTotal == nil || *c0.ChunkTotal != 2 {
-		t.Errorf("chunk 0: ChunkTotal should be 2, got %v", c0.ChunkTotal)
-	}
-	if c0.SchemaVersion != 2 {
-		t.Errorf("chunk 0: SchemaVersion should be 2, got %d", c0.SchemaVersion)
-	}
-	if c0.EventID == "" {
-		t.Error("chunk 0: EventID must not be empty")
-	}
-
-	// Chunk 1
-	c1 := pub.get(1)
-	if len(c1.IPs) != 100 {
-		t.Errorf("chunk 1: expected 100 IPs, got %d", len(c1.IPs))
-	}
-	if c1.ChunkIndex == nil || *c1.ChunkIndex != 1 {
-		t.Errorf("chunk 1: ChunkIndex should be 1, got %v", c1.ChunkIndex)
-	}
-
-	// Both chunks share the same EventID.
-	if c0.EventID != c1.EventID {
-		t.Errorf("EventID mismatch between chunks: %q vs %q", c0.EventID, c1.EventID)
+	select {
+	case <-stor.clearCh:
+		t.Fatal("did not expect ClearUserASNData call without blocking score-based enforcement")
+	case <-time.After(200 * time.Millisecond):
+		// No cleanup expected.
 	}
 }
 
-// --- Test 3: subnet-mode limit exceeded triggers publish ----------------
+// --- Test 2: legacy limit status does not bypass excluded-IP behavior ---
 
-func TestIntegration_SubnetMode_LimitExceeded_Publishes(t *testing.T) {
-	allSubnets := []string{"192.168.1.0/24", "192.168.2.0/24", "10.1.0.0/24"}
-	stor := &subnetMockStorage{
+func TestIntegration_ASNMode_ExcludedIPs_NoDirectDisableOnLegacyLimit(t *testing.T) {
+	stor := &asnMockStorage{
 		result: &models.CheckResult{
 			StatusCode:   1,
 			CurrentCount: 3,
 			IsNew:        false,
-			AllUserItems: allSubnets,
+			AllUserItems: []string{"AS13335", "AS15169", "UNKNOWN"},
 		},
 	}
-	pub := &capturingPublisher{}
 	alrt := &capturingAlerter{}
-	cfg := subnetCfg(2)
-
-	proc := NewLogProcessor(stor, pub, alrt, cfg, nil, nil, nil, nil, nil)
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	var wg sync.WaitGroup
-	wg.Add(1)
-	go proc.StartSideEffectWorkerPool(ctx, &wg)
-
-	// Use an IPv4 address so subnet derivation works.
-	proc.ProcessEntries(ctx, []models.LogEntry{
-		{UserEmail: "charlie@test.com", SourceIP: "192.168.1.5"},
-	})
-
-	time.Sleep(50 * time.Millisecond)
-
-	if pub.count() != 1 {
-		t.Fatalf("expected 1 published message, got %d", pub.count())
-	}
-	msg := pub.get(0)
-	if len(msg.IPs) != 3 {
-		t.Errorf("expected 3 subnets in block message, got %d: %v", len(msg.IPs), msg.IPs)
-	}
-
-	if alrt.count() != 1 {
-		t.Fatalf("expected 1 alert, got %d", alrt.count())
-	}
-	if alrt.get(0).ViolationType != "subnet_limit_exceeded" {
-		t.Errorf("violation_type = %q, want subnet_limit_exceeded", alrt.get(0).ViolationType)
-	}
-}
-
-// --- Test 4: excluded IPs are stripped before publish --------------------
-
-func TestIntegration_IPMode_ExcludedIPs_Filtered(t *testing.T) {
-	allIPs := []string{"10.0.0.1", "10.0.0.2", "192.168.1.100"}
-	stor := &ipMockStorage{
-		result: &models.CheckResult{
-			StatusCode:   1,
-			CurrentCount: 3,
-			IsNew:        false,
-			AllUserItems: allIPs,
-		},
-	}
-	pub := &capturingPublisher{}
-	alrt := &capturingAlerter{}
-	cfg := ipCfg(2, 500)
+	cfg := asnCfg(2)
 	cfg.ExcludedIPs = map[string]bool{
 		"192.168.1.100": true,
 	}
 
-	proc := NewLogProcessor(stor, pub, alrt, cfg, nil, nil, nil, nil, nil)
+	enf := &capturingEnforcer{}
+	proc := NewLogProcessor(stor, enf, alrt, cfg, nil, nil, nil, nil, nil, nil)
 	ctx := context.Background()
 
 	proc.ProcessEntries(ctx, []models.LogEntry{
-		{UserEmail: "dave@test.com", SourceIP: "10.0.0.2"},
+		{UserEmail: "22222", SourceIP: "192.168.1.100"},
 	})
 
-	if pub.count() != 1 {
-		t.Fatalf("expected 1 published message, got %d", pub.count())
-	}
-	msg := pub.get(0)
-	// 192.168.1.100 should have been stripped.
-	if len(msg.IPs) != 2 {
-		t.Errorf("expected 2 IPs after exclusion, got %d: %v", len(msg.IPs), msg.IPs)
-	}
-	for _, ip := range msg.IPs {
-		if ip == "192.168.1.100" {
-			t.Error("excluded IP 192.168.1.100 must not appear in block message")
-		}
+	if enf.count() != 0 {
+		t.Errorf("expected 0 disable calls, got %d", enf.count())
 	}
 }
 
-// --- Test 5: excluded user is silently skipped ---------------------------
-
-func TestIntegration_ExcludedUser_NoPublish(t *testing.T) {
-	stor := &ipMockStorage{
-		result: &models.CheckResult{StatusCode: 1, CurrentCount: 5, AllUserItems: []string{"1.2.3.4"}},
-	}
-	pub := &capturingPublisher{}
+func TestIntegration_ScoringWarn_QueuesAlert(t *testing.T) {
+	stor := &asnMockStorage{acquireAlertPermit: true}
 	alrt := &capturingAlerter{}
-	cfg := ipCfg(2, 500)
-	cfg.ExcludedUsers = map[string]bool{"skip@test.com": true}
+	cfg := asnCfg(3)
 
-	proc := NewLogProcessor(stor, pub, alrt, cfg, nil, nil, nil, nil, nil)
-	ctx := context.Background()
+	enf := &capturingEnforcer{}
+	proc := NewLogProcessor(stor, enf, alrt, cfg, nil, nil, nil, nil, nil, nil)
 
-	proc.ProcessEntries(ctx, []models.LogEntry{
-		{UserEmail: "skip@test.com", SourceIP: "1.2.3.4"},
-	})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 
-	if pub.count() != 0 {
-		t.Errorf("excluded user must not trigger publish, got %d messages", pub.count())
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go proc.StartSideEffectWorkerPool(ctx, &wg)
+
+	proc.maybeQueueScoringAlert(
+		ctx,
+		models.LogEntry{UserEmail: "12345", SourceIP: "10.0.0.4"},
+		[]string{"AS13335"},
+		map[string]*models.ASNInfo{"AS13335": {ASN: "AS13335", IPs: []string{"10.0.0.4"}, IPCount: 1}},
+		nil,
+		map[string]string{"AS13335": "hosting"},
+		&scoring.ViolationScore{
+			FinalScore: 55,
+			Confidence: 0.9,
+			Action:     scoring.ActionWarn,
+			Features: []scoring.FeatureResult{
+				{Name: "geo", Score: 70, Weight: 0.55, Confidence: 0.9, Details: "countries=2"},
+			},
+		},
+	)
+
+	time.Sleep(50 * time.Millisecond)
+
+	if alrt.count() != 1 {
+		t.Fatalf("expected 1 alert, got %d", alrt.count())
+	}
+
+	alert := alrt.get(0)
+	if alert.ViolationType != "scoring_action" {
+		t.Fatalf("expected scoring_action violation type, got %q", alert.ViolationType)
+	}
+	if alert.ScoreAction != string(scoring.ActionWarn) {
+		t.Fatalf("expected score action warn, got %q", alert.ScoreAction)
+	}
+	if alert.Score == nil || *alert.Score != 55 {
+		t.Fatalf("expected score 55, got %#v", alert.Score)
 	}
 }
 
-// --- Test 6: context cancellation stops entry processing -----------------
+// --- Test 3: excluded user is silently skipped --------------------------
+
+func TestIntegration_ExcludedUser_NoEnforcement(t *testing.T) {
+	stor := &asnMockStorage{
+		result: &models.CheckResult{StatusCode: 1, CurrentCount: 5, AllUserItems: []string{"AS13335"}},
+	}
+	alrt := &capturingAlerter{}
+	cfg := asnCfg(2)
+	cfg.ExcludedUsers = map[string]bool{"33333": true}
+
+	enf := &capturingEnforcer{}
+	proc := NewLogProcessor(stor, enf, alrt, cfg, nil, nil, nil, nil, nil, nil)
+	ctx := context.Background()
+
+	proc.ProcessEntries(ctx, []models.LogEntry{
+		{UserEmail: "33333", SourceIP: "1.2.3.4"},
+	})
+
+	if enf.count() != 0 {
+		t.Errorf("excluded user must not trigger disable, got %d calls", enf.count())
+	}
+}
+
+// --- Test 4: context cancellation stops entry processing ----------------
 
 func TestIntegration_ContextCancellation_StopsProcessing(t *testing.T) {
-	stor := &ipMockStorage{
+	stor := &asnMockStorage{
 		result: &models.CheckResult{StatusCode: 0, CurrentCount: 1, IsNew: true},
 	}
-	pub := &capturingPublisher{}
 	alrt := &capturingAlerter{}
-	cfg := ipCfg(10, 500)
+	cfg := asnCfg(10)
 
-	proc := NewLogProcessor(stor, pub, alrt, cfg, nil, nil, nil, nil, nil)
+	enf := &capturingEnforcer{}
+	proc := NewLogProcessor(stor, enf, alrt, cfg, nil, nil, nil, nil, nil, nil)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel() // already cancelled
 
-	// Feed 5 entries — none should be processed past the ctx check.
 	entries := make([]models.LogEntry, 5)
 	for i := range entries {
-		entries[i] = models.LogEntry{UserEmail: "x@test.com", SourceIP: "1.2.3.4"}
+		entries[i] = models.LogEntry{UserEmail: "99999", SourceIP: "1.2.3.4"}
 	}
 	proc.ProcessEntries(ctx, entries)
 
-	// With a cancelled context the loop breaks after the first select hits
-	// ctx.Done(); at most 1 entry may have slipped through the default branch
-	// before the cancellation was visible. The important thing: no panic.
-	if pub.count() != 0 {
-		t.Errorf("no publish expected with cancelled ctx, got %d", pub.count())
+	if enf.count() != 0 {
+		t.Errorf("no enforcement expected with cancelled ctx, got %d", enf.count())
 	}
 }

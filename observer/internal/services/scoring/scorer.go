@@ -2,178 +2,132 @@ package scoring
 
 import (
 	"math"
-
-	"observer_service/internal/services/asn"
-	"observer_service/internal/services/geoip"
+	"strings"
 )
 
-// ViolationScore результат расчета скора нарушения
+// ViolationScore is the result of a scoring calculation.
 type ViolationScore struct {
 	RawScore   float64
 	FinalScore float64
+	Confidence float64 // min confidence across all features
 	Action     ViolationAction
-	Components ScoreComponents
+	Features   []FeatureResult
 	Modifiers  []string
 }
 
-// ScoreComponents компоненты скора
-type ScoreComponents struct {
-	ASNScore   float64 // 0-100, вес 40%
-	GeoScore   float64 // 0-100, вес 35%
-	CountScore float64 // 0-100, вес 25%
-}
-
-// Scorer калькулятор скора
+// Scorer calculates violation scores using a feature registry.
 type Scorer struct {
 	thresholds ScoreThresholds
+	features   []Feature
 }
 
-// NewScorer создает новый калькулятор скора
+// NewScorer creates a new scorer with the given thresholds and default features.
 func NewScorer(thresholds ScoreThresholds) *Scorer {
 	return &Scorer{
 		thresholds: thresholds,
+		features: []Feature{
+			&ASNFeature{},
+			&GeoFeature{},
+			&IPDensityFeature{},
+			&ProviderMixFeature{},
+		},
 	}
 }
 
-// NewDefaultScorer создает калькулятор с дефолтными порогами
+// NewDefaultScorer creates a scorer with default thresholds.
 func NewDefaultScorer() *Scorer {
 	return NewScorer(DefaultThresholds())
 }
 
-// Calculate рассчитывает скор нарушения
-func (s *Scorer) Calculate(
-	asnInfos map[string]*asn.ASNClassification,
-	geoResult *geoip.GeoAnalysisResult,
-	uniqueCount int,
-	limit int,
-) *ViolationScore {
-	// 1. ASN Score (0-100)
-	asnScore := s.calculateASNScore(asnInfos)
+// Calculate computes the violation score from a ScoringInput.
+func (s *Scorer) Calculate(input *ScoringInput) *ViolationScore {
+	results := make([]FeatureResult, 0, len(s.features))
+	for _, f := range s.features {
+		results = append(results, f.Calculate(input))
+	}
 
-	// 2. Geo Score (0-100)
-	geoScore := float64(geoResult.GeoScore)
+	// Weighted sum (only features with weight > 0)
+	rawScore := 0.0
+	for _, r := range results {
+		rawScore += r.Score * r.Weight
+	}
 
-	// 3. Count Score (близость к лимиту, 0-100)
-	countRatio := float64(uniqueCount) / float64(limit)
-	countScore := math.Min(100, countRatio*100)
-
-	// 4. Взвешенная сумма
-	// Веса: ASN=40%, Geo=35%, Count=25%
-	rawScore := asnScore*0.40 + geoScore*0.35 + countScore*0.25
-
-	// 5. Применяем модификаторы
+	// Apply modifiers from zero-weight features (e.g. ProviderMixFeature)
 	finalScore := rawScore
 	modifiers := make([]string, 0)
 
-	// Паттерн mobile + home ISP = легитимно
-	if s.hasMobileHomePattern(asnInfos) {
-		finalScore *= 0.6
-		modifiers = append(modifiers, "mobile_home_pattern")
+	for _, r := range results {
+		if r.Weight == 0 && r.Score > 0 {
+			// High-risk provider mix boosts minimum score
+			if r.Name == "provider_mix" && r.Score > 50 {
+				finalScore = math.Max(finalScore, 50)
+				modifiers = append(modifiers, "high_risk_provider")
+			}
+		}
+		if r.Weight == 0 && r.Score == 0 && r.Details != "" {
+			if strings.Contains(r.Details, "mobile_home_pattern") {
+				finalScore *= 0.6
+				modifiers = append(modifiers, "mobile_home_pattern")
+			}
+		}
 	}
 
-	// Один провайдер доминирует (≥70%)
-	if s.singleProviderDominates(asnInfos) {
-		finalScore *= 0.8
-		modifiers = append(modifiers, "single_provider")
-	}
-
-	// VPN/Hosting = минимум 50 баллов
-	if s.hasHighRiskProvider(asnInfos) {
-		finalScore = math.Max(finalScore, 50)
-		modifiers = append(modifiers, "high_risk_provider")
-	}
-
-	// Ограничиваем диапазон 0-100
 	finalScore = math.Min(100, math.Max(0, finalScore))
+
+	// Min confidence across all features
+	minConfidence := 1.0
+	for _, r := range results {
+		if r.Confidence < minConfidence {
+			minConfidence = r.Confidence
+		}
+	}
+
+	// Determine action from score
+	action := s.DetermineAction(finalScore, minConfidence)
+	if minConfidence < 0.3 {
+		modifiers = append(modifiers, "low_confidence_downgrade")
+	}
 
 	return &ViolationScore{
 		RawScore:   rawScore,
 		FinalScore: finalScore,
-		Action:     s.thresholds.DetermineAction(finalScore),
-		Components: ScoreComponents{
-			ASNScore:   asnScore,
-			GeoScore:   geoScore,
-			CountScore: countScore,
-		},
-		Modifiers: modifiers,
+		Confidence: minConfidence,
+		Action:     action,
+		Features:   results,
+		Modifiers:  modifiers,
 	}
 }
 
-// calculateASNScore рассчитывает скор на основе типов провайдеров
-func (s *Scorer) calculateASNScore(asnInfos map[string]*asn.ASNClassification) float64 {
-	if len(asnInfos) == 0 {
-		return 0
-	}
-
-	// Считаем средневзвешенный модификатор
-	totalModifier := 0.0
-	for _, info := range asnInfos {
-		totalModifier += info.Modifier
-	}
-
-	avgModifier := totalModifier / float64(len(asnInfos))
-
-	// Конвертируем модификатор в скор (0-100)
-	// Модификаторы: 0.3 (mobile) - 1.8 (vpn_proxy)
-	// 0.3 -> 0 баллов
-	// 1.0 (isp) -> ~50 баллов
-	// 1.8 -> 100 баллов
-	score := ((avgModifier - 0.3) / (1.8 - 0.3)) * 100
-
-	return math.Min(100, math.Max(0, score))
-}
-
-// hasMobileHomePattern проверяет паттерн mobile + home ISP
-func (s *Scorer) hasMobileHomePattern(asnInfos map[string]*asn.ASNClassification) bool {
-	hasMobile := false
-	hasISP := false
-
-	for _, info := range asnInfos {
-		if info.IsMobileProvider() {
-			hasMobile = true
-		}
-		if info.ProviderType == "isp" || info.ProviderType == "fixed" {
-			hasISP = true
+// GetFeatureScore returns the score for a named feature, or 0 if not found.
+func (v *ViolationScore) GetFeatureScore(name string) float64 {
+	for _, f := range v.Features {
+		if f.Name == name {
+			return f.Score
 		}
 	}
-
-	return hasMobile && hasISP
+	return 0
 }
 
-// singleProviderDominates проверяет доминирует ли один провайдер
-func (s *Scorer) singleProviderDominates(asnInfos map[string]*asn.ASNClassification) bool {
-	if len(asnInfos) <= 1 {
-		return true
-	}
-
-	// Подсчитываем частоту каждого ASN
-	// Для упрощения считаем что каждый ASN встречается один раз
-	// В реальной реализации нужно передавать частоты
-	// threshold := float64(len(asnInfos)) * 0.7
-	return false // Упрощенная реализация
-}
-
-// hasHighRiskProvider проверяет наличие VPN/Hosting провайдеров
-func (s *Scorer) hasHighRiskProvider(asnInfos map[string]*asn.ASNClassification) bool {
-	for _, info := range asnInfos {
-		if info.IsHighRiskProvider() {
-			return true
-		}
-	}
-	return false
-}
-
-// GetScoreSummary возвращает текстовое описание скора
+// GetScoreSummary returns a human-readable description of the action.
 func (v *ViolationScore) GetScoreSummary() string {
 	return GetActionDescription(v.Action)
 }
 
-// IsBlockingAction проверяет требуется ли блокировка
+// IsBlockingAction returns true if the action disables the user.
 func (v *ViolationScore) IsBlockingAction() bool {
-	return v.Action == ActionSoftBlock || v.Action == ActionBlock
+	return IsBlockingAction(v.Action)
 }
 
-// IsWarningAction проверяет требуется ли предупреждение
+// IsWarningAction returns true if the action is a warning or higher.
 func (v *ViolationScore) IsWarningAction() bool {
-	return v.Action == ActionWarn || v.Action == ActionSoftBlock || v.Action == ActionBlock
+	return IsWarningAction(v.Action)
+}
+
+// DetermineAction maps score/confidence to the effective violation action.
+func (s *Scorer) DetermineAction(score, confidence float64) ViolationAction {
+	action := s.thresholds.DetermineAction(score)
+	if confidence < 0.3 {
+		action = DowngradeAction(action)
+	}
+	return action
 }

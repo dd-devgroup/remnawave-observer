@@ -1,0 +1,100 @@
+services:
+  observer:
+    container_name: observer
+    build:
+      context: ../observer
+      dockerfile: Dockerfile
+    # Alternative: use pre-built image instead of building locally
+    # image: quay.io/fxfuren/remnawave-observer:latest
+    restart: unless-stopped
+    expose:
+      - '9000'
+    volumes:
+      # Data directory is created inside container with user 1000:1000 ownership
+      # This volume mount preserves data between container restarts
+      - ./data:/app/data # Data files (ASN DB, MMDB, CAIDA, unknown_providers.json, backups)
+      - ./config:/app/config:ro # Anti-Abuse configs (agglomerations.yaml, providers.yaml)
+    env_file:
+      - .env
+    depends_on:
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    networks:
+      - observer-net
+      - remnawave-network
+    logging:
+      driver: json-file
+      options:
+        max-size: '8m'
+        max-file: '3'
+    # Health check (optional - uncomment if you add /health endpoint)
+    # healthcheck:
+    #   test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:9000/health"]
+    #   interval: 30s
+    #   timeout: 3s
+    #   retries: 3
+    #   start_period: 10s
+
+  redis:
+    image: redis:8.2-m01-alpine3.22
+    container_name: redis
+    restart: unless-stopped
+    expose:
+      - '6379'
+    volumes:
+      - redis-data:/data
+    networks:
+      - observer-net
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 3s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+    logging:
+      driver: json-file
+      options:
+        max-size: '8m'
+        max-file: '3'
+
+  postgres:
+    image: postgres:17-alpine
+    container_name: observer-postgres
+    restart: unless-stopped
+    expose:
+      - '5432'
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    networks:
+      - observer-net
+    healthcheck:
+      test:
+        [
+          'CMD-SHELL',
+          'pg_isready -h 127.0.0.1 -p 5432 -U $$POSTGRES_USER -d $$POSTGRES_DB',
+        ]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
+    logging:
+      driver: json-file
+      options:
+        max-size: '8m'
+        max-file: '3'
+
+networks:
+  observer-net:
+    driver: bridge
+  remnawave-network:
+    external: true
+
+volumes:
+  redis-data:
+  postgres-data:

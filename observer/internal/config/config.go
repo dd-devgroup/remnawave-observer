@@ -3,6 +3,7 @@ package config
 import (
 	"log"
 	"os"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -11,18 +12,15 @@ import (
 // Config хранит всю конфигурацию приложения.
 type Config struct {
 	Port                        string
+	PostgresDSN                 string // DSN for PostgreSQL (required, fatal if empty)
 	RedisURL                    string
-	ScanMaxKeys                 int    // Макс. количество ключей при SCAN (default: 10000)
-	ScanCount                   int    // Hint COUNT для Redis SCAN (default: 100)
-	ScanTimeBudgetSeconds       int    // Макс. время одной SCAN операции в секундах (default: 30)
-	RabbitMQURL                 string
-	MaxIPsPerUser               int
+	ScanMaxKeys                 int // Макс. количество ключей при SCAN (default: 10000)
+	ScanCount                   int // Hint COUNT для Redis SCAN (default: 100)
+	ScanTimeBudgetSeconds       int // Макс. время одной SCAN операции в секундах (default: 30)
 	AlertWebhookURL             string
-	UserIPTTL                   time.Duration
 	AlertCooldown               time.Duration
 	ClearIPsDelay               time.Duration
 	BlockDuration               string
-	BlockingExchangeName        string
 	MonitoringInterval          time.Duration
 	DebugEmail                  string
 	DebugIPLimit                int
@@ -32,235 +30,294 @@ type Config struct {
 	LogChannelBufferSize        int
 	SideEffectWorkerPoolSize    int
 	SideEffectChannelBufferSize int
-	SideEffectTimeout          time.Duration // Таймаут на одну побочную задачу (default: 10s)
+	SideEffectTimeout           time.Duration // Таймаут на одну побочную задачу (default: 10s)
 
-	// --- ПАРАМЕТРЫ ДЛЯ РЕЖИМА ПОДСЕТЕЙ ---
-	DetectBySubnet    bool          // Включить режим детекции по подсетям
-	MaxSubnetsPerUser int           
-	UserSubnetTTL     time.Duration 
-	SubnetMaskIPv4    int           
-	ExcludedSubnets   map[string]bool 
-
-	// --- ПАРАМЕТРЫ ДЛЯ РЕЖИМА ASN ---
-	DetectByASN          bool            // Включить режим детекции по ASN
-	IPtoASNDownloadURL   string          // URL для скачивания базы iptoasn.com
-	IPtoASNUpdateInterval time.Duration  // Интервал обновления базы ASN
-	MaxASNsPerUser       int             // Лимит уникальных ASN на пользователя
-	ASNFallbackMask      int             // Маска для fallback если ASN не найден (по умолчанию 16)
-	ExcludedASNs         map[string]bool // ASN которые не считаются (например Cloudflare, Google)
+	// --- ASN/provider hot-window settings ---
+	IPtoASNDownloadURL    string          // URL для скачивания базы iptoasn.com
+	IPtoASNUpdateInterval time.Duration   // Интервал обновления базы ASN
+	MaxASNsPerUser        int             // Legacy monitoring threshold, not used for blocking/scoring
+	UserASNTTL            time.Duration   // TTL для ASN записей пользователя
+	ExcludedASNs          map[string]bool // ASN которые не считаются (например Cloudflare, Google)
 
 	// --- ПАРАМЕТРЫ GEOIP ---
-	GeoIPEnabled        bool          // Включить GeoIP анализ
-	GeoIPCacheTTL       time.Duration // TTL для кэша GeoIP (default: 24 часа)
-	GeoIPTimeout        time.Duration // Таймаут на один HTTP-запрос к ip-api.com (default: 3s)
-	GeoIPRateIntervalMs         int // Минимальный интервал между запросами к ip-api.com в ms (default: 1350)
-	GeoIPMonitorMaxChecksPerRun int // Макс. количество GeoIP lookup за один цикл мониторинга (default: 50)
-	GeoDataConfigDir    string        // Директория с конфигами (agglomerations.yaml, providers.yaml)
-	GeoDataDataDir      string        // Директория для записываемых данных (unknown_providers.json, backups)
+	GeoIPEnabled           bool          // Включить GeoIP анализ
+	GeoIPCacheTTL          time.Duration // TTL для кэша GeoIP (default: 24 часа)
+	GeoFallbackEnabled     bool          // Enable fallback Geo API (2IP)
+	GeoFallbackTimeout     time.Duration // Timeout for fallback API requests (default: 3s)
+	TwoIPToken             string        // API token for 2IP fallback lookups
+	TwoIPBaseURL           string        // Base URL for 2IP API (default: https://api.2ip.io)
+	GeoLiteASNPath         string        // Path to GeoLite2-ASN.mmdb (default: /app/data/GeoLite2-ASN.mmdb)
+	GeoLiteCityPath        string        // Path to GeoLite2-City.mmdb (default: /app/data/GeoLite2-City.mmdb)
+	GeoLiteASNDownloadURL  string        // P3TERX GitHub mirror URL for GeoLite2-ASN.mmdb auto-download
+	GeoLiteCityDownloadURL string        // P3TERX GitHub mirror URL for GeoLite2-City.mmdb auto-download
+	GeoLiteUpdateInterval  time.Duration // Auto-update interval for GeoLite2 MMDB files (default: 168 hours = 7 days)
+	GeoDataConfigDir       string        // Директория с конфигами (agglomerations.yaml, providers.yaml)
+	GeoDataDataDir         string        // Директория для записываемых данных (unknown_providers.json, backups)
 
 	// --- ПАРАМЕТРЫ СКОРИНГА ---
-	ScoringEnabled      bool    // Включить систему скоринга
 	ScoreThresholdWarn  float64 // Порог для предупреждения (default: 50)
 	ScoreThresholdBlock float64 // Порог для блокировки (default: 85)
-
-	// --- ПАРАМЕТРЫ ВХОДЯЩИХ ЗАПРОСОВ ---
-	MaxRequestBytes         int64 // Максимальный размер body POST /log-entry (default: 2MB)
-	MaxLogEntriesPerRequest int   // Максимальное количество записей в одном запросе (default: 1000)
-
-	// --- ПАРАМЕТРЫ PUBLISHER ---
-	PublisherPoolSize          int // Размер пула каналов RabbitMQ (default: 5)
-	RabbitPublishMaxRetries    int // Макс. количество повторов публикации (default: 5)
-	RabbitPublishBackoffBaseMs int // Базовый интервал backoff в ms (default: 500)
-	RabbitPublishBackoffMaxMs  int // Макс. интервал backoff в ms (default: 30000)
-	MaxIPsPerBlockEvent        int // Макс. количество IP в одном block-event сообщении (default: 500)
-	PublishConfirmTimeoutMs    int // Таймаут ожидания подтверждения от брокера в ms (default: 3000)
 
 	// --- ПАРАМЕТРЫ АВТООБУЧЕНИЯ ---
 	UnknownProvidersLogEnabled bool // Включить логирование неизвестных провайдеров (default: false)
 
 	// Автоматическое обучение
-	AutoLearningEnabled       bool          // Включить автоматическое обучение (default: false)
-	AutoLearningInterval      time.Duration // Интервал проверки (default: 24 часа)
-	AutoLearningMinCount      int           // Минимальное количество встреч для автодобавления (default: 10)
-	AutoLearningMinConfidence string        // Минимальный уровень уверенности: high, medium (default: high)
-	AutoLearningMaxAddsPerRun int           // Макс. добавлений за один цикл (default: 20)
-	AutoLearningOutputFile    string        // Имя overlay файла в dataDir (default: providers.learned.yaml)
+	AutoLearningEnabled           bool          // Включить автоматическое обучение (default: false)
+	AutoLearningInterval          time.Duration // Интервал проверки (default: 24 часа)
+	AutoLearningMinCount          int           // Минимальное количество встреч для автодобавления (default: 10)
+	AutoLearningMinConfidence     string        // Минимальный уровень уверенности: high, medium (default: high)
+	AutoLearningMaxAddsPerRun     int           // Макс. добавлений за один цикл (default: 20)
+	AutoLearningOutputFile        string        // Имя overlay файла в dataDir (default: providers.learned.yaml)
+	AutoLearnMinDistinctUsers     int           // Min distinct users per ASN for Postgres learning (default: 3)
+	AutoLearnAutoApproveThreshold float64       // Auto-approve confidence threshold (default: 0.8)
 
 	// --- ПАРАМЕТРЫ CAIDA AS2Org ---
 	CAIDAEnabled      bool   // Включить загрузку CAIDA AS-Organizations (default: true)
 	CAIDADownloadURL  string // URL файла CAIDA (default: из as2org.go)
 	CAIDARefreshHours int    // Интервал обновления в часах (default: 168 = 7 дней)
 
-	// --- ПАРАМЕТРЫ HTTP SERVER ---
-	HTTPReadHeaderTimeoutSeconds int // Таймаут чтения заголовков (default: 5)
-	HTTPReadTimeoutSeconds       int // Таймаут полного чтения запроса (default: 15)
-	HTTPWriteTimeoutSeconds      int // Таймаут записи ответа (default: 15)
-	HTTPIdleTimeoutSeconds       int // Таймаут keep-alive соединений (default: 60)
-	HTTPMaxHeaderBytes           int // Макс. размер заголовков в байтах (default: 1MB)
+	// --- ПАРАМЕТРЫ REMNAWAVE ENFORCEMENT ---
+	RemnawaveBaseURL         string // Base URL Remnawave панели (например: https://panel.example.com)
+	RemnawaveAPIToken        string // API token for Remnawave Authorization (Bearer)
+	RemnawaveTimeoutSeconds  int    // Таймаут HTTP запросов к Remnawave (default: 5)
+	RemnawaveHeader          string // Optional reverse-proxy gate KEY=VALUE (added as query+cookie on each API request)
+	UserIDUUIDCacheTTLHours  int    // TTL кэша internal_id→uuid в часах (default: 24)
+	PanelPollInterval        time.Duration
+	PanelFetchTimeout        time.Duration
+	PanelFetchResultPoll     time.Duration
+	PanelFetchMaxInflight    int
+	NodeExecutorBlockEnabled bool
+	ExcludedInternalSquads   map[string]bool
+	ReenableTickSeconds      int // Интервал проверки просроченных disable в секундах (default: 10)
+	ReenableBatchSize        int // Максимальное количество enable за одну итерацию (default: 100)
+}
 
-	// --- ПАРАМЕТРЫ JSON ДЕКОДИРОВАНИЯ ---
-	StrictJSONDecode bool // Отклонять unknown fields в JSON (default: false для backward compatibility)
+const (
+	defaultMonitoringIntervalSeconds = 300
+	defaultSideEffectTimeoutSeconds  = 10
+	defaultReenableTickSeconds       = 10
+	defaultReenableBatchSize         = 100
+)
+
+func defaultLogWorkerPoolSize() int {
+	workers := runtime.GOMAXPROCS(0)
+	if workers < 2 {
+		workers = 2
+	}
+	return workers
+}
+
+func defaultLogChannelBufferSize(logWorkers int) int {
+	buffer := logWorkers * 20
+	if buffer < 100 {
+		buffer = 100
+	}
+	if buffer > 5000 {
+		buffer = 5000
+	}
+	return buffer
+}
+
+func defaultSideEffectWorkerPoolSize(logWorkers int) int {
+	workers := logWorkers / 2
+	if workers < 2 {
+		workers = 2
+	}
+	if workers > 32 {
+		workers = 32
+	}
+	return workers
+}
+
+func defaultSideEffectChannelBufferSize(sideEffectWorkers int) int {
+	buffer := sideEffectWorkers * 10
+	if buffer < 50 {
+		buffer = 50
+	}
+	if buffer > 1000 {
+		buffer = 1000
+	}
+	return buffer
 }
 
 // New загружает конфигурацию из переменных окружения.
 func New() *Config {
+	logWorkers := defaultLogWorkerPoolSize()
+	logChannelBuffer := defaultLogChannelBufferSize(logWorkers)
+	sideEffectWorkers := defaultSideEffectWorkerPoolSize(logWorkers)
+	sideEffectChannelBuffer := defaultSideEffectChannelBufferSize(sideEffectWorkers)
+	remnawaveBaseURL := getEnv("REMNAWAVE_BASE_URL", "")
+	remnawaveHeader := getEnv("REMNAWAVE_HEADER", "")
+	remnawaveHeaderInvalid := false
+	if remnawaveHeader != "" {
+		if _, _, ok := parseNameValue(remnawaveHeader); !ok {
+			remnawaveHeaderInvalid = true
+			remnawaveHeader = ""
+		}
+	}
+
 	cfg := &Config{
 		Port:                        getEnv("PORT", "9000"),
+		PostgresDSN:                 getEnv("POSTGRES_DSN", ""),
 		RedisURL:                    getEnv("REDIS_URL", "redis://localhost:6379/0"),
 		ScanMaxKeys:                 getEnvInt("SCAN_MAX_KEYS", 10000),
 		ScanCount:                   getEnvInt("SCAN_COUNT", 100),
 		ScanTimeBudgetSeconds:       getEnvInt("SCAN_TIME_BUDGET_SECONDS", 30),
-		RabbitMQURL:                 getEnv("RABBITMQ_URL", "amqp://guest:guest@localhost/"),
-		MaxIPsPerUser:               getEnvInt("MAX_IPS_PER_USER", 3),
 		AlertWebhookURL:             getEnv("ALERT_WEBHOOK_URL", ""),
-		UserIPTTL:                   time.Duration(getEnvInt("USER_IP_TTL_SECONDS", 24*60*60)) * time.Second,
 		AlertCooldown:               time.Duration(getEnvInt("ALERT_COOLDOWN_SECONDS", 60*60)) * time.Second,
 		ClearIPsDelay:               time.Duration(getEnvInt("CLEAR_IPS_DELAY_SECONDS", 30)) * time.Second,
 		BlockDuration:               getEnv("BLOCK_DURATION", "5m"),
-		BlockingExchangeName:        getEnv("BLOCKING_EXCHANGE_NAME", "blocking_exchange"),
-		MonitoringInterval:          time.Duration(getEnvInt("MONITORING_INTERVAL", 300)) * time.Second,
+		MonitoringInterval:          time.Duration(defaultMonitoringIntervalSeconds) * time.Second,
 		DebugEmail:                  getEnv("DEBUG_EMAIL", ""),
 		DebugIPLimit:                getEnvInt("DEBUG_IP_LIMIT", 1),
 		ExcludedUsers:               parseSet(getEnv("EXCLUDED_USERS", "")),
 		ExcludedIPs:                 parseSet(getEnv("EXCLUDED_IPS", "")),
-		WorkerPoolSize:              getEnvInt("WORKER_POOL_SIZE", 20),
-		LogChannelBufferSize:        getEnvInt("LOG_CHANNEL_BUFFER_SIZE", 100),
-		SideEffectWorkerPoolSize:    getEnvInt("SIDE_EFFECT_WORKER_POOL_SIZE", 10),
-		SideEffectChannelBufferSize: getEnvInt("SIDE_EFFECT_CHANNEL_BUFFER_SIZE", 50),
-		SideEffectTimeout:          time.Duration(getEnvInt("SIDE_EFFECT_TIMEOUT_SECONDS", 10)) * time.Second,
-
-		// --- Загрузка параметров входящих запросов ---
-		MaxRequestBytes:         int64(getEnvInt("MAX_REQUEST_BYTES", 2*1024*1024)),
-		MaxLogEntriesPerRequest: getEnvInt("MAX_LOG_ENTRIES_PER_REQUEST", 1000),
-
-		// --- Загрузка параметров publisher ---
-		PublisherPoolSize:          getEnvInt("PUBLISHER_POOL_SIZE", 5),
-		RabbitPublishMaxRetries:    getEnvInt("RABBIT_PUBLISH_MAX_RETRIES", 5),
-		RabbitPublishBackoffBaseMs: getEnvInt("RABBIT_PUBLISH_BACKOFF_BASE_MS", 500),
-		RabbitPublishBackoffMaxMs:  getEnvInt("RABBIT_PUBLISH_BACKOFF_MAX_MS", 30000),
-		MaxIPsPerBlockEvent:        getEnvInt("MAX_IPS_PER_BLOCK_EVENT", 500),
-		PublishConfirmTimeoutMs:    getEnvInt("PUBLISH_CONFIRM_TIMEOUT_MS", 3000),
-
-		// --- Загрузка параметров подсетей ---
-		DetectBySubnet:    getEnvBool("DETECT_BY_SUBNET", false),
-		MaxSubnetsPerUser: getEnvInt("MAX_SUBNETS_PER_USER", 3),
-		UserSubnetTTL:     time.Duration(getEnvInt("USER_SUBNET_TTL_SECONDS", 86400)) * time.Second,
-		SubnetMaskIPv4:    getEnvInt("SUBNET_MASK_IPV4", 24),
-		ExcludedSubnets:   parseSet(getEnv("EXCLUDED_SUBNETS", "")),
+		WorkerPoolSize:              logWorkers,
+		LogChannelBufferSize:        logChannelBuffer,
+		SideEffectWorkerPoolSize:    sideEffectWorkers,
+		SideEffectChannelBufferSize: sideEffectChannelBuffer,
+		SideEffectTimeout:           time.Duration(defaultSideEffectTimeoutSeconds) * time.Second,
 
 		// --- Загрузка параметров ASN ---
-		DetectByASN:           getEnvBool("DETECT_BY_ASN", false),
 		IPtoASNDownloadURL:    getEnv("IPTOASN_DOWNLOAD_URL", ""),
 		IPtoASNUpdateInterval: time.Duration(getEnvInt("IPTOASN_UPDATE_INTERVAL_MINUTES", 60)) * time.Minute,
 		MaxASNsPerUser:        getEnvInt("MAX_ASNS_PER_USER", 4),
-		ASNFallbackMask:       getEnvInt("ASN_FALLBACK_MASK", 16),
+		UserASNTTL:            time.Duration(getEnvInt("USER_ASN_TTL_SECONDS", 86400)) * time.Second,
 		ExcludedASNs:          parseSet(getEnv("EXCLUDED_ASNS", "")),
 
 		// --- Загрузка параметров GeoIP ---
-		GeoIPEnabled:        getEnvBool("GEOIP_ENABLED", false),
-		GeoIPCacheTTL:       time.Duration(getEnvInt("GEOIP_CACHE_TTL_HOURS", 24)) * time.Hour,
-		GeoIPTimeout:        time.Duration(getEnvInt("GEOIP_TIMEOUT_SECONDS", 3)) * time.Second,
-		GeoIPRateIntervalMs:         getEnvInt("GEOIP_RATE_INTERVAL_MS", 1350),
-		GeoIPMonitorMaxChecksPerRun: getEnvInt("GEOIP_MONITOR_MAX_CHECKS_PER_RUN", 50),
-		GeoDataConfigDir:    getEnv("GEODATA_CONFIG_DIR", "/app/config"),
-		GeoDataDataDir:      getEnv("GEODATA_DATA_DIR", "/app/data"),
+		GeoIPEnabled:           getEnvBool("GEOIP_ENABLED", false),
+		GeoIPCacheTTL:          time.Duration(getEnvInt("GEOIP_CACHE_TTL_HOURS", 24)) * time.Hour,
+		GeoFallbackEnabled:     getEnvBool("GEO_FALLBACK_ENABLED", false),
+		GeoFallbackTimeout:     time.Duration(getEnvInt("GEO_FALLBACK_TIMEOUT_SECONDS", 3)) * time.Second,
+		TwoIPToken:             getEnv("TWOIP_TOKEN", ""),
+		TwoIPBaseURL:           getEnv("TWOIP_BASE_URL", "https://api.2ip.io"),
+		GeoLiteASNPath:         getEnv("GEOLITE_ASN_PATH", "/app/data/GeoLite2-ASN.mmdb"),
+		GeoLiteCityPath:        getEnv("GEOLITE_CITY_PATH", "/app/data/GeoLite2-City.mmdb"),
+		GeoLiteASNDownloadURL:  getEnv("GEOLITE_ASN_DOWNLOAD_URL", "https://raw.githubusercontent.com/P3TERX/GeoLite.mmdb/download/GeoLite2-ASN.mmdb"),
+		GeoLiteCityDownloadURL: getEnv("GEOLITE_CITY_DOWNLOAD_URL", "https://raw.githubusercontent.com/P3TERX/GeoLite.mmdb/download/GeoLite2-City.mmdb"),
+		GeoLiteUpdateInterval:  time.Duration(getEnvInt("GEOLITE_UPDATE_INTERVAL_HOURS", 168)) * time.Hour,
+		GeoDataConfigDir:       getEnv("GEODATA_CONFIG_DIR", "/app/config"),
+		GeoDataDataDir:         getEnv("GEODATA_DATA_DIR", "/app/data"),
 
 		// --- Загрузка параметров скоринга ---
-		ScoringEnabled:      getEnvBool("SCORING_ENABLED", false),
 		ScoreThresholdWarn:  getEnvFloat("SCORE_THRESHOLD_WARN", 50.0),
 		ScoreThresholdBlock: getEnvFloat("SCORE_THRESHOLD_BLOCK", 85.0),
 
 		// --- Загрузка параметров автообучения ---
-		UnknownProvidersLogEnabled: getEnvBool("UNKNOWN_PROVIDERS_LOG_ENABLED", false),
-		AutoLearningEnabled:        getEnvBool("AUTO_LEARNING_ENABLED", false),
-		AutoLearningInterval:       time.Duration(getEnvInt("AUTO_LEARNING_INTERVAL_HOURS", 24)) * time.Hour,
-		AutoLearningMinCount:       getEnvInt("AUTO_LEARNING_MIN_COUNT", 10),
-		AutoLearningMinConfidence:  getEnv("AUTO_LEARNING_MIN_CONFIDENCE", "high"),
-		AutoLearningMaxAddsPerRun:  getEnvInt("AUTO_LEARNING_MAX_ADDS_PER_RUN", 20),
-		AutoLearningOutputFile:     getEnv("AUTO_LEARNING_OUTPUT_FILE", "providers.learned.yaml"),
+		UnknownProvidersLogEnabled:    getEnvBool("UNKNOWN_PROVIDERS_LOG_ENABLED", false),
+		AutoLearningEnabled:           getEnvBool("AUTO_LEARNING_ENABLED", false),
+		AutoLearningInterval:          time.Duration(getEnvInt("AUTO_LEARNING_INTERVAL_HOURS", 24)) * time.Hour,
+		AutoLearningMinCount:          getEnvInt("AUTO_LEARNING_MIN_COUNT", 10),
+		AutoLearningMinConfidence:     getEnv("AUTO_LEARNING_MIN_CONFIDENCE", "high"),
+		AutoLearningMaxAddsPerRun:     getEnvInt("AUTO_LEARNING_MAX_ADDS_PER_RUN", 20),
+		AutoLearningOutputFile:        getEnv("AUTO_LEARNING_OUTPUT_FILE", "providers.learned.yaml"),
+		AutoLearnMinDistinctUsers:     getEnvInt("AUTO_LEARN_MIN_DISTINCT_USERS", 3),
+		AutoLearnAutoApproveThreshold: getEnvFloat("AUTO_LEARN_AUTO_APPROVE_THRESHOLD", 0.8),
 
 		// --- CAIDA AS2Org ---
 		CAIDAEnabled:      getEnvBool("CAIDA_ENABLED", true),
 		CAIDADownloadURL:  getEnv("CAIDA_DOWNLOAD_URL", ""),
 		CAIDARefreshHours: getEnvInt("CAIDA_REFRESH_HOURS", 168),
 
-		// --- HTTP Server ---
-		HTTPReadHeaderTimeoutSeconds: getEnvInt("HTTP_READ_HEADER_TIMEOUT_SECONDS", 5),
-		HTTPReadTimeoutSeconds:       getEnvInt("HTTP_READ_TIMEOUT_SECONDS", 15),
-		HTTPWriteTimeoutSeconds:      getEnvInt("HTTP_WRITE_TIMEOUT_SECONDS", 15),
-		HTTPIdleTimeoutSeconds:       getEnvInt("HTTP_IDLE_TIMEOUT_SECONDS", 60),
-		HTTPMaxHeaderBytes:           getEnvInt("HTTP_MAX_HEADER_BYTES", 1<<20),
-
-		// --- JSON Decoding ---
-		StrictJSONDecode: getEnvBool("STRICT_JSON_DECODE", false),
+		// --- Загрузка параметров Remnawave enforcement ---
+		RemnawaveBaseURL:         remnawaveBaseURL,
+		RemnawaveAPIToken:        getEnv("REMNAWAVE_API_TOKEN", ""),
+		RemnawaveTimeoutSeconds:  getEnvInt("REMNAWAVE_TIMEOUT_SECONDS", 5),
+		RemnawaveHeader:          remnawaveHeader,
+		UserIDUUIDCacheTTLHours:  getEnvInt("USERID_UUID_CACHE_TTL_HOURS", 24),
+		PanelPollInterval:        time.Duration(getEnvInt("PANEL_POLL_INTERVAL_SECONDS", 60)) * time.Second,
+		PanelFetchTimeout:        time.Duration(getEnvInt("PANEL_FETCH_TIMEOUT_SECONDS", 20)) * time.Second,
+		PanelFetchResultPoll:     time.Duration(getEnvInt("PANEL_FETCH_RESULT_POLL_SECONDS", 2)) * time.Second,
+		PanelFetchMaxInflight:    getEnvInt("PANEL_FETCH_MAX_INFLIGHT", 3),
+		NodeExecutorBlockEnabled: getEnvBool("NODE_EXECUTOR_BLOCK_ENABLED", true),
+		ExcludedInternalSquads:   parseSet(getEnv("EXCLUDED_INTERNAL_SQUAD_UUIDS", "")),
+		ReenableTickSeconds:      defaultReenableTickSeconds,
+		ReenableBatchSize:        defaultReenableBatchSize,
 	}
 
-	log.Printf("Конфигурация загружена. Порт: %s", cfg.Port)
-	if cfg.DetectByASN {
-		log.Printf("!!! РЕЖИМ ОБНАРУЖЕНИЯ: по ASN (провайдерам). Лимит: %d провайдеров на пользователя.", cfg.MaxASNsPerUser)
-		log.Printf("    Источник: iptoasn.com, Интервал обновления: %v, Fallback маска: /%d", cfg.IPtoASNUpdateInterval, cfg.ASNFallbackMask)
-		if len(cfg.ExcludedASNs) > 0 {
-			log.Printf("    Исключенные ASN: %d", len(cfg.ExcludedASNs))
-		}
-	} else if cfg.DetectBySubnet {
-		log.Printf("!!! РЕЖИМ ОБНАРУЖЕНИЯ: по ПОДСЕТЯМ (/%d). Лимит: %d подсетей на пользователя.", cfg.SubnetMaskIPv4, cfg.MaxSubnetsPerUser)
-	} else {
-		log.Printf("!!! РЕЖИМ ОБНАРУЖЕНИЯ: по IP-адресам. Лимит: %d IP на пользователя.", cfg.MaxIPsPerUser)
+	// Validation: timeout не может быть отрицательным
+	if cfg.RemnawaveTimeoutSeconds < 1 {
+		cfg.RemnawaveTimeoutSeconds = 5
 	}
-	log.Printf("Пул воркеров обработки логов: %d воркеров, размер буфера канала: %d", cfg.WorkerPoolSize, cfg.LogChannelBufferSize)
-	log.Printf("Пул воркеров побочных задач (алерты, очистка): %d воркеров, размер буфера канала: %d", cfg.SideEffectWorkerPoolSize, cfg.SideEffectChannelBufferSize)
+	if cfg.UserIDUUIDCacheTTLHours < 1 {
+		cfg.UserIDUUIDCacheTTLHours = 24
+	}
+	if cfg.PanelPollInterval < 1*time.Second {
+		cfg.PanelPollInterval = 60 * time.Second
+	}
+	if cfg.PanelFetchTimeout < 1*time.Second {
+		cfg.PanelFetchTimeout = 20 * time.Second
+	}
+	if cfg.PanelFetchResultPoll < 1*time.Second {
+		cfg.PanelFetchResultPoll = 2 * time.Second
+	}
+	if cfg.PanelFetchMaxInflight < 1 {
+		cfg.PanelFetchMaxInflight = 3
+	}
+	if cfg.ReenableTickSeconds < 1 {
+		cfg.ReenableTickSeconds = 10
+	}
+	if cfg.ReenableBatchSize < 1 {
+		cfg.ReenableBatchSize = 100
+	}
+	if cfg.GeoFallbackTimeout < 1*time.Second {
+		cfg.GeoFallbackTimeout = 3 * time.Second
+	}
+	if remnawaveHeaderInvalid {
+		log.Printf("Warning: REMNAWAVE_HEADER must be in KEY=VALUE format; ignored")
+	}
+
+	log.Printf("Configuration loaded. Port: %s", cfg.Port)
+	log.Printf("Log source mode: panel-only")
+	log.Printf("Provider tracking mode: scoring-only over ASN hot window")
+	log.Printf("    Source: iptoasn.com, Update interval: %v, ASN TTL: %v", cfg.IPtoASNUpdateInterval, cfg.UserASNTTL)
+	if cfg.MaxASNsPerUser > 0 {
+		log.Printf("    MAX_ASNS_PER_USER=%d is legacy monitoring-only and does not trigger bans or scoring", cfg.MaxASNsPerUser)
+	}
+	if len(cfg.ExcludedASNs) > 0 {
+		log.Printf("    Excluded ASNs: %d", len(cfg.ExcludedASNs))
+	}
+	log.Printf("Log processing worker pool: %d workers, channel buffer: %d", cfg.WorkerPoolSize, cfg.LogChannelBufferSize)
+	log.Printf("Side-effect worker pool (alerts, cleanup): %d workers, channel buffer: %d", cfg.SideEffectWorkerPoolSize, cfg.SideEffectChannelBufferSize)
 	if len(cfg.ExcludedUsers) > 0 {
-		log.Printf("Загружен список исключений: %d пользователей", len(cfg.ExcludedUsers))
+		log.Printf("Exclusion list loaded: %d users", len(cfg.ExcludedUsers))
 	}
 	if len(cfg.ExcludedIPs) > 0 {
-		log.Printf("Загружен список исключений IP-адресов: %d", len(cfg.ExcludedIPs))
+		log.Printf("IP exclusion list loaded: %d", len(cfg.ExcludedIPs))
 	}
-	if len(cfg.ExcludedSubnets) > 0 {
-		log.Printf("Загружен список исключений подсетей: %d", len(cfg.ExcludedSubnets))
+	if len(cfg.ExcludedInternalSquads) > 0 {
+		log.Printf("Internal squad exclusion list loaded: %d", len(cfg.ExcludedInternalSquads))
 	}
 	if cfg.DebugEmail != "" {
-		log.Printf("Режим дебага включен для email: %s с лимитом IP: %d", cfg.DebugEmail, cfg.DebugIPLimit)
+		log.Printf("Debug mode enabled for email: %s with limit: %d", cfg.DebugEmail, cfg.DebugIPLimit)
 	}
 	if cfg.GeoIPEnabled {
-		log.Printf("GeoIP анализ включен. Cache TTL: %v, Config dir: %s, Data dir: %s", cfg.GeoIPCacheTTL, cfg.GeoDataConfigDir, cfg.GeoDataDataDir)
+		log.Printf("GeoIP analysis enabled. Cache TTL: %v, Config dir: %s, Data dir: %s", cfg.GeoIPCacheTTL, cfg.GeoDataConfigDir, cfg.GeoDataDataDir)
+		if cfg.GeoFallbackEnabled && cfg.TwoIPToken != "" {
+			log.Printf("GeoIP fallback via 2IP enabled. Timeout: %v, Base URL: %s", cfg.GeoFallbackTimeout, cfg.TwoIPBaseURL)
+		} else if cfg.GeoFallbackEnabled {
+			log.Printf("GeoIP fallback enabled but TWOIP_TOKEN is empty; fallback lookups are disabled")
+		}
 	}
-	if cfg.ScoringEnabled {
-		log.Printf("Система скоринга включена. Warn threshold: %.1f, Block threshold: %.1f", cfg.ScoreThresholdWarn, cfg.ScoreThresholdBlock)
-	}
+	log.Printf("Scoring system enabled. Warn threshold: %.1f, Block threshold: %.1f", cfg.ScoreThresholdWarn, cfg.ScoreThresholdBlock)
 	if cfg.UnknownProvidersLogEnabled {
-		log.Printf("Логирование неизвестных провайдеров включено")
+		log.Printf("Unknown providers logging enabled")
 	}
 	if cfg.AutoLearningEnabled {
-		log.Printf("Автоматическое обучение включено. Интервал: %v, Min count: %d, Min confidence: %s, Max adds/цикл: %d, Output: %s",
+		log.Printf("Auto-learning enabled. Interval: %v, Min count: %d, Min confidence: %s, Max adds/cycle: %d, Output: %s",
 			cfg.AutoLearningInterval, cfg.AutoLearningMinCount, cfg.AutoLearningMinConfidence, cfg.AutoLearningMaxAddsPerRun, cfg.AutoLearningOutputFile)
 	}
 	if cfg.CAIDAEnabled {
-		log.Printf("CAIDA AS2Org включен. Обновление каждые %dh", cfg.CAIDARefreshHours)
+		log.Printf("CAIDA AS2Org enabled. Refresh every %dh", cfg.CAIDARefreshHours)
 	}
-
-	// Валидация и логирование HTTP таймаутов
-	if cfg.HTTPReadHeaderTimeoutSeconds <= 0 {
-		cfg.HTTPReadHeaderTimeoutSeconds = 5
+	if cfg.RemnawaveHeader != "" {
+		if name, _, ok := parseNameValue(cfg.RemnawaveHeader); ok {
+			log.Printf("Remnawave gate header enabled from REMNAWAVE_HEADER: %s=<hidden>", name)
+		}
 	}
-	if cfg.HTTPReadTimeoutSeconds <= 0 {
-		cfg.HTTPReadTimeoutSeconds = 15
-	}
-	if cfg.HTTPWriteTimeoutSeconds <= 0 {
-		cfg.HTTPWriteTimeoutSeconds = 15
-	}
-	if cfg.HTTPIdleTimeoutSeconds <= 0 {
-		cfg.HTTPIdleTimeoutSeconds = 60
-	}
-	if cfg.HTTPMaxHeaderBytes <= 0 {
-		cfg.HTTPMaxHeaderBytes = 1 << 20
-	}
-	log.Printf("HTTP Server таймауты: ReadHeader=%ds Read=%ds Write=%ds Idle=%ds MaxHeaderBytes=%d",
-		cfg.HTTPReadHeaderTimeoutSeconds, cfg.HTTPReadTimeoutSeconds,
-		cfg.HTTPWriteTimeoutSeconds, cfg.HTTPIdleTimeoutSeconds, cfg.HTTPMaxHeaderBytes)
-
-	if cfg.StrictJSONDecode {
-		log.Printf("Строгая валидация JSON включена (unknown fields будут отклонены)")
-	}
+	log.Printf("Panel ingest enabled. poll=%v fetch_timeout=%v result_poll=%v inflight=%d executor_block=%v",
+		cfg.PanelPollInterval, cfg.PanelFetchTimeout, cfg.PanelFetchResultPoll, cfg.PanelFetchMaxInflight, cfg.NodeExecutorBlockEnabled)
 
 	return cfg
 }
@@ -312,4 +369,21 @@ func parseSet(value string) map[string]bool {
 		}
 	}
 	return set
+}
+
+func parseNameValue(value string) (string, string, bool) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "", "", false
+	}
+	parts := strings.SplitN(value, "=", 2)
+	if len(parts) != 2 {
+		return "", "", false
+	}
+	name := strings.TrimSpace(parts[0])
+	val := strings.TrimSpace(parts[1])
+	if name == "" || val == "" {
+		return "", "", false
+	}
+	return name, val, true
 }
