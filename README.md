@@ -24,6 +24,7 @@ Current behavior:
 - users from configured `Internal Squads` are fully bypassed
 - garbage IPs like `0.0.0.0` and `::` are discarded silently and cleaned from Redis/PostgreSQL on startup
 - `HWID` and subscription request history (`SRH`) are used as anti-false-positive evidence
+- `HWID` evidence is taken only from recently active devices; when no active HWID is available, `SRH` is used as fallback evidence
 - legacy `/log-entry` is disabled and returns `410 Gone`
 
 ---
@@ -86,6 +87,14 @@ These evidence signals do **not** add an extra penalty. They are used to reduce 
 - strong single-device consistency can reduce the final score by `40%`
 - low device / agent diversity can reduce the final score by `20%`
 
+Evidence behavior:
+
+- `HWID` uses only recently active devices based on `updatedAt`, or `createdAt` as fallback
+- recent-device filtering is controlled by `EVIDENCE_DEVICE_ACTIVITY_WINDOW_DAYS`
+- raw device count does not create a separate ban by itself
+- if the user has no active `HWID`, Observer falls back to recent `SRH`
+- `SRH` is used as confirmation and false-positive damping, not as a standalone blocking reason
+
 This means `HWID` and `SRH` can downgrade a user from `temp_disable` to `warn`, but they do not create an extra ban by themselves.
 
 ### Default action thresholds
@@ -130,6 +139,14 @@ USER_ASN_TTL_SECONDS=43200
 GEOIP_ENABLED=true
 SCORE_THRESHOLD_WARN=50.0
 SCORE_THRESHOLD_BLOCK=85.0
+IP_RESCORING_ENABLED=true
+IP_RESCORING_BASE_THRESHOLD=3
+IP_RESCORING_DEEP_CHECK_ENABLED=true
+IP_RESCORING_DEEP_CHECK_TIMEOUT_SECONDS=10
+IP_RESCORING_DEEP_CHECK_RESULT_POLL_SECONDS=2
+EVIDENCE_SAFE_DEVICE_COUNT=3
+EVIDENCE_DEVICE_GRACE_COUNT=5
+EVIDENCE_DEVICE_ACTIVITY_WINDOW_DAYS=30
 
 EXCLUDED_USERS=
 EXCLUDED_IPS=
@@ -145,6 +162,12 @@ Start:
 docker compose up -d
 docker logs observer -f
 ```
+
+Prebuilt images:
+
+- `ghcr.io/dd-devgroup/remnawave-observer:dev` tracks the `dev` branch
+- `ghcr.io/dd-devgroup/remnawave-observer:latest` tracks the `main` branch
+- release builds are also published as version tags like `ghcr.io/dd-devgroup/remnawave-observer:v0.1.0`
 
 ### 2. Remnawave requirements
 
@@ -209,6 +232,14 @@ Observer is now strictly panel-only. `Vector` and HTTP log ingest are no longer 
 | `GEOLITE_CITY_PATH` | GeoLite City MMDB path | `/app/data/GeoLite2-City.mmdb` |
 | `SCORE_THRESHOLD_WARN` | `warn` threshold | `50` |
 | `SCORE_THRESHOLD_BLOCK` | `hard_disable` threshold | `85` |
+| `IP_RESCORING_ENABLED` | Enable observe-only rescoring for repeated IP/provider activity | `true` |
+| `IP_RESCORING_BASE_THRESHOLD` | Base active-provider threshold before observe-only rescoring starts | `3` |
+| `IP_RESCORING_DEEP_CHECK_ENABLED` | Run Remnawave `fetch-users-ips` deep check before observe-only rescoring | `true` |
+| `IP_RESCORING_DEEP_CHECK_TIMEOUT_SECONDS` | Timeout for the deep check job | `10` |
+| `IP_RESCORING_DEEP_CHECK_RESULT_POLL_SECONDS` | Poll interval for deep check results | `2` |
+| `EVIDENCE_SAFE_DEVICE_COUNT` | Informational safe device count used by evidence heuristics | `3` |
+| `EVIDENCE_DEVICE_GRACE_COUNT` | Informational grace device count used by evidence heuristics | `5` |
+| `EVIDENCE_DEVICE_ACTIVITY_WINDOW_DAYS` | Recent-activity window for HWID and SRH evidence | `30` |
 
 ### Optional learning and logging
 
@@ -229,6 +260,8 @@ Observer is now strictly panel-only. `Vector` and HTTP log ingest are no longer 
 ## Monitoring and Metrics
 
 Every 5 minutes Observer prints a provider hot-window summary to stdout. Provider counts there are **informational only**. The real enforcement decision comes from the latest scoring action.
+
+When observe-only rescoring is enabled, the monitoring summary can also show lines like `Observe-only: 22.2 [none] trigger=ip_threshold deep_check=true`. This indicates a repeated-IP/provider rescore that did not produce enforcement by itself.
 
 Runtime metrics are logged every 60 seconds:
 
