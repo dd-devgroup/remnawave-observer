@@ -16,6 +16,10 @@ type AlertPayload struct {
 	Limit          int    `json:"limit,omitempty"`
 	BlockDuration  string `json:"block_duration,omitempty"`
 	ViolationType  string `json:"violation_type"`
+	TriggerKind    string `json:"trigger_kind,omitempty"`
+	TriggerIPCount *int   `json:"trigger_ip_count,omitempty"`
+	ObserveOnly    bool   `json:"observe_only,omitempty"`
+	DeepCheckUsed  bool   `json:"deep_check_used,omitempty"`
 
 	// Optional provider context for scoring alerts.
 	DetectedASNCount *int                `json:"detected_asn_count,omitempty"`
@@ -30,6 +34,7 @@ type AlertPayload struct {
 	ScoreModifiers  []string             `json:"score_modifiers,omitempty"`
 	GeoAnalysis     *GeoAnalysisResult   `json:"geo_analysis,omitempty"`
 	ProviderTypes   map[string]string    `json:"provider_types,omitempty"`
+	DeepCheck       *DeepCheckSummary    `json:"deep_check,omitempty"`
 }
 
 // UserIPStats содержит статистику по IP-адресам пользователя для мониторинга.
@@ -47,6 +52,10 @@ type UserIPStats struct {
 	IsDebug           bool                `json:"is_debug"`
 	LatestScore       *float64            `json:"latest_score,omitempty"`        // Latest scoring result
 	LatestScoreAction string              `json:"latest_score_action,omitempty"` // Action from latest score
+	LatestObserveOnlyScore       *float64 `json:"latest_observe_only_score,omitempty"`
+	LatestObserveOnlyScoreAction string   `json:"latest_observe_only_score_action,omitempty"`
+	LatestObserveOnlyTrigger     string   `json:"latest_observe_only_trigger,omitempty"`
+	LatestObserveOnlyDeepCheck   bool     `json:"latest_observe_only_deep_check,omitempty"`
 	ASNDetails        map[string]*ASNInfo `json:"asn_details,omitempty"`         // Детали по каждому ASN (для ASN режима)
 }
 
@@ -81,10 +90,23 @@ type GeoAnalysisResult struct {
 	GeoFlags        []string `json:"geo_flags"`
 }
 
+type DeepCheckSummary struct {
+	NodeCount              int      `json:"node_count"`
+	Countries              []string `json:"countries,omitempty"`
+	IPs                    []string `json:"ips,omitempty"`
+	MaxLastSeenAgeSeconds  int64    `json:"max_last_seen_age_seconds,omitempty"`
+	CrossNodeSpread        bool     `json:"cross_node_spread,omitempty"`
+}
+
 // CheckResult представляет результат выполнения Lua-скрипта.
 type CheckResult struct {
 	StatusCode   int64
 	CurrentCount int64
 	IsNew        bool
 	AllUserItems []string
+}
+
+type IPTrackResult struct {
+	IsNewIP      bool
+	CurrentCount int64
 }

@@ -21,6 +21,9 @@ func (t *testStorage) CheckAndAddASN(_ context.Context, _, _ string, _ int, _, _
 func (t *testStorage) AddIPToASNMapping(_ context.Context, _, _, _ string, _ time.Duration) error {
 	return nil
 }
+func (t *testStorage) TrackIPForASN(_ context.Context, _, _, _ string, _ time.Duration) (*models.IPTrackResult, error) {
+	return &models.IPTrackResult{IsNewIP: true, CurrentCount: 1}, nil
+}
 func (t *testStorage) SetASNOrgName(_ context.Context, _, _ string, _ time.Duration) error {
 	return nil
 }

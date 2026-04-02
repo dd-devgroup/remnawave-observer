@@ -23,6 +23,9 @@ func (m *MockStorage) CheckAndAddASN(_ context.Context, _, _ string, _ int, _, _
 func (m *MockStorage) AddIPToASNMapping(_ context.Context, _, _, _ string, _ time.Duration) error {
 	return nil
 }
+func (m *MockStorage) TrackIPForASN(_ context.Context, _, _, _ string, _ time.Duration) (*models.IPTrackResult, error) {
+	return &models.IPTrackResult{IsNewIP: true, CurrentCount: 1}, nil
+}
 func (m *MockStorage) SetASNOrgName(_ context.Context, _, _ string, _ time.Duration) error {
 	return nil
 }

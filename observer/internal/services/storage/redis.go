@@ -35,6 +35,7 @@ return redis.call('DEL', unpack(keysToDelete))
 type Storage interface {
 	CheckAndAddASN(ctx context.Context, email, asn string, limit int, ttl, cooldown time.Duration) (*models.CheckResult, error)
 	AddIPToASNMapping(ctx context.Context, email, asn, ip string, ttl time.Duration) error
+	TrackIPForASN(ctx context.Context, email, asn, ip string, ttl time.Duration) (*models.IPTrackResult, error)
 	SetASNOrgName(ctx context.Context, asn, orgName string, ttl time.Duration) error
 	GetIPsForUserASN(ctx context.Context, email, asn string) ([]string, error)
 	GetASNOrgName(ctx context.Context, asn string) (string, error)
@@ -50,6 +51,7 @@ type Storage interface {
 type RedisStore struct {
 	client               *redis.Client
 	addCheckASNScriptSHA string
+	trackASNIPScriptSHA  string
 	clearASNsScriptSHA   string
 	scanMaxKeys          int
 	scanCount            int
@@ -118,6 +120,14 @@ func NewRedisStore(ctx context.Context, redisURL string, scriptPaths ...string) 
 	if err != nil {
 		return nil, fmt.Errorf("ошибка загрузки Lua-скрипта (add/check asn) в Redis: %w", err)
 	}
+	trackASNIPScript, err := loadLuaScript("track_asn_ip.lua", scriptPaths...)
+	if err != nil {
+		return nil, fmt.Errorf("ошибка чтения Lua-скрипта 'track_asn_ip.lua': %w", err)
+	}
+	trackASNIPScriptSHA, err := client.ScriptLoad(ctx, string(trackASNIPScript)).Result()
+	if err != nil {
+		return nil, fmt.Errorf("ошибка загрузки Lua-скрипта (track asn ip) в Redis: %w", err)
+	}
 	// Загрузка скрипта атомарной очистки ASN из константы
 	clearASNsScriptSHA, err := client.ScriptLoad(ctx, clearUserASNsScript).Result()
 	if err != nil {
@@ -127,6 +137,7 @@ func NewRedisStore(ctx context.Context, redisURL string, scriptPaths ...string) 
 	return &RedisStore{
 		client:               client,
 		addCheckASNScriptSHA: addCheckASNScriptSHA,
+		trackASNIPScriptSHA:  trackASNIPScriptSHA,
 		clearASNsScriptSHA:   clearASNsScriptSHA,
 		scanMaxKeys:          10000,
 		scanCount:            100,
@@ -312,6 +323,28 @@ func (s *RedisStore) AddIPToASNMapping(ctx context.Context, email, asn, ip strin
 	pipe.Expire(ctx, key, ttl)
 	_, err := pipe.Exec(ctx)
 	return err
+}
+
+func (s *RedisStore) TrackIPForASN(ctx context.Context, email, asn, ip string, ttl time.Duration) (*models.IPTrackResult, error) {
+	key := fmt.Sprintf("user_asn_ips:%s:%s", email, asn)
+	result, err := s.client.EvalSha(ctx, s.trackASNIPScriptSHA, []string{key}, ip, int(ttl.Seconds())).Result()
+	if err != nil {
+		return nil, fmt.Errorf("ошибка выполнения Lua-скрипта (track asn ip) для %s/%s: %w", email, asn, err)
+	}
+
+	resSlice, ok := result.([]interface{})
+	if !ok || len(resSlice) < 2 {
+		return nil, fmt.Errorf("неожиданный результат от Lua-скрипта track asn ip для %s/%s", email, asn)
+	}
+
+	trackResult := &models.IPTrackResult{}
+	if isNew, ok := resSlice[0].(int64); ok {
+		trackResult.IsNewIP = isNew == 1
+	}
+	if count, ok := resSlice[1].(int64); ok {
+		trackResult.CurrentCount = count
+	}
+	return trackResult, nil
 }
 
 // GetIPsForUserASN возвращает все IP пользователя для данного ASN

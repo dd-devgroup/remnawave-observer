@@ -21,6 +21,7 @@ import (
 	"observer_service/internal/services/scoring"
 	"observer_service/internal/services/storage"
 	"runtime"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -85,6 +86,15 @@ type UserIPMitigator interface {
 // UserEvidenceProvider loads Remnawave evidence for scoring decisions.
 type UserEvidenceProvider interface {
 	GetUserEvidenceByInternalID(ctx context.Context, internalID int64) (*remnawave.UserEvidence, error)
+	GetUserIPSnapshotByInternalID(ctx context.Context, internalID int64, timeout, pollInterval time.Duration) (*remnawave.UserIPSnapshotResult, error)
+}
+
+type scoringTriggerContext struct {
+	TriggerKind    string
+	TriggerIPCount int
+	ObserveOnly    bool
+	DeepCheckUsed  bool
+	DeepCheck      *models.DeepCheckSummary
 }
 
 func resolveBaseLogWorkerCount(configured int) int {
@@ -581,9 +591,10 @@ func (p *LogProcessor) processEntryByASN(ctx context.Context, entry models.LogEn
 
 	debugMarker := p.getDebugMarker(entry.UserEmail)
 
-	// Save ASN -> IP mapping BEFORE limit check
-	if err := p.storage.AddIPToASNMapping(ctx, entry.UserEmail, identifier, entry.SourceIP, p.cfg.UserASNTTL); err != nil {
-		log.Printf("ASN->IP mapping save error for %s: %v. Skipping processing", entry.UserEmail, err)
+	// Track user IPs inside the ASN hot window before ASN scoring checks.
+	ipTrack, err := p.storage.TrackIPForASN(ctx, entry.UserEmail, identifier, entry.SourceIP, p.cfg.UserASNTTL)
+	if err != nil {
+		log.Printf("ASN->IP tracking error for %s: %v. Skipping processing", entry.UserEmail, err)
 		return
 	}
 
@@ -680,9 +691,86 @@ func (p *LogProcessor) processEntryByASN(ctx context.Context, entry models.LogEn
 				scoreASNs = []string{identifier}
 				log.Printf("[Scoring] AllUserItems is empty for %s, using current ASN fallback: %s", entry.UserEmail, identifier)
 			}
-			_, _, _ = p.calculateAndPersistScore(ctx, entry, identifier, orgName, true, scoreASNs)
+			_, _, _ = p.calculateAndPersistScore(ctx, entry, identifier, orgName, true, scoreASNs, scoringTriggerContext{
+				TriggerKind: "new_asn",
+			})
+		}
+		return
+	}
+
+	if !p.cfg.IPRescoringEnabled || ipTrack == nil || !ipTrack.IsNewIP || p.scorer == nil || p.repo == nil {
+		return
+	}
+
+	scoreASNs := res.AllUserItems
+	if len(scoreASNs) == 0 && identifier != "" {
+		scoreASNs = []string{identifier}
+	}
+
+	if !p.shouldTriggerIPRescore(ctx, entry, identifier, orgName, scoreASNs, int(ipTrack.CurrentCount)) {
+		return
+	}
+
+	_, _, _ = p.calculateAndPersistScore(ctx, entry, identifier, orgName, false, scoreASNs, scoringTriggerContext{
+		TriggerKind:    "ip_threshold",
+		TriggerIPCount: int(ipTrack.CurrentCount),
+		ObserveOnly:    true,
+	})
+}
+
+func (p *LogProcessor) shouldTriggerIPRescore(
+	ctx context.Context,
+	entry models.LogEntry,
+	currentASN string,
+	orgName string,
+	allASNs []string,
+	ipCount int,
+) bool {
+	if ipCount <= 0 || p.asnClassifier == nil || p.cfg == nil {
+		return false
+	}
+
+	asnDetails := p.collectASNDetails(ctx, entry.UserEmail, allASNs, currentASN, entry.SourceIP)
+	currentInfo, ok := asnDetails[currentASN]
+	if !ok {
+		currentInfo = &models.ASNInfo{ASN: currentASN, Organization: orgName}
+		asnDetails[currentASN] = currentInfo
+	}
+	if currentInfo.Organization == "" {
+		currentInfo.Organization = orgName
+	}
+
+	classification := p.asnClassifier.ClassifyWithCountry(currentASN, currentInfo.Organization, currentInfo.Country)
+	if classification == nil {
+		return false
+	}
+
+	isMobile := classification.IsMobileProvider()
+	if isMobile && !p.hasRiskyProviderMix(asnDetails, currentASN) {
+		return false
+	}
+
+	base := int(math.Ceil(float64(p.cfg.IPRescoringBase) / math.Max(classification.Modifier, 0.1)))
+	if base < 2 {
+		base = 2
+	}
+	return ipCount >= base && ipCount%base == 0
+}
+
+func (p *LogProcessor) hasRiskyProviderMix(asnDetails map[string]*models.ASNInfo, currentASN string) bool {
+	if p.asnClassifier == nil {
+		return false
+	}
+	for asnID, info := range asnDetails {
+		if asnID == currentASN {
+			continue
+		}
+		classification := p.asnClassifier.ClassifyWithCountry(asnID, info.Organization, info.Country)
+		if classification != nil && classification.Modifier >= 1.2 {
+			return true
 		}
 	}
+	return false
 }
 
 // collectASNDetails collects details for each ASN (organization, IPs, count)
@@ -872,13 +960,19 @@ func (p *LogProcessor) performEnhancedAnalytics(
 	currentSourceIP string,
 	allASNs []string,
 	asnDetails map[string]*models.ASNInfo,
+	trigger scoringTriggerContext,
 ) (
 	*models.GeoAnalysisResult,
 	map[string]string,
 	*scoring.ViolationScore,
+	scoringTriggerContext,
 ) {
 	if p.asnClassifier == nil || p.scorer == nil {
-		return nil, nil, nil
+		return nil, nil, nil, trigger
+	}
+
+	if trigger.TriggerKind == "ip_threshold" && p.cfg.IPRescoringDeepCheckEnabled {
+		trigger = p.applyDeepCheckSnapshot(ctx, email, asnDetails, trigger)
 	}
 
 	// 1. Collect all user IPs
@@ -940,6 +1034,11 @@ func (p *LogProcessor) performEnhancedAnalytics(
 		IPsPerASN:          ipsPerASN,
 	})
 	p.applyRemnawaveEvidence(ctx, email, currentSourceIP, violationScore)
+	if trigger.TriggerKind == "ip_threshold" && !trigger.DeepCheckUsed {
+		violationScore.Confidence = math.Max(0.2, violationScore.Confidence-0.2)
+		violationScore.Action = p.scorer.DetermineAction(violationScore.FinalScore, violationScore.Confidence)
+		violationScore.Modifiers = append(violationScore.Modifiers, "deep_check_unavailable")
+	}
 
 	geoScore := 0
 	if geoResult != nil {
@@ -949,7 +1048,7 @@ func (p *LogProcessor) performEnhancedAnalytics(
 		email, geoScore, violationScore.GetFeatureScore("asn"),
 		violationScore.FinalScore, violationScore.Confidence, violationScore.Action)
 
-	return geoResult, providerTypes, violationScore
+	return geoResult, providerTypes, violationScore, trigger
 }
 
 // calculateAndPersistScore performs scoring analysis for a user ASN event,
@@ -962,6 +1061,7 @@ func (p *LogProcessor) calculateAndPersistScore(
 	orgName string,
 	isNewASN bool,
 	allASNs []string,
+	trigger scoringTriggerContext,
 ) (*models.GeoAnalysisResult, map[string]string, *scoring.ViolationScore) {
 	// Skip if scoring disabled or components not initialized
 	if p.scorer == nil || p.repo == nil || p.asnClassifier == nil {
@@ -976,12 +1076,13 @@ func (p *LogProcessor) calculateAndPersistScore(
 	}
 
 	// Perform enhanced analytics (geo analysis + provider classification + scoring)
-	geoResultInternal, providerTypes, violationScore := p.performEnhancedAnalytics(
+	geoResultInternal, providerTypes, violationScore, trigger := p.performEnhancedAnalytics(
 		ctx,
 		entry.UserEmail,
 		entry.SourceIP,
 		allASNs,
 		asnDetails,
+		trigger,
 	)
 
 	if violationScore == nil {
@@ -1020,6 +1121,10 @@ func (p *LogProcessor) calculateAndPersistScore(
 		SourceIP:       entry.SourceIP,
 		ASN:            identifier,
 		IsNewASN:       isNewASN,
+		TriggerKind:    trigger.TriggerKind,
+		TriggerIPCount: trigger.TriggerIPCount,
+		ObserveOnly:    trigger.ObserveOnly,
+		DeepCheckUsed:  trigger.DeepCheckUsed,
 		ScoreTotal:     violationScore.FinalScore,
 		ScoreAction:    string(violationScore.Action),
 		ScoreBreakdown: string(breakdownJSON),
@@ -1034,11 +1139,11 @@ func (p *LogProcessor) calculateAndPersistScore(
 
 	// Persist antiabuse action if action is significant (>= monitor)
 	// Actions: none < monitor < warn < soft_challenge < temp_disable < hard_disable
-	if violationScore.Action != scoring.ActionNone {
+	if violationScore.Action != scoring.ActionNone && !trigger.ObserveOnly {
 		actionRecord := &database.AntiAbuseAction{
 			UserID:         entry.UserEmail,
 			ActionType:     string(violationScore.Action),
-			Reason:         fmt.Sprintf("new_asn_scoring: ASN=%s, score=%.1f", identifier, violationScore.FinalScore),
+			Reason:         fmt.Sprintf("%s_scoring: ASN=%s, score=%.1f", trigger.TriggerKind, identifier, violationScore.FinalScore),
 			Score:          violationScore.FinalScore,
 			ScoreBreakdown: string(breakdownJSON),
 		}
@@ -1047,10 +1152,10 @@ func (p *LogProcessor) calculateAndPersistScore(
 		}
 	}
 
-	p.maybeQueueScoringAlert(ctx, entry, allASNs, asnDetails, geoResult, providerTypes, violationScore)
+	p.maybeQueueScoringAlert(ctx, entry, allASNs, asnDetails, geoResult, providerTypes, violationScore, trigger)
 
 	// Apply enforcement for temp_disable or hard_disable actions
-	if violationScore.Action == scoring.ActionTempDisable || violationScore.Action == scoring.ActionHardDisable {
+	if !trigger.ObserveOnly && (violationScore.Action == scoring.ActionTempDisable || violationScore.Action == scoring.ActionHardDisable) {
 		enfReason := fmt.Sprintf("scoring_threshold_exceeded: ASN=%s, score=%.1f, action=%s",
 			identifier, violationScore.FinalScore, violationScore.Action)
 		enfScore := int(violationScore.FinalScore)
@@ -1076,6 +1181,122 @@ func (p *LogProcessor) calculateAndPersistScore(
 	return geoResult, providerTypes, violationScore
 }
 
+func (p *LogProcessor) applyDeepCheckSnapshot(
+	ctx context.Context,
+	userID string,
+	asnDetails map[string]*models.ASNInfo,
+	trigger scoringTriggerContext,
+) scoringTriggerContext {
+	if p.userEvidence == nil {
+		return p.markDeepCheckUnavailable(trigger)
+	}
+	internalID, err := strconv.ParseInt(strings.TrimSpace(userID), 10, 64)
+	if err != nil || internalID <= 0 {
+		return p.markDeepCheckUnavailable(trigger)
+	}
+	snapshot, err := p.userEvidence.GetUserIPSnapshotByInternalID(ctx, internalID, p.cfg.IPRescoringDeepCheckTimeout, p.cfg.IPRescoringDeepCheckResultPoll)
+	if err != nil || snapshot == nil || snapshot.Status == "failed" {
+		if err != nil {
+			log.Printf("[Scoring] Remnawave deep-check failed for %s: %v", userID, err)
+		}
+		return p.markDeepCheckUnavailable(trigger)
+	}
+
+	seenCountries := make(map[string]struct{})
+	seenIPs := make(map[string]struct{})
+	now := time.Now().UTC()
+	var maxAge time.Duration
+	for _, node := range snapshot.Nodes {
+		if node.CountryCode != "" {
+			seenCountries[node.CountryCode] = struct{}{}
+		}
+		for _, nodeIP := range node.IPs {
+			if nodeIP.IP == "" {
+				continue
+			}
+			seenIPs[nodeIP.IP] = struct{}{}
+			if !nodeIP.LastSeen.IsZero() {
+				age := now.Sub(nodeIP.LastSeen.UTC())
+				if age > maxAge {
+					maxAge = age
+				}
+			}
+			p.mergeDeepCheckIP(ctx, asnDetails, nodeIP.IP, node.CountryCode)
+		}
+	}
+
+	countries := make([]string, 0, len(seenCountries))
+	for country := range seenCountries {
+		countries = append(countries, country)
+	}
+	sort.Strings(countries)
+	ips := make([]string, 0, len(seenIPs))
+	for ip := range seenIPs {
+		ips = append(ips, ip)
+	}
+	sort.Strings(ips)
+
+	trigger.DeepCheckUsed = len(snapshot.Nodes) > 0
+	trigger.DeepCheck = &models.DeepCheckSummary{
+		NodeCount:             len(snapshot.Nodes),
+		Countries:             countries,
+		IPs:                   ips,
+		MaxLastSeenAgeSeconds: int64(maxAge / time.Second),
+		CrossNodeSpread:       len(snapshot.Nodes) > 1,
+	}
+	return trigger
+}
+
+func (p *LogProcessor) mergeDeepCheckIP(ctx context.Context, asnDetails map[string]*models.ASNInfo, ip, fallbackCountry string) {
+	if strings.TrimSpace(ip) == "" || p.asnLookup == nil {
+		return
+	}
+	asnID, orgName, country, err := p.asnLookup.LookupFull(ip)
+	if err != nil || asnID == "" {
+		return
+	}
+	if country == "" {
+		country = fallbackCountry
+	}
+	info, exists := asnDetails[asnID]
+	if !exists {
+		info = &models.ASNInfo{
+			ASN:          asnID,
+			Organization: orgName,
+			Country:      country,
+			IPs:          []string{},
+		}
+		asnDetails[asnID] = info
+	}
+	if info.Organization == "" && orgName != "" {
+		info.Organization = orgName
+	}
+	if info.Country == "" && country != "" {
+		info.Country = country
+	}
+	for _, existing := range info.IPs {
+		if existing == ip {
+			info.IPCount = len(info.IPs)
+			return
+		}
+	}
+	info.IPs = append(info.IPs, ip)
+	info.IPCount = len(info.IPs)
+	if orgName != "" && p.storage != nil {
+		if err := p.storage.SetASNOrgName(ctx, asnID, orgName, p.cfg.UserASNTTL); err != nil {
+			log.Printf("Org caching error for ASN %s during deep-check merge: %v", asnID, err)
+		}
+	}
+}
+
+func (p *LogProcessor) markDeepCheckUnavailable(trigger scoringTriggerContext) scoringTriggerContext {
+	trigger.DeepCheckUsed = false
+	if trigger.DeepCheck == nil {
+		trigger.DeepCheck = &models.DeepCheckSummary{}
+	}
+	return trigger
+}
+
 func toModelScoreBreakdown(features []scoring.FeatureResult) []models.ScoreFeatureResult {
 	breakdown := make([]models.ScoreFeatureResult, 0, len(features))
 	for _, f := range features {
@@ -1098,6 +1319,7 @@ func (p *LogProcessor) maybeQueueScoringAlert(
 	geoResult *models.GeoAnalysisResult,
 	providerTypes map[string]string,
 	violationScore *scoring.ViolationScore,
+	trigger scoringTriggerContext,
 ) {
 	if p.alerter == nil || violationScore == nil || !violationScore.IsWarningAction() {
 		return
@@ -1117,6 +1339,9 @@ func (p *LogProcessor) maybeQueueScoringAlert(
 	alertPayload := models.AlertPayload{
 		UserIdentifier:  entry.UserEmail,
 		ViolationType:   "scoring_action",
+		TriggerKind:     trigger.TriggerKind,
+		ObserveOnly:     trigger.ObserveOnly,
+		DeepCheckUsed:   trigger.DeepCheckUsed,
 		AllUserASNs:     append([]string(nil), allASNs...),
 		ASNDetails:      asnDetails,
 		Score:           &score,
@@ -1126,6 +1351,11 @@ func (p *LogProcessor) maybeQueueScoringAlert(
 		ScoreModifiers:  append([]string(nil), violationScore.Modifiers...),
 		GeoAnalysis:     geoResult,
 		ProviderTypes:   providerTypes,
+		DeepCheck:       trigger.DeepCheck,
+	}
+	if trigger.TriggerIPCount > 0 {
+		ipCount := trigger.TriggerIPCount
+		alertPayload.TriggerIPCount = &ipCount
 	}
 	if violationScore.IsBlockingAction() {
 		alertPayload.BlockDuration = p.cfg.BlockDuration
@@ -1201,13 +1431,22 @@ func (p *LogProcessor) applyRemnawaveEvidence(ctx context.Context, userIdentifie
 	)
 
 	originalScore := violationScore.FinalScore
+	safeDevices := 3
+	graceDevices := 5
+	if p.cfg != nil {
+		safeDevices = p.cfg.EvidenceSafeDeviceCount
+		graceDevices = p.cfg.EvidenceDeviceGraceCount
+	}
 	switch {
 	case summary.hwidCount == 1 && summary.requestCount > 0 && summary.requestAgentCount <= 1 && summary.currentIPSeenInSRH:
 		violationScore.FinalScore *= 0.60
 		violationScore.Modifiers = append(violationScore.Modifiers, "hwid_srh_single_device_consistency")
-	case summary.hwidCount > 0 && summary.requestCount > 0 && summary.hwidCount <= 2 && summary.requestAgentCount <= 2 && summary.requestIPCount <= 2:
+	case summary.hwidCount > 0 && summary.requestCount > 0 && summary.hwidCount <= safeDevices && summary.requestAgentCount <= 2 && summary.requestIPCount <= 2:
 		violationScore.FinalScore *= 0.80
 		violationScore.Modifiers = append(violationScore.Modifiers, "hwid_srh_low_device_diversity")
+	case summary.hwidCount > graceDevices:
+		violationScore.FinalScore = math.Min(100, violationScore.FinalScore+float64((summary.hwidCount-graceDevices)*8))
+		violationScore.Modifiers = append(violationScore.Modifiers, "hwid_device_excess")
 	default:
 		return
 	}
@@ -1273,7 +1512,10 @@ func normalizeUserAgent(value string) string {
 }
 
 func evidenceDeviceScore(deviceCount, agentCount int) float64 {
-	score := float64(maxInt(deviceCount-1, 0)*20 + maxInt(agentCount-1, 0)*10)
+	if deviceCount <= 5 {
+		return 0
+	}
+	score := float64(maxInt(deviceCount-5, 0)*20 + maxInt(agentCount-2, 0)*10)
 	if score > 100 {
 		return 100
 	}

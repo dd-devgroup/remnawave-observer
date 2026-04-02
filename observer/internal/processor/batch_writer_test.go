@@ -55,6 +55,9 @@ func (m *mockRepo) GetActiveUsersForMonitor(_ context.Context, _ time.Time) ([]d
 func (m *mockRepo) GetLatestScoreEvent(_ context.Context, _ string) (*database.UserScoreEvent, error) {
 	return nil, nil
 }
+func (m *mockRepo) GetLatestScoreEventByObserveOnly(_ context.Context, _ string, _ bool) (*database.UserScoreEvent, error) {
+	return nil, nil
+}
 func (m *mockRepo) Close() error { return nil }
 
 func (m *mockRepo) totalRecords() int {

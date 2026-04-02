@@ -18,6 +18,10 @@ func (p staticEvidenceProvider) GetUserEvidenceByInternalID(_ context.Context, _
 	return p.evidence, p.err
 }
 
+func (p staticEvidenceProvider) GetUserIPSnapshotByInternalID(_ context.Context, _ int64, _, _ time.Duration) (*remnawave.UserIPSnapshotResult, error) {
+	return nil, nil
+}
+
 func TestApplyRemnawaveEvidence_SingleDeviceConsistency_DampensScore(t *testing.T) {
 	proc := &LogProcessor{
 		scorer: scoring.NewDefaultScorer(),

@@ -26,6 +26,7 @@ type Repository interface {
 	UpdateCandidateStatus(ctx context.Context, id uint, status string) error
 	GetActiveUsersForMonitor(ctx context.Context, since time.Time) ([]MonitorUserStats, error)
 	GetLatestScoreEvent(ctx context.Context, userID string) (*UserScoreEvent, error)
+	GetLatestScoreEventByObserveOnly(ctx context.Context, userID string, observeOnly bool) (*UserScoreEvent, error)
 	Close() error
 }
 
@@ -180,6 +181,21 @@ func (r *GormRepository) GetLatestScoreEvent(ctx context.Context, userID string)
 			return nil, nil
 		}
 		return nil, fmt.Errorf("get latest score event: %w", err)
+	}
+	return &event, nil
+}
+
+func (r *GormRepository) GetLatestScoreEventByObserveOnly(ctx context.Context, userID string, observeOnly bool) (*UserScoreEvent, error) {
+	var event UserScoreEvent
+	err := r.db.WithContext(ctx).
+		Where("user_id = ? AND observe_only = ?", userID, observeOnly).
+		Order("created_at DESC").
+		First(&event).Error
+	if err != nil {
+		if err == gorm.ErrRecordNotFound {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("get latest score event by observe_only=%v: %w", observeOnly, err)
 	}
 	return &event, nil
 }

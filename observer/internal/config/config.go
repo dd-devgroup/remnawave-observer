@@ -57,6 +57,13 @@ type Config struct {
 	// --- ПАРАМЕТРЫ СКОРИНГА ---
 	ScoreThresholdWarn  float64 // Порог для предупреждения (default: 50)
 	ScoreThresholdBlock float64 // Порог для блокировки (default: 85)
+	IPRescoringEnabled  bool
+	IPRescoringBase     int
+	IPRescoringDeepCheckEnabled    bool
+	IPRescoringDeepCheckTimeout    time.Duration
+	IPRescoringDeepCheckResultPoll time.Duration
+	EvidenceSafeDeviceCount        int
+	EvidenceDeviceGraceCount       int
 
 	// --- ПАРАМЕТРЫ АВТООБУЧЕНИЯ ---
 	UnknownProvidersLogEnabled bool // Включить логирование неизвестных провайдеров (default: false)
@@ -203,6 +210,13 @@ func New() *Config {
 		// --- Загрузка параметров скоринга ---
 		ScoreThresholdWarn:  getEnvFloat("SCORE_THRESHOLD_WARN", 50.0),
 		ScoreThresholdBlock: getEnvFloat("SCORE_THRESHOLD_BLOCK", 85.0),
+		IPRescoringEnabled:               getEnvBool("IP_RESCORING_ENABLED", true),
+		IPRescoringBase:                  getEnvInt("IP_RESCORING_BASE_THRESHOLD", 3),
+		IPRescoringDeepCheckEnabled:      getEnvBool("IP_RESCORING_DEEP_CHECK_ENABLED", true),
+		IPRescoringDeepCheckTimeout:      time.Duration(getEnvInt("IP_RESCORING_DEEP_CHECK_TIMEOUT_SECONDS", 10)) * time.Second,
+		IPRescoringDeepCheckResultPoll:   time.Duration(getEnvInt("IP_RESCORING_DEEP_CHECK_RESULT_POLL_SECONDS", 2)) * time.Second,
+		EvidenceSafeDeviceCount:          getEnvInt("EVIDENCE_SAFE_DEVICE_COUNT", 3),
+		EvidenceDeviceGraceCount:         getEnvInt("EVIDENCE_DEVICE_GRACE_COUNT", 5),
 
 		// --- Загрузка параметров автообучения ---
 		UnknownProvidersLogEnabled:    getEnvBool("UNKNOWN_PROVIDERS_LOG_ENABLED", false),
@@ -264,6 +278,21 @@ func New() *Config {
 	if cfg.GeoFallbackTimeout < 1*time.Second {
 		cfg.GeoFallbackTimeout = 3 * time.Second
 	}
+	if cfg.IPRescoringBase < 1 {
+		cfg.IPRescoringBase = 3
+	}
+	if cfg.IPRescoringDeepCheckTimeout < 1*time.Second {
+		cfg.IPRescoringDeepCheckTimeout = 10 * time.Second
+	}
+	if cfg.IPRescoringDeepCheckResultPoll < 1*time.Second {
+		cfg.IPRescoringDeepCheckResultPoll = 2 * time.Second
+	}
+	if cfg.EvidenceSafeDeviceCount < 1 {
+		cfg.EvidenceSafeDeviceCount = 3
+	}
+	if cfg.EvidenceDeviceGraceCount < cfg.EvidenceSafeDeviceCount {
+		cfg.EvidenceDeviceGraceCount = cfg.EvidenceSafeDeviceCount + 2
+	}
 	if remnawaveHeaderInvalid {
 		log.Printf("Warning: REMNAWAVE_HEADER must be in KEY=VALUE format; ignored")
 	}
@@ -301,6 +330,11 @@ func New() *Config {
 		}
 	}
 	log.Printf("Scoring system enabled. Warn threshold: %.1f, Block threshold: %.1f", cfg.ScoreThresholdWarn, cfg.ScoreThresholdBlock)
+	log.Printf("IP rescoring: enabled=%v base=%d deep_check=%v timeout=%v result_poll=%v",
+		cfg.IPRescoringEnabled, cfg.IPRescoringBase, cfg.IPRescoringDeepCheckEnabled,
+		cfg.IPRescoringDeepCheckTimeout, cfg.IPRescoringDeepCheckResultPoll)
+	log.Printf("Evidence device thresholds: safe<=%d, grace<=%d, suspicious>%d",
+		cfg.EvidenceSafeDeviceCount, cfg.EvidenceDeviceGraceCount, cfg.EvidenceDeviceGraceCount)
 	if cfg.UnknownProvidersLogEnabled {
 		log.Printf("Unknown providers logging enabled")
 	}

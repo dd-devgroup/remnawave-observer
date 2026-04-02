@@ -257,6 +257,7 @@ func TestIntegration_ScoringWarn_QueuesAlert(t *testing.T) {
 				{Name: "geo", Score: 70, Weight: 0.55, Confidence: 0.9, Details: "countries=2"},
 			},
 		},
+		scoringTriggerContext{},
 	)
 
 	time.Sleep(50 * time.Millisecond)

@@ -58,6 +58,10 @@ type UserScoreEvent struct {
 	SourceIP       string
 	ASN            string
 	IsNewASN       bool
+	TriggerKind    string `gorm:"index"`
+	TriggerIPCount int
+	ObserveOnly    bool   `gorm:"index"`
+	DeepCheckUsed  bool
 	ScoreTotal     float64
 	ScoreAction    string
 	ScoreBreakdown string `gorm:"type:jsonb;default:'{}'"`

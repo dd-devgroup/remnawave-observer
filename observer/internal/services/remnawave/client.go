@@ -81,6 +81,28 @@ type UserEvidence struct {
 	SubscriptionRequests []SubscriptionRequestRecord
 }
 
+type UserIPSnapshotIP struct {
+	IP       string
+	LastSeen time.Time
+}
+
+type UserIPSnapshotNode struct {
+	NodeUUID    string
+	NodeName    string
+	CountryCode string
+	IPs         []UserIPSnapshotIP
+}
+
+type UserIPSnapshotResult struct {
+	Status     string
+	Message    string
+	UserUUID   string
+	UserID     string
+	Nodes      []UserIPSnapshotNode
+	IsComplete bool
+	IsFailed   bool
+}
+
 // IPObservation is a normalized user/IP observation from panel ingest.
 type IPObservation struct {
 	NodeUUID       string
@@ -423,6 +445,66 @@ func (c *Client) GetFetchUsersIPsResult(ctx context.Context, jobID, nodeUUID str
 	return result, nil
 }
 
+func (c *Client) SubmitFetchUserIPs(ctx context.Context, userUUID string) (string, error) {
+	_, data, err := c.doJSON(ctx, http.MethodPost, fmt.Sprintf("/api/ip-control/fetch-ips/%s", url.PathEscape(strings.TrimSpace(userUUID))), nil)
+	if err != nil {
+		return "", err
+	}
+	root, err := decodeJSONAny(data)
+	if err != nil {
+		return "", err
+	}
+	jobID := extractStringByKeysRecursive(root, "jobId", "jobID", "id", "uuid")
+	if strings.TrimSpace(jobID) == "" {
+		return "", fmt.Errorf("fetch-ips submit: empty job ID")
+	}
+	return jobID, nil
+}
+
+func (c *Client) GetFetchUserIPsResult(ctx context.Context, jobID string) (*UserIPSnapshotResult, error) {
+	_, data, err := c.doJSON(ctx, http.MethodGet, fmt.Sprintf("/api/ip-control/fetch-ips/result/%s", url.PathEscape(strings.TrimSpace(jobID))), nil)
+	if err != nil {
+		return nil, err
+	}
+	root, err := decodeJSONAny(data)
+	if err != nil {
+		return nil, err
+	}
+	payload := extractResponsePayload(root)
+	result := &UserIPSnapshotResult{
+		Status: strings.ToLower(strings.TrimSpace(extractStringByKeysRecursive(payload, "status", "state", "jobStatus"))),
+		Message: strings.TrimSpace(extractStringByKeysRecursive(payload, "message", "reason", "error")),
+	}
+	if payloadMap, ok := payload.(map[string]any); ok {
+		result.IsComplete = boolValue(mapLookup(payloadMap, "isCompleted"))
+		result.IsFailed = boolValue(mapLookup(payloadMap, "isFailed"))
+		switch {
+		case result.IsFailed:
+			result.Status = "failed"
+		case result.IsComplete:
+			result.Status = "completed"
+		case result.Status == "":
+			result.Status = "pending"
+		}
+		if parsed := parseUserIPSnapshotResult(mapLookup(payloadMap, "result")); parsed != nil {
+			result.UserUUID = parsed.UserUUID
+			result.UserID = parsed.UserID
+			result.Nodes = parsed.Nodes
+			if !parsed.Success && result.Status == "" {
+				result.Status = "failed"
+			}
+		}
+	}
+	if result.Status == "" {
+		if len(result.Nodes) > 0 {
+			result.Status = "completed"
+		} else {
+			result.Status = "pending"
+		}
+	}
+	return result, nil
+}
+
 // ExecuteTemporaryIPBlock applies a temporary IP block on selected nodes.
 func (c *Client) ExecuteTemporaryIPBlock(ctx context.Context, nodeUUIDs []string, ips []string, duration time.Duration) error {
 	nodeUUIDs = dedupeStrings(nodeUUIDs)
@@ -490,6 +572,40 @@ func (c *Client) GetUserEvidenceByInternalID(ctx context.Context, internalID int
 		HwidDevices:          devices,
 		SubscriptionRequests: requests,
 	}, nil
+}
+
+func (c *Client) GetUserIPSnapshotByInternalID(ctx context.Context, internalID int64, timeout, pollInterval time.Duration) (*UserIPSnapshotResult, error) {
+	user, err := c.GetUserByInternalID(ctx, internalID)
+	if err != nil {
+		return nil, err
+	}
+	jobID, err := c.SubmitFetchUserIPs(ctx, user.UUID)
+	if err != nil {
+		return nil, err
+	}
+	if pollInterval <= 0 {
+		pollInterval = 2 * time.Second
+	}
+	if timeout <= 0 {
+		timeout = 10 * time.Second
+	}
+	pollCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	for {
+		result, err := c.GetFetchUserIPsResult(pollCtx, jobID)
+		if err != nil {
+			return nil, err
+		}
+		if result != nil && (result.IsComplete || result.Status == "completed" || result.IsFailed || result.Status == "failed") {
+			return result, nil
+		}
+		select {
+		case <-pollCtx.Done():
+			return nil, pollCtx.Err()
+		case <-time.After(pollInterval):
+		}
+	}
 }
 
 func (c *Client) getCachedUserInfo(ctx context.Context, internalID int64) (*UserInfo, bool) {
@@ -715,6 +831,59 @@ func parseSubscriptionRequestHistory(data []byte) ([]SubscriptionRequestRecord, 
 		})
 	}
 	return records, nil
+}
+
+type parsedUserIPSnapshot struct {
+	Success  bool
+	UserUUID string
+	UserID   string
+	Nodes    []UserIPSnapshotNode
+}
+
+func parseUserIPSnapshotResult(value any) *parsedUserIPSnapshot {
+	resultMap, ok := value.(map[string]any)
+	if !ok {
+		return nil
+	}
+	parsed := &parsedUserIPSnapshot{
+		Success:  boolValue(mapLookup(resultMap, "success")),
+		UserUUID: strings.TrimSpace(stringify(mapLookup(resultMap, "userUuid"))),
+		UserID:   strings.TrimSpace(stringify(mapLookup(resultMap, "userId"))),
+	}
+	nodesRaw, ok := mapLookup(resultMap, "nodes").([]any)
+	if !ok {
+		return parsed
+	}
+	parsed.Nodes = make([]UserIPSnapshotNode, 0, len(nodesRaw))
+	for _, nodeItem := range nodesRaw {
+		nodeMap, ok := nodeItem.(map[string]any)
+		if !ok {
+			continue
+		}
+		node := UserIPSnapshotNode{
+			NodeUUID:    strings.TrimSpace(stringify(mapLookup(nodeMap, "nodeUuid"))),
+			NodeName:    strings.TrimSpace(stringify(mapLookup(nodeMap, "nodeName"))),
+			CountryCode: strings.TrimSpace(stringify(mapLookup(nodeMap, "countryCode"))),
+		}
+		ipsRaw, _ := mapLookup(nodeMap, "ips").([]any)
+		node.IPs = make([]UserIPSnapshotIP, 0, len(ipsRaw))
+		for _, ipItem := range ipsRaw {
+			ipMap, ok := ipItem.(map[string]any)
+			if !ok {
+				continue
+			}
+			ip := strings.TrimSpace(stringify(mapLookup(ipMap, "ip")))
+			if ip == "" {
+				continue
+			}
+			node.IPs = append(node.IPs, UserIPSnapshotIP{
+				IP:       ip,
+				LastSeen: timeValue(mapLookup(ipMap, "lastSeen")),
+			})
+		}
+		parsed.Nodes = append(parsed.Nodes, node)
+	}
+	return parsed
 }
 
 func collectFetchUsersIPsResultObservations(result any, nodeUUID string) []IPObservation {

@@ -159,11 +159,22 @@ func (m *PoolMonitor) buildUserStatsByASN(ctx context.Context, email string) (*m
 	// Fetch latest score event for this user
 	var latestScore *float64
 	var latestScoreAction string
+	var latestObserveOnlyScore *float64
+	var latestObserveOnlyScoreAction string
+	var latestObserveOnlyTrigger string
+	var latestObserveOnlyDeepCheck bool
 	if m.repo != nil {
-		scoreEvent, _ := m.repo.GetLatestScoreEvent(ctx, email)
+		scoreEvent, _ := m.repo.GetLatestScoreEventByObserveOnly(ctx, email, false)
 		if scoreEvent != nil {
 			latestScore = &scoreEvent.ScoreTotal
 			latestScoreAction = scoreEvent.ScoreAction
+		}
+		observeOnlyEvent, _ := m.repo.GetLatestScoreEventByObserveOnly(ctx, email, true)
+		if observeOnlyEvent != nil {
+			latestObserveOnlyScore = &observeOnlyEvent.ScoreTotal
+			latestObserveOnlyScoreAction = observeOnlyEvent.ScoreAction
+			latestObserveOnlyTrigger = observeOnlyEvent.TriggerKind
+			latestObserveOnlyDeepCheck = observeOnlyEvent.DeepCheckUsed
 		}
 	}
 	status := deriveMonitorStatus(latestScoreAction)
@@ -181,6 +192,10 @@ func (m *PoolMonitor) buildUserStatsByASN(ctx context.Context, email string) (*m
 		IsDebug:           m.cfg.DebugEmail != "" && email == m.cfg.DebugEmail,
 		LatestScore:       latestScore,
 		LatestScoreAction: latestScoreAction,
+		LatestObserveOnlyScore:       latestObserveOnlyScore,
+		LatestObserveOnlyScoreAction: latestObserveOnlyScoreAction,
+		LatestObserveOnlyTrigger:     latestObserveOnlyTrigger,
+		LatestObserveOnlyDeepCheck:   latestObserveOnlyDeepCheck,
 		ASNDetails:        activeASNs,
 	}, nil
 }
@@ -388,6 +403,10 @@ func (m *PoolMonitor) printTopUsers(ctx context.Context, buf *strings.Builder, s
 		if user.LatestScore != nil {
 			buf.WriteString(fmt.Sprintf("       Score: %.1f [%s]\n", *user.LatestScore, user.LatestScoreAction))
 		}
+		if user.LatestObserveOnlyScore != nil {
+			buf.WriteString(fmt.Sprintf("       Observe-only: %.1f [%s] trigger=%s deep_check=%v\n",
+				*user.LatestObserveOnlyScore, user.LatestObserveOnlyScoreAction, user.LatestObserveOnlyTrigger, user.LatestObserveOnlyDeepCheck))
+		}
 		buf.WriteString(fmt.Sprintf("       ASNs: %s\n", strings.Join(user.IPsWithTTL, ", ")))
 		var geoSummary *geoSummary
 		var geoByIP map[string]*geoip.GeoLocation
@@ -431,6 +450,10 @@ func (m *PoolMonitor) printUsersWithBlockingActions(ctx context.Context, buf *st
 			buf.WriteString(fmt.Sprintf("     Providers: %d | TTL: %.1f-%.1fh\n", user.IPCount, user.MinTTLHours, user.MaxTTLHours))
 			if user.LatestScore != nil {
 				buf.WriteString(fmt.Sprintf("     Score: %.1f [%s]\n", *user.LatestScore, user.LatestScoreAction))
+			}
+			if user.LatestObserveOnlyScore != nil {
+				buf.WriteString(fmt.Sprintf("     Observe-only: %.1f [%s] trigger=%s deep_check=%v\n",
+					*user.LatestObserveOnlyScore, user.LatestObserveOnlyScoreAction, user.LatestObserveOnlyTrigger, user.LatestObserveOnlyDeepCheck))
 			}
 			buf.WriteString(fmt.Sprintf("     ASNs: %s\n", strings.Join(user.IPsWithTTL, ", ")))
 			var geoSummary *geoSummary
