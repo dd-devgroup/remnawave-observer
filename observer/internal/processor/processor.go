@@ -1408,7 +1408,11 @@ func (p *LogProcessor) applyRemnawaveEvidence(ctx context.Context, userIdentifie
 		return
 	}
 
-	summary := summarizeUserEvidence(evidence, currentSourceIP)
+	activityWindow := 30 * 24 * time.Hour
+	if p.cfg != nil && p.cfg.EvidenceDeviceActivityWindow > 0 {
+		activityWindow = p.cfg.EvidenceDeviceActivityWindow
+	}
+	summary := summarizeUserEvidence(evidence, currentSourceIP, time.Now().UTC(), activityWindow)
 	if !summary.hasSignals() {
 		return
 	}
@@ -1416,37 +1420,38 @@ func (p *LogProcessor) applyRemnawaveEvidence(ctx context.Context, userIdentifie
 	violationScore.Features = append(violationScore.Features,
 		scoring.FeatureResult{
 			Name:       "hwid_evidence",
-			Score:      evidenceDeviceScore(summary.hwidCount, summary.hwidAgentCount),
+			Score:      evidenceDeviceScore(summary.activeHwidCount, summary.activeHwidAgentCount),
 			Weight:     0,
 			Confidence: 0.9,
-			Details:    fmt.Sprintf("devices=%d,agents=%d", summary.hwidCount, summary.hwidAgentCount),
+			Details:    fmt.Sprintf("devices=%d,agents=%d,total_devices=%d,total_agents=%d", summary.activeHwidCount, summary.activeHwidAgentCount, summary.hwidCount, summary.hwidAgentCount),
 		},
 		scoring.FeatureResult{
 			Name:       "srh_evidence",
-			Score:      evidenceSRHScore(summary.requestIPCount, summary.requestAgentCount),
+			Score:      evidenceSRHScore(summary.recentRequestIPCount, summary.recentRequestAgentCount),
 			Weight:     0,
 			Confidence: 0.9,
-			Details:    fmt.Sprintf("records=%d,ips=%d,agents=%d,current_ip_match=%t", summary.requestCount, summary.requestIPCount, summary.requestAgentCount, summary.currentIPSeenInSRH),
+			Details:    fmt.Sprintf("records=%d,ips=%d,agents=%d,total_records=%d,total_ips=%d,total_agents=%d,current_ip_match=%t", summary.recentRequestCount, summary.recentRequestIPCount, summary.recentRequestAgentCount, summary.requestCount, summary.requestIPCount, summary.requestAgentCount, summary.currentIPSeenInSRH),
 		},
 	)
 
 	originalScore := violationScore.FinalScore
 	safeDevices := 3
-	graceDevices := 5
 	if p.cfg != nil {
 		safeDevices = p.cfg.EvidenceSafeDeviceCount
-		graceDevices = p.cfg.EvidenceDeviceGraceCount
 	}
 	switch {
-	case summary.hwidCount == 1 && summary.requestCount > 0 && summary.requestAgentCount <= 1 && summary.currentIPSeenInSRH:
+	case summary.activeHwidCount == 1 && summary.recentRequestCount > 0 && summary.recentRequestAgentCount <= 1 && summary.currentIPSeenInSRH:
 		violationScore.FinalScore *= 0.60
 		violationScore.Modifiers = append(violationScore.Modifiers, "hwid_srh_single_device_consistency")
-	case summary.hwidCount > 0 && summary.requestCount > 0 && summary.hwidCount <= safeDevices && summary.requestAgentCount <= 2 && summary.requestIPCount <= 2:
+	case summary.activeHwidCount > 0 && summary.recentRequestCount > 0 && summary.activeHwidCount <= safeDevices && summary.recentRequestAgentCount <= 2 && summary.recentRequestIPCount <= 2:
 		violationScore.FinalScore *= 0.80
 		violationScore.Modifiers = append(violationScore.Modifiers, "hwid_srh_low_device_diversity")
-	case summary.hwidCount > graceDevices:
-		violationScore.FinalScore = math.Min(100, violationScore.FinalScore+float64((summary.hwidCount-graceDevices)*8))
-		violationScore.Modifiers = append(violationScore.Modifiers, "hwid_device_excess")
+	case summary.activeHwidCount == 0 && summary.recentRequestCount > 0 && summary.currentIPSeenInSRH && summary.recentRequestAgentCount <= 2 && summary.recentRequestIPCount <= 2:
+		violationScore.FinalScore *= 0.85
+		violationScore.Modifiers = append(violationScore.Modifiers, "srh_fallback_consistency")
+	case summary.activeHwidCount == 0 && summary.recentRequestCount > 0 && summary.currentIPSeenInSRH:
+		violationScore.FinalScore *= 0.90
+		violationScore.Modifiers = append(violationScore.Modifiers, "srh_fallback_current_ip_match")
 	default:
 		return
 	}
@@ -1458,53 +1463,103 @@ func (p *LogProcessor) applyRemnawaveEvidence(ctx context.Context, userIdentifie
 }
 
 type userEvidenceSummary struct {
-	hwidCount          int
-	hwidAgentCount     int
-	requestCount       int
-	requestIPCount     int
-	requestAgentCount  int
-	currentIPSeenInSRH bool
+	hwidCount              int
+	hwidAgentCount         int
+	activeHwidCount        int
+	activeHwidAgentCount   int
+	requestCount           int
+	requestIPCount         int
+	requestAgentCount      int
+	recentRequestCount     int
+	recentRequestIPCount   int
+	recentRequestAgentCount int
+	currentIPSeenInSRH     bool
 }
 
 func (s userEvidenceSummary) hasSignals() bool {
-	return s.hwidCount > 0 || s.requestCount > 0
+	return s.activeHwidCount > 0 || s.recentRequestCount > 0
 }
 
-func summarizeUserEvidence(evidence *remnawave.UserEvidence, currentSourceIP string) userEvidenceSummary {
+func summarizeUserEvidence(evidence *remnawave.UserEvidence, currentSourceIP string, now time.Time, activityWindow time.Duration) userEvidenceSummary {
 	var summary userEvidenceSummary
 	hwidSet := make(map[string]struct{})
 	hwidAgentSet := make(map[string]struct{})
+	activeHwidSet := make(map[string]struct{})
+	activeHwidAgentSet := make(map[string]struct{})
 	requestIPSet := make(map[string]struct{})
 	requestAgentSet := make(map[string]struct{})
+	recentRequestIPSet := make(map[string]struct{})
+	recentRequestAgentSet := make(map[string]struct{})
 	currentSourceIP = strings.TrimSpace(currentSourceIP)
 
 	for _, device := range evidence.HwidDevices {
-		if hwid := strings.TrimSpace(device.HWID); hwid != "" {
+		hwid := strings.TrimSpace(device.HWID)
+		agent := normalizeUserAgent(device.UserAgent)
+		if hwid != "" {
 			hwidSet[hwid] = struct{}{}
 		}
-		if agent := normalizeUserAgent(device.UserAgent); agent != "" {
+		if agent != "" {
 			hwidAgentSet[agent] = struct{}{}
+		}
+		if !isEvidenceTimestampFresh(device.UpdatedAt, device.CreatedAt, now, activityWindow) {
+			continue
+		}
+		if hwid != "" {
+			activeHwidSet[hwid] = struct{}{}
+		}
+		if agent != "" {
+			activeHwidAgentSet[agent] = struct{}{}
 		}
 	}
 
 	for _, record := range evidence.SubscriptionRequests {
 		summary.requestCount++
-		if ip := strings.TrimSpace(record.RequestIP); ip != "" && !iputil.IsUnspecified(ip) {
+		ip := strings.TrimSpace(record.RequestIP)
+		agent := normalizeUserAgent(record.UserAgent)
+		if ip != "" && !iputil.IsUnspecified(ip) {
 			requestIPSet[ip] = struct{}{}
 			if currentSourceIP != "" && ip == currentSourceIP {
 				summary.currentIPSeenInSRH = true
 			}
 		}
-		if agent := normalizeUserAgent(record.UserAgent); agent != "" {
+		if agent != "" {
 			requestAgentSet[agent] = struct{}{}
+		}
+		if !isEvidenceTimestampFresh(record.RequestAt, time.Time{}, now, activityWindow) {
+			continue
+		}
+		summary.recentRequestCount++
+		if ip != "" && !iputil.IsUnspecified(ip) {
+			recentRequestIPSet[ip] = struct{}{}
+		}
+		if agent != "" {
+			recentRequestAgentSet[agent] = struct{}{}
 		}
 	}
 
 	summary.hwidCount = len(hwidSet)
 	summary.hwidAgentCount = len(hwidAgentSet)
+	summary.activeHwidCount = len(activeHwidSet)
+	summary.activeHwidAgentCount = len(activeHwidAgentSet)
 	summary.requestIPCount = len(requestIPSet)
 	summary.requestAgentCount = len(requestAgentSet)
+	summary.recentRequestIPCount = len(recentRequestIPSet)
+	summary.recentRequestAgentCount = len(recentRequestAgentSet)
 	return summary
+}
+
+func isEvidenceTimestampFresh(primary, fallback, now time.Time, window time.Duration) bool {
+	if window <= 0 {
+		return true
+	}
+	ts := primary
+	if ts.IsZero() {
+		ts = fallback
+	}
+	if ts.IsZero() {
+		return false
+	}
+	return now.Sub(ts.UTC()) <= window
 }
 
 func normalizeUserAgent(value string) string {

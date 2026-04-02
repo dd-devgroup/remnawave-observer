@@ -64,6 +64,7 @@ type Config struct {
 	IPRescoringDeepCheckResultPoll time.Duration
 	EvidenceSafeDeviceCount        int
 	EvidenceDeviceGraceCount       int
+	EvidenceDeviceActivityWindow   time.Duration
 
 	// --- ПАРАМЕТРЫ АВТООБУЧЕНИЯ ---
 	UnknownProvidersLogEnabled bool // Включить логирование неизвестных провайдеров (default: false)
@@ -217,6 +218,7 @@ func New() *Config {
 		IPRescoringDeepCheckResultPoll:   time.Duration(getEnvInt("IP_RESCORING_DEEP_CHECK_RESULT_POLL_SECONDS", 2)) * time.Second,
 		EvidenceSafeDeviceCount:          getEnvInt("EVIDENCE_SAFE_DEVICE_COUNT", 3),
 		EvidenceDeviceGraceCount:         getEnvInt("EVIDENCE_DEVICE_GRACE_COUNT", 5),
+		EvidenceDeviceActivityWindow:     time.Duration(getEnvInt("EVIDENCE_DEVICE_ACTIVITY_WINDOW_DAYS", 30)) * 24 * time.Hour,
 
 		// --- Загрузка параметров автообучения ---
 		UnknownProvidersLogEnabled:    getEnvBool("UNKNOWN_PROVIDERS_LOG_ENABLED", false),
@@ -293,6 +295,9 @@ func New() *Config {
 	if cfg.EvidenceDeviceGraceCount < cfg.EvidenceSafeDeviceCount {
 		cfg.EvidenceDeviceGraceCount = cfg.EvidenceSafeDeviceCount + 2
 	}
+	if cfg.EvidenceDeviceActivityWindow < 24*time.Hour {
+		cfg.EvidenceDeviceActivityWindow = 30 * 24 * time.Hour
+	}
 	if remnawaveHeaderInvalid {
 		log.Printf("Warning: REMNAWAVE_HEADER must be in KEY=VALUE format; ignored")
 	}
@@ -333,8 +338,8 @@ func New() *Config {
 	log.Printf("IP rescoring: enabled=%v base=%d deep_check=%v timeout=%v result_poll=%v",
 		cfg.IPRescoringEnabled, cfg.IPRescoringBase, cfg.IPRescoringDeepCheckEnabled,
 		cfg.IPRescoringDeepCheckTimeout, cfg.IPRescoringDeepCheckResultPoll)
-	log.Printf("Evidence device thresholds: safe<=%d, grace<=%d, suspicious>%d",
-		cfg.EvidenceSafeDeviceCount, cfg.EvidenceDeviceGraceCount, cfg.EvidenceDeviceGraceCount)
+	log.Printf("Evidence device thresholds: safe<=%d, grace<=%d, suspicious>%d, activity_window=%v",
+		cfg.EvidenceSafeDeviceCount, cfg.EvidenceDeviceGraceCount, cfg.EvidenceDeviceGraceCount, cfg.EvidenceDeviceActivityWindow)
 	if cfg.UnknownProvidersLogEnabled {
 		log.Printf("Unknown providers logging enabled")
 	}
